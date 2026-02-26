@@ -168,6 +168,28 @@ rift/
 | message | TEXT | |
 | source | TEXT | build, runtime |
 
+### audit_log
+| Column | Type | Notes |
+|--------|------|-------|
+| id | BIGSERIAL | PK |
+| timestamp | TIMESTAMPTZ | default now() |
+| user_id | UUID | nullable (not all events have a user) |
+| event | TEXT | e.g. user.login, deployment.start |
+| resource_id | UUID | nullable, the affected resource |
+| ip_address | INET | request source IP |
+| user_agent | TEXT | |
+| metadata | JSONB | event-specific data |
+
+### refresh_tokens
+| Column | Type | Notes |
+|--------|------|-------|
+| id | UUID | PK |
+| user_id | UUID | FK -> users |
+| token_hash | TEXT | SHA-256 of refresh token |
+| expires_at | TIMESTAMPTZ | |
+| created_at | TIMESTAMPTZ | |
+| revoked | BOOLEAN | default false |
+
 ---
 
 ## Architecture
@@ -317,6 +339,243 @@ shadcn/ui         SWR or TanStack Query
 
 ---
 
+## Security Architecture
+
+Rift runs **arbitrary user code** — builds execute `npm install` (which runs lifecycle scripts) and deployments serve live traffic. Every layer must assume hostile input.
+
+### Threat Model
+
+| Threat | Vector | Impact |
+|--------|--------|--------|
+| Deployment escapes sandbox | Deno process reads host filesystem, reaches DB, or contacts other deployments | Full host compromise |
+| Malicious build script | `postinstall` in npm package exfiltrates secrets or installs backdoor | Data theft, persistent access |
+| SSRF from deployed function | Function calls `http://localhost:3001/api/...` or cloud metadata endpoint | API bypass, credential theft |
+| Credential stuffing | Brute-force login endpoint | Account takeover |
+| Secret exfiltration | Deployment logs env vars or sends them to external server | Leaked secrets |
+| Deployment resource abuse | Fork bomb, memory exhaustion, disk fill | Denial of service to all tenants |
+| Supply chain via webhook | Spoofed GitHub webhook triggers malicious build | Arbitrary code execution |
+| SQL injection | Malformed input in API parameters | Data breach |
+
+### 1. Runtime Isolation (Deno Processes)
+
+**Sandboxed permissions** — each Deno subprocess runs with the minimum permission set:
+
+```
+deno run \
+  --allow-net=0.0.0.0:{assigned_port} \  # ONLY listen on assigned port, no outbound by default
+  --allow-read={bundle_dir} \             # ONLY the deployment's own bundle
+  --allow-env \                           # Injected env vars only (filtered)
+  --no-prompt \                           # Never prompt for permissions
+  --no-remote \                           # No remote module imports at runtime
+  _entry.ts
+```
+
+**Outbound network policy**: Deployments need outbound access (APIs, databases). Two-tier approach:
+- MVP: `--allow-net` (allow all network) but block internal ranges via iptables/nftables rules on the host
+- Post-MVP: per-project allowlists configured in dashboard
+
+**Linux namespace isolation** (beyond Deno flags):
+- **PID namespace**: process cannot see or signal other processes on host
+- **Network namespace**: process gets its own network stack; veth pair routes only its assigned port
+- **Mount namespace**: read-only root, tmpfs for `/tmp`, bundle dir bind-mounted read-only
+- **User namespace**: map to unprivileged UID (e.g., `uid 65534`/`nobody`)
+
+Implementation: use `unshare(2)` / `clone(2)` syscalls in Rust before `exec`-ing Deno, or wrap with a minimal `clone` shim. No full container runtime needed.
+
+**Seccomp filter**: apply a BPF profile that blocks dangerous syscalls:
+- `ptrace`, `mount`, `umount`, `reboot`, `kexec_load`, `pivot_root`
+- `clone` with `CLONE_NEWUSER` (prevent further namespace creation)
+- `socket` restricted to `AF_INET`/`AF_INET6` (no Unix domain sockets to host)
+
+### 2. Resource Limits
+
+Every Deno process gets hard limits enforced via **cgroups v2**:
+
+| Resource | Default Limit | Configurable |
+|----------|--------------|--------------|
+| Memory | 512 MB | Per-project |
+| CPU | 1 core (cpu.max) | Per-project |
+| PIDs | 64 | No |
+| Open files | 256 (ulimit -n) | No |
+| Disk write | tmpfs only, 100 MB max | Per-project |
+| Process lifetime | 30 min max (killed if exceeded) | Per-project |
+
+Cgroup setup: create a cgroup per deployment under `/sys/fs/cgroup/rift/deployments/{deploy_id}/`, write limits, move the Deno PID into it.
+
+### 3. Build Pipeline Isolation
+
+Builds are **more dangerous** than runtime — `npm install` runs arbitrary scripts with full Node.js access.
+
+**Build sandbox**:
+- Each build runs in a **throwaway Linux namespace** (same approach as runtime but more restrictive)
+- Dedicated build user (`uid 10000+`) with no access to engine data or other builds
+- Filesystem: overlay mount with read-only base + writable upper layer, discarded after build
+- Network: allow outbound HTTPS (npm registry, git) but block internal ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.169.254/32`, `127.0.0.0/8`)
+- Timeout: hard kill after configurable limit (default: 10 minutes)
+- Resource limits: 2 GB memory, 2 cores, 1 GB disk
+
+**Build output validation**:
+- Maximum bundle size enforced (default 500 MB)
+- No symlinks allowed outside bundle directory
+- No setuid/setgid binaries
+- No executable files except the entry point
+
+### 4. Network Security
+
+**Internal service protection**:
+- API server (port 3001) binds to `127.0.0.1` only — not accessible from deployment network namespaces
+- PostgreSQL listens on `127.0.0.1` or Unix socket only
+- iptables rules on host:
+  ```
+  # Block deployments from reaching host services
+  -A OUTPUT -m owner --uid-owner rift-sandbox -d 127.0.0.0/8 -j DROP
+  -A OUTPUT -m owner --uid-owner rift-sandbox -d 169.254.169.254 -j DROP  # cloud metadata
+  -A OUTPUT -m owner --uid-owner rift-sandbox -d 10.0.0.0/8 -j DROP       # private ranges
+  -A OUTPUT -m owner --uid-owner rift-sandbox -d 172.16.0.0/12 -j DROP
+  -A OUTPUT -m owner --uid-owner rift-sandbox -d 192.168.0.0/16 -j DROP
+  ```
+
+**Reverse proxy hardening**:
+- Request size limit: 10 MB default (configurable per project)
+- Header count limit: 100
+- Request timeout: 30s (configurable)
+- No hop-by-hop header forwarding
+- Strip `X-Forwarded-*` headers from client, set them authoritatively
+- Rate limit per source IP: 100 req/s default
+
+**TLS**:
+- All external traffic over TLS 1.2+ (rustls, no OpenSSL)
+- Auto-SSL via ACME (Let's Encrypt) with DNS-01 or HTTP-01 challenge
+- Certificate private keys stored encrypted at rest
+
+### 5. Authentication & Authorization
+
+**Password security**:
+- Argon2id with tuned parameters: memory 64 MB, iterations 3, parallelism 4
+- Minimum password length: 12 characters
+- Breached password check against HaveIBeenPwned k-anonymity API (optional, configurable)
+
+**JWT hardening**:
+- Algorithm: EdDSA (Ed25519) — not HS256 (symmetric = any service with the key can forge tokens)
+- Short expiry: 15 minutes access token + 7 day refresh token (httpOnly cookie)
+- Token includes: `sub` (user ID), `iat`, `exp`, `jti` (unique ID for revocation)
+- Refresh token rotation: old refresh token invalidated on use
+- Store refresh token hash in DB for server-side revocation
+
+**Brute-force protection**:
+- Rate limit login: 5 attempts per email per 15 minutes
+- Rate limit register: 3 per IP per hour
+- Constant-time password comparison (argon2 handles this)
+- Generic error messages ("invalid email or password", never reveal which)
+
+**API authorization**:
+- Every resource query scoped to `WHERE user_id = $1` — no admin override in MVP
+- UUIDs as IDs (not sequential integers) to prevent enumeration
+
+### 6. Secrets Management
+
+**Encryption**:
+- AES-256-GCM with random 96-bit nonce per value (already in plan)
+- Encryption key: derived from a master key via HKDF with per-project salt
+- Master key: loaded from env var `RIFT_MASTER_KEY` (never stored in DB)
+- If master key is lost, all encrypted env vars are irrecoverable (documented)
+
+**Secret handling rules**:
+- Env var values never appear in API responses (masked as `••••••`)
+- Env var values never written to build logs (stdout/stderr filtered for known patterns)
+- Env vars injected into Deno process environment, not written to disk
+- Decrypted values held in memory only, zeroed after process spawn (`zeroize` crate)
+- Build logs scrubbed: scan for values matching known env var values before storage
+
+### 7. Webhook Security
+
+- HMAC-SHA256 verification on every incoming webhook (already in plan)
+- Per-project unique webhook secret (generated via `rand::OsRng`, 32 bytes, hex-encoded)
+- Reject if signature missing or invalid — return 200 (don't leak valid/invalid project IDs)
+- Verify `X-GitHub-Event` header matches expected event type
+- Ignore events from branches other than the configured branch
+- Webhook endpoint rate limit: 10 per project per minute
+
+### 8. Input Validation & SQL Safety
+
+- **All SQL via sqlx** with compile-time checked queries — parameterized by default, no string interpolation
+- **Input validation layer** (tower middleware or extractor):
+  - Project name: `^[a-z0-9-]{1,64}$`
+  - Subdomain: `^[a-z0-9-]{1,63}$`, not in reserved list (`api`, `www`, `admin`, `static`, etc.)
+  - Repo URL: must match `https://github.com/{owner}/{repo}` pattern
+  - Domain: valid FQDN, max 253 chars
+  - Env var key: `^[A-Z_][A-Z0-9_]{0,255}$`
+  - All string fields: max length enforced, no null bytes
+
+### 9. Audit Logging
+
+Security-relevant events logged to a dedicated `audit_log` table:
+
+| Event | Fields |
+|-------|--------|
+| `user.login` | user_id, ip, user_agent, success |
+| `user.login_failed` | email (hashed), ip, user_agent |
+| `user.register` | user_id, ip |
+| `project.create` | user_id, project_id |
+| `project.delete` | user_id, project_id |
+| `env_var.create` | user_id, project_id, key (not value) |
+| `env_var.update` | user_id, project_id, key (not value) |
+| `deployment.start` | project_id, deployment_id, trigger (webhook/manual) |
+| `deployment.fail` | project_id, deployment_id, reason |
+| `domain.add` | user_id, project_id, domain |
+| `webhook.invalid_signature` | project_id, ip |
+
+Add `audit_log` table to migrations. Retention: 90 days default, configurable.
+
+### 10. Docker Hardening
+
+The single Docker container that runs Rift must itself be hardened:
+
+```yaml
+# docker-compose.yml security settings
+services:
+  engine:
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE    # bind ports 80/443
+      - SYS_ADMIN           # needed for unshare/clone (namespace isolation)
+      - NET_ADMIN            # iptables rules for network isolation
+    read_only: true
+    tmpfs:
+      - /tmp:size=1G
+      - /var/rift/builds:size=5G
+    volumes:
+      - deployments:/var/rift/deployments  # named volume for deployment bundles
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+```
+
+**Filesystem layout inside container**:
+- `/var/rift/deployments/` — deployment bundles (read-only to Deno processes)
+- `/var/rift/builds/` — tmpfs, build workspace (wiped after each build)
+- `/var/rift/ssl/` — TLS certificates (read-only to engine)
+- Engine binary and Deno binary: read-only
+
+### 11. Security Implementation Phases
+
+Security is **not a phase** — it's woven into every implementation phase:
+
+| Phase | Security Tasks |
+|-------|---------------|
+| Phase 1 | Argon2id with tuned params, EdDSA JWT, rate limiting on auth, input validation, sqlx parameterized queries, audit log table |
+| Phase 2 | HMAC webhook verification, build sandbox (namespaces + cgroups + timeout), log scrubbing for secrets, webhook rate limiting |
+| Phase 3 | Deno namespace isolation, seccomp filter, resource limits (cgroups), network isolation (iptables), SSRF protection |
+| Phase 4 | CSRF protection (SameSite cookies), CSP headers, XSS prevention (React handles most), httpOnly refresh tokens |
+| Phase 5 | HKDF key derivation, zeroize secrets in memory, env var masking in API, build log scrubbing |
+| Phase 6 | Docker cap_drop/no-new-privileges, read-only filesystem, network policy, health check hardening |
+
+---
+
 ## Future / Post-MVP
 
 - [ ] Pingora reverse proxy upgrade (HTTP/2, connection pooling)
@@ -331,3 +590,10 @@ shadcn/ui         SWR or TanStack Query
 - [ ] Monorepo support (detect and build specific packages)
 - [ ] Docker-based builds as alternative to Deno (for non-JS apps)
 - [ ] Notifications (Slack, Discord, email on deploy success/failure)
+- [ ] gVisor/Firecracker microVM isolation (stronger than namespaces)
+- [ ] Per-project outbound network allowlists
+- [ ] WAF rules on reverse proxy (OWASP Core Rule Set)
+- [ ] Signed deployments (verify bundle integrity before execution)
+- [ ] Security event alerting (anomalous login patterns, repeated webhook failures)
+- [ ] Dependency vulnerability scanning during builds (npm audit integration)
+- [ ] Automatic secret rotation support
