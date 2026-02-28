@@ -53,7 +53,7 @@ impl RuntimeManager {
         let port = allocate_port()?;
         let child = match &spec.kind {
             RuntimeKind::StaticDir { dir } => spawn_shell(
-                &format!("npx serve -s -l {port} -n '{}'", dir.display()),
+                &format!("serve -s '{}' -l {port} -n", dir.display()),
                 dir,
                 &[],
             )?,

@@ -20,7 +20,7 @@ RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install -g yarn pnpm
+    && npm install -g yarn pnpm serve
 
 RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
 
