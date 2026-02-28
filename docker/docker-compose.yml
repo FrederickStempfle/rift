@@ -38,9 +38,10 @@ services:
       - NET_ADMIN
     read_only: true
     tmpfs:
-      - /tmp:size=1G,exec
+      - /tmp:size=5G,exec
       - /var/rift/builds:size=5G,exec
       - /root:size=3G
+      - /usr/local/share/.cache:size=3G
     volumes:
       - deployments:/var/rift/deployments
       - ssl:/var/rift/ssl
