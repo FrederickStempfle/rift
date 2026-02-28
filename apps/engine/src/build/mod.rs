@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::{
     db::{deployments, models::Project, users},
     error::AppError,
+    proxy::analytics_collector::AnalyticsCollector,
     runtime::{RuntimeKind, RuntimeLaunchSpec, RuntimeManager},
 };
 
@@ -23,6 +24,7 @@ use self::{
 pub struct BuildManager {
     pool: sqlx::PgPool,
     runtime_manager: RuntimeManager,
+    analytics_collector: AnalyticsCollector,
     build_root: PathBuf,
     deploy_root: PathBuf,
     concurrency: Arc<Semaphore>,
@@ -32,12 +34,14 @@ impl BuildManager {
     pub fn new(
         pool: sqlx::PgPool,
         runtime_manager: RuntimeManager,
+        analytics_collector: AnalyticsCollector,
         build_root: PathBuf,
         deploy_root: PathBuf,
     ) -> Self {
         Self {
             pool,
             runtime_manager,
+            analytics_collector,
             build_root,
             deploy_root,
             concurrency: Arc::new(Semaphore::new(1)),
@@ -242,11 +246,14 @@ impl BuildManager {
 
         let (url, port) = match self
             .runtime_manager
-            .deploy(RuntimeLaunchSpec {
-                project_id: project.id,
-                deployment_id,
-                kind: runtime_kind,
-            })
+            .deploy(
+                RuntimeLaunchSpec {
+                    project_id: project.id,
+                    deployment_id,
+                    kind: runtime_kind,
+                },
+                self.analytics_collector.clone(),
+            )
             .await
         {
             Ok(result) => result,

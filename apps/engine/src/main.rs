@@ -34,9 +34,11 @@ async fn main() -> anyhow::Result<()> {
     let password_service =
         PasswordService::new().context("failed to initialize password service")?;
     let runtime_manager = RuntimeManager::new();
+    let analytics_collector = AnalyticsCollector::new(pool.clone());
     let build_manager = BuildManager::new(
         pool.clone(),
         runtime_manager.clone(),
+        analytics_collector.clone(),
         config.build_root.clone().into(),
         config.deploy_root.clone().into(),
     );
@@ -46,8 +48,6 @@ async fn main() -> anyhow::Result<()> {
         Some(ip) => tracing::info!(ip = %ip, "resolved public IP"),
         None => tracing::warn!("could not detect public IP — DNS verification will be unavailable"),
     }
-
-    let analytics_collector = AnalyticsCollector::new(pool.clone());
 
     let state = AppState {
         pool: pool.clone(),

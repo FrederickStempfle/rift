@@ -12,7 +12,7 @@ pub struct RequestEvent {
     pub duration_ms: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AnalyticsCollector {
     tx: mpsc::UnboundedSender<RequestEvent>,
 }
