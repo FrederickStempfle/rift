@@ -492,26 +492,55 @@ impl BuildManager {
 
         let config_path = match found {
             Some(p) => p,
-            None => return Ok(()), // No config file — Next.js will use defaults
+            None => {
+                // No config file — create a minimal one with standalone output
+                let new_config = workspace_dir.join("next.config.mjs");
+                fs::write(&new_config, "export default { output: \"standalone\" };\n")
+                    .await
+                    .map_err(|e| {
+                        AppError::Internal(format!(
+                            "failed to create {}: {e}",
+                            new_config.display()
+                        ))
+                    })?;
+                insert_and_broadcast_log(
+                    &self.pool,
+                    &self.log_broadcaster,
+                    deployment_id,
+                    "info",
+                    "Created next.config.mjs with output: \"standalone\"",
+                    "build",
+                )
+                .await?;
+                return Ok(());
+            }
         };
 
         let content = fs::read_to_string(&config_path).await.map_err(|e| {
             AppError::Internal(format!("failed to read {}: {e}", config_path.display()))
         })?;
 
-        if content.contains("output") {
-            // Already has an output field — don't overwrite user's config
+        // Check if standalone output is already configured (be specific to avoid
+        // matching outputFileTracingRoot, outputFileTracing, comments, etc.)
+        if content.contains("output:") || content.contains("output =") {
             return Ok(());
         }
 
-        // Find the config object: look for `= {` pattern (e.g. `const nextConfig = {`)
-        // which indicates an object literal, not an import `{ ... }`.
+        // Find the config object and inject `output: "standalone"`.
+        // Handles common patterns:
+        //   const nextConfig = { ... }
+        //   module.exports = { ... }
+        //   export default { ... }
         let injected = if let Some(eq_pos) = content.find("= {") {
-            let brace_pos = eq_pos + 2; // position of `{`
+            let brace_pos = eq_pos + 2;
+            let (before, after) = content.split_at(brace_pos + 1);
+            format!("{before}\n  output: \"standalone\",{after}")
+        } else if let Some(def_pos) = content.find("default {") {
+            let brace_pos = def_pos + 7; // position of `{`
             let (before, after) = content.split_at(brace_pos + 1);
             format!("{before}\n  output: \"standalone\",{after}")
         } else {
-            // Fallback: couldn't find config object, skip injection
+            // Couldn't parse config format, skip injection
             return Ok(());
         };
 
