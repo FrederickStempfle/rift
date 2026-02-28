@@ -335,6 +335,7 @@ shadcn/ui         SWR or TanStack Query
 - [ ] docker-compose.yml with PostgreSQL
 - [ ] entrypoint.sh (migrations + service start)
 - [ ] CORS, rate limiting, request logging
+- [ ] Host firewall policy, kernel network hardening, basic anti-DDoS protections
 - [ ] **Verify**: `docker-compose up` -> full platform working
 
 ---
@@ -448,7 +449,120 @@ Builds are **more dangerous** than runtime — `npm install` runs arbitrary scri
 - Auto-SSL via ACME (Let's Encrypt) with DNS-01 or HTTP-01 challenge
 - Certificate private keys stored encrypted at rest
 
-### 5. Authentication & Authorization
+### 5. Host Firewall & Anti-DDoS
+
+Rift is internet-facing by default, so it needs a **default-deny host firewall** plus layered DDoS controls. Application rate limiting alone is not enough.
+
+**Host firewall policy**:
+- Default deny inbound, allow only `80/tcp`, `443/tcp`, and optional `22/tcp` for admin SSH
+- Deny direct access to engine internals (`3001`, PostgreSQL, build worker internals)
+- Allow loopback, `ESTABLISHED,RELATED`, and required ICMP/ICMPv6 for PMTU + health
+- Restrict egress from sandbox/build UIDs to required destinations only
+
+Example `nftables` shape for the host:
+
+```nft
+table inet filter {
+  chain input {
+    type filter hook input priority 0;
+    policy drop;
+
+    iif "lo" accept
+    ct state established,related accept
+
+    # Optional SSH management.
+    tcp dport 22 ct state new limit rate 15/minute accept
+
+    # Public edge.
+    tcp dport { 80, 443 } ct state new accept
+
+    # ICMP/ICMPv6 required for normal network operation.
+    ip protocol icmp accept
+    ip6 nexthdr ipv6-icmp accept
+  }
+
+  chain forward {
+    type filter hook forward priority 0;
+    policy drop;
+  }
+
+  chain output {
+    type filter hook output priority 0;
+    policy accept;
+  }
+}
+```
+
+**Volumetric DDoS stance**:
+- MVP: strongly recommend fronting Rift with a CDN / L4 proxy (e.g. Cloudflare, Fly Proxy, AWS Shield-backed LB) so TLS termination and large floods are absorbed upstream
+- If exposed directly, document that the host is only protected against **basic** SYN/connection floods, not carrier-scale volumetric attacks
+- Trust forwarded client IPs only from configured proxy CIDRs; otherwise use the direct peer IP
+
+**Kernel/network hardening**:
+
+```conf
+# /etc/sysctl.d/99-rift-network.conf
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_max_syn_backlog = 8192
+net.core.somaxconn = 4096
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+```
+
+**Connection flood controls**:
+- Per-IP concurrent connection cap at the proxy layer (default: 100 open connections/IP)
+- Per-IP new connection rate cap (default: 30/sec burst 60) before requests hit app handlers
+- Tight header/body read timeouts to limit slowloris-style attacks
+- Global in-flight request cap with fast `503`/shed behavior when the proxy is saturated
+- Optional `synproxy` / `nf_connlimit` / `hashlimit` rules for deployments that are directly exposed
+
+Example host-level guards:
+
+```nft
+table inet rift_ddos {
+  set edge_ports {
+    type inet_service
+    elements = { 80, 443 }
+  }
+
+  chain input {
+    type filter hook input priority -5;
+
+    tcp dport @edge_ports ct state new meter per_ip_conn_rate { ip saddr limit rate 30/second burst 60 packets } accept
+    tcp dport @edge_ports ct count over 100 drop
+  }
+}
+```
+
+**Application-layer DDoS controls**:
+- Request body size limit: 10 MB default, lower on auth/webhook endpoints
+- Header read timeout: 5s; body read timeout: 15s; idle keep-alive timeout: 30s
+- Per-route rate limits:
+  - `POST /api/login`: 5 attempts per email / 15 min and 20 per IP / 15 min
+  - `POST /api/register`: 3 per IP / hour
+  - Webhooks: 10 per project / minute and 60 per IP / minute
+  - Build trigger / redeploy endpoints: 5 per project / minute
+- Ban or challenge IPs that repeatedly trip auth/webhook limits (temporary denylist)
+- Queue and worker backpressure: bounded build queue, bounded websocket subscribers, bounded log buffer
+
+**Proxy hardening for abusive traffic**:
+- No request buffering beyond configured limits
+- Drop malformed HTTP early
+- Disable unlimited keep-alive reuse from abusive clients
+- Strip duplicate/conflicting forwarding headers
+- Emit `429` for rate limits and `503` for load shedding, with audit log entries
+
+**Observability for attack detection**:
+- Metrics: requests/sec, connection count, new connections/sec, rate-limit hits, 429s, 503s, SYN backlog pressure
+- Audit events for firewall drops are optional, but proxy-level denies and auth/webhook abuse should be logged
+- Alerts on sustained high 429/503 rates, elevated conntrack usage, or repeated webhook/login abuse
+
+### 6. Authentication & Authorization
 
 **Password security**:
 - Argon2id with tuned parameters: memory 64 MB, iterations 3, parallelism 4
@@ -472,7 +586,7 @@ Builds are **more dangerous** than runtime — `npm install` runs arbitrary scri
 - Every resource query scoped to `WHERE user_id = $1` — no admin override in MVP
 - UUIDs as IDs (not sequential integers) to prevent enumeration
 
-### 6. Secrets Management
+### 7. Secrets Management
 
 **Encryption**:
 - AES-256-GCM with random 96-bit nonce per value (already in plan)
@@ -487,7 +601,7 @@ Builds are **more dangerous** than runtime — `npm install` runs arbitrary scri
 - Decrypted values held in memory only, zeroed after process spawn (`zeroize` crate)
 - Build logs scrubbed: scan for values matching known env var values before storage
 
-### 7. Webhook Security
+### 8. Webhook Security
 
 - HMAC-SHA256 verification on every incoming webhook (already in plan)
 - Per-project unique webhook secret (generated via `rand::OsRng`, 32 bytes, hex-encoded)
@@ -496,7 +610,7 @@ Builds are **more dangerous** than runtime — `npm install` runs arbitrary scri
 - Ignore events from branches other than the configured branch
 - Webhook endpoint rate limit: 10 per project per minute
 
-### 8. Input Validation & SQL Safety
+### 9. Input Validation & SQL Safety
 
 - **All SQL via sqlx** with compile-time checked queries — parameterized by default, no string interpolation
 - **Input validation layer** (tower middleware or extractor):
@@ -507,7 +621,7 @@ Builds are **more dangerous** than runtime — `npm install` runs arbitrary scri
   - Env var key: `^[A-Z_][A-Z0-9_]{0,255}$`
   - All string fields: max length enforced, no null bytes
 
-### 9. Audit Logging
+### 10. Audit Logging
 
 Security-relevant events logged to a dedicated `audit_log` table:
 
@@ -527,7 +641,7 @@ Security-relevant events logged to a dedicated `audit_log` table:
 
 Add `audit_log` table to migrations. Retention: 90 days default, configurable.
 
-### 10. Docker Hardening
+### 11. Docker Hardening
 
 The single Docker container that runs Rift must itself be hardened:
 
@@ -561,7 +675,7 @@ services:
 - `/var/rift/ssl/` — TLS certificates (read-only to engine)
 - Engine binary and Deno binary: read-only
 
-### 11. Security Implementation Phases
+### 12. Security Implementation Phases
 
 Security is **not a phase** — it's woven into every implementation phase:
 
@@ -569,10 +683,10 @@ Security is **not a phase** — it's woven into every implementation phase:
 |-------|---------------|
 | Phase 1 | Argon2id with tuned params, EdDSA JWT, rate limiting on auth, input validation, sqlx parameterized queries, audit log table |
 | Phase 2 | HMAC webhook verification, build sandbox (namespaces + cgroups + timeout), log scrubbing for secrets, webhook rate limiting |
-| Phase 3 | Deno namespace isolation, seccomp filter, resource limits (cgroups), network isolation (iptables), SSRF protection |
+| Phase 3 | Deno namespace isolation, seccomp filter, resource limits (cgroups), network isolation (iptables/nftables), SSRF protection |
 | Phase 4 | CSRF protection (SameSite cookies), CSP headers, XSS prevention (React handles most), httpOnly refresh tokens |
 | Phase 5 | HKDF key derivation, zeroize secrets in memory, env var masking in API, build log scrubbing |
-| Phase 6 | Docker cap_drop/no-new-privileges, read-only filesystem, network policy, health check hardening |
+| Phase 6 | Docker cap_drop/no-new-privileges, read-only filesystem, host firewall default-deny policy, kernel hardening sysctls, connection flood controls, proxy load shedding, health check hardening |
 
 ---
 
