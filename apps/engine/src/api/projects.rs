@@ -251,10 +251,7 @@ impl ProjectResponse {
         let public_url = match domains::get_primary_domain_for_project(&state.pool, value.id).await?
         {
             Some(domain) => state.config.public_url_for_host(&domain.domain),
-            None => match &state.public_ip {
-                Some(ip) => state.config.public_url_for_host(ip),
-                None => state.config.public_url_for_host("–"),
-            },
+            None => state.config.public_url_for_subdomain(&value.subdomain),
         };
         Ok(Self {
             id: value.id,
