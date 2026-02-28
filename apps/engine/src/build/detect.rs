@@ -29,7 +29,12 @@ pub struct BuildPlan {
 
 /// Known web frameworks that produce deployable output.
 const WEB_FRAMEWORKS: &[&str] = &[
-    "next", "vite", "nuxt", "@remix-run/dev", "astro", "@sveltejs/kit",
+    "next",
+    "vite",
+    "nuxt",
+    "@remix-run/dev",
+    "astro",
+    "@sveltejs/kit",
 ];
 
 /// A workspace package that looks like a deployable web app.
@@ -94,19 +99,21 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
             });
 
     // Check if this is a monorepo with a deployable web app
-    let is_monorepo = workspace_dir.join("pnpm-workspace.yaml").exists()
-        || parsed.get("workspaces").is_some();
+    let is_monorepo =
+        workspace_dir.join("pnpm-workspace.yaml").exists() || parsed.get("workspaces").is_some();
 
     if is_monorepo {
         if let Some(app) = find_deployable_app(workspace_dir) {
-            let build_command = project.build_command.clone().unwrap_or_else(|| {
-                match package_manager {
-                    PackageManager::Pnpm => format!("pnpm --filter {} build", app.name),
-                    PackageManager::Yarn => format!("yarn workspace {} build", app.name),
-                    PackageManager::Bun => format!("bun run --filter {} build", app.name),
-                    PackageManager::Npm => format!("npm run build --workspace={}", app.name),
-                }
-            });
+            let build_command =
+                project
+                    .build_command
+                    .clone()
+                    .unwrap_or_else(|| match package_manager {
+                        PackageManager::Pnpm => format!("pnpm --filter {} build", app.name),
+                        PackageManager::Yarn => format!("yarn workspace {} build", app.name),
+                        PackageManager::Bun => format!("bun run --filter {} build", app.name),
+                        PackageManager::Npm => format!("npm run build --workspace={}", app.name),
+                    });
 
             // Run root install first, then the root build if it exists (for
             // building shared library packages the app depends on), then
@@ -114,9 +121,7 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
             let full_build_command = if project.build_command.is_some() {
                 build_command
             } else {
-                let has_root_build = scripts
-                    .and_then(|s| s.get("build"))
-                    .is_some();
+                let has_root_build = scripts.and_then(|s| s.get("build")).is_some();
                 if has_root_build {
                     let root_build = match package_manager {
                         PackageManager::Pnpm => "pnpm build".to_owned(),
@@ -169,10 +174,9 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
         })
         .ok_or_else(|| AppError::BadRequest("project repo has no build command".into()))?;
 
-    let looks_like_next = dependencies
-        .iter()
-        .chain(dev_dependencies.iter())
-        .any(|dep| *dep == "next")
+    let all_deps = dependencies.iter().chain(dev_dependencies.iter()).copied().collect::<Vec<_>>();
+
+    let looks_like_next = all_deps.iter().any(|dep| *dep == "next")
         || workspace_dir.join("next.config.js").exists()
         || workspace_dir.join("next.config.ts").exists()
         || workspace_dir.join("next.config.mjs").exists();
@@ -187,25 +191,19 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
         });
     }
 
-    let looks_like_vite = dependencies.iter().chain(dev_dependencies.iter()).any(|dep| *dep == "vite")
-        || workspace_dir.join("vite.config.ts").exists()
-        || workspace_dir.join("vite.config.js").exists()
-        || workspace_dir.join("vite.config.mts").exists();
-
-    let framework = if looks_like_vite {
-        "vite".to_owned()
-    } else {
-        project.framework.clone()
-    };
+    // Detect framework from known web framework dependencies
+    let framework = WEB_FRAMEWORKS
+        .iter()
+        .find(|&&fw| all_deps.iter().any(|dep| *dep == fw))
+        .map(|&fw| if fw == "next" { "nextjs" } else { fw }.to_owned())
+        .unwrap_or_else(|| project.framework.clone());
 
     Ok(BuildPlan {
         framework,
         package_manager,
         install_command,
         build_command,
-        output: BuildOutput::Static {
-            dir: String::new(),
-        },
+        output: BuildOutput::Static { dir: String::new() },
     })
 }
 
@@ -229,7 +227,11 @@ pub fn detect_output_dir(project: &Project, workspace_dir: &Path) -> String {
     // Scan apps/ first (preferred), then packages/, looking for web output with index.html
     for container in ["apps", "packages"] {
         for pkg_dir in list_subdirs(&workspace_dir.join(container)) {
-            let pkg_name = pkg_dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let pkg_name = pkg_dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             for output in OUTPUT_DIRS {
                 let candidate = pkg_dir.join(output);
                 if candidate.join("index.html").exists() {
@@ -241,7 +243,11 @@ pub fn detect_output_dir(project: &Project, workspace_dir: &Path) -> String {
 
     // Fallback: any output dir with index.html at any depth
     for depth1 in list_subdirs(workspace_dir) {
-        let d1_name = depth1.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let d1_name = depth1
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         for output in OUTPUT_DIRS {
             let candidate = depth1.join(output);
             if candidate.join("index.html").exists() {
@@ -249,7 +255,11 @@ pub fn detect_output_dir(project: &Project, workspace_dir: &Path) -> String {
             }
         }
         for depth2 in list_subdirs(&depth1) {
-            let d2_name = depth2.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let d2_name = depth2
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             for output in OUTPUT_DIRS {
                 let candidate = depth2.join(output);
                 if candidate.join("index.html").exists() {
