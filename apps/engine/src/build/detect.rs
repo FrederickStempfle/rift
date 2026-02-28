@@ -118,32 +118,17 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
                         PackageManager::Npm => format!("npm run build --workspace={}", app.name),
                     });
 
-            // Run root install first, then the root build if it exists (for
-            // building shared library packages the app depends on), then
-            // the app-specific build.
-            let full_build_command = if project.build_command.is_some() {
-                build_command
-            } else {
-                let has_root_build = scripts.and_then(|s| s.get("build")).is_some();
-                if has_root_build {
-                    let root_build = match package_manager {
-                        PackageManager::Pnpm => "pnpm build".to_owned(),
-                        PackageManager::Yarn => "yarn build".to_owned(),
-                        PackageManager::Bun => "bun run build".to_owned(),
-                        PackageManager::Npm => "npm run build".to_owned(),
-                    };
-                    format!("{root_build} && {build_command}")
-                } else {
-                    build_command
-                }
-            };
+            // Use the targeted filter build directly. Turbo/workspace tooling
+            // handles building dependencies automatically via the dependency
+            // graph, so running the root build is unnecessary and can fail on
+            // unrelated packages (e.g. typecheck in sibling packages).
 
             if app.is_next {
                 return Ok(BuildPlan {
                     framework: "nextjs".to_owned(),
                     package_manager,
                     install_command,
-                    build_command: full_build_command,
+                    build_command,
                     output: BuildOutput::Next,
                 });
             }
@@ -153,7 +138,7 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
                     framework: "nuxt".to_owned(),
                     package_manager,
                     install_command,
-                    build_command: full_build_command,
+                    build_command,
                     output: BuildOutput::Nuxt,
                 });
             }
@@ -162,7 +147,7 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
                 framework: app.framework.clone(),
                 package_manager,
                 install_command,
-                build_command: full_build_command,
+                build_command,
                 output: BuildOutput::Static {
                     dir: format!("{}/dist", app.rel_path),
                 },
