@@ -52,15 +52,15 @@ pub async fn list_deployments(
         projects::get_project_for_user(&state.pool, query.project_id, auth_user.user_id)
             .await?
             .ok_or_else(|| AppError::NotFound("project not found".into()))?;
-    let public_url = public_url_for_project(&state, &project).await?;
     let items =
         deployments::list_deployments_for_project(&state.pool, query.project_id, auth_user.user_id)
             .await?;
-    Ok(Json(
-        items.into_iter()
-            .map(|deployment| DeploymentResponse::from_deployment(deployment, public_url.clone()))
-            .collect(),
-    ))
+    let mut responses = Vec::with_capacity(items.len());
+    for deployment in items {
+        let public_url = public_url_for_deployment(&state, &project, &deployment).await?;
+        responses.push(DeploymentResponse::from_deployment(deployment, public_url));
+    }
+    Ok(Json(responses))
 }
 
 pub async fn create_deployment(
@@ -72,9 +72,9 @@ pub async fn create_deployment(
         projects::get_project_for_user(&state.pool, payload.project_id, auth_user.user_id)
             .await?
             .ok_or_else(|| AppError::NotFound("project not found".into()))?;
-    let public_url = public_url_for_project(&state, &project).await?;
 
-    let deployment = state.build_manager.enqueue_project_build(project).await?;
+    let deployment = state.build_manager.enqueue_project_build(project.clone()).await?;
+    let public_url = public_url_for_deployment(&state, &project, &deployment).await?;
 
     Ok((
         StatusCode::CREATED,
@@ -82,18 +82,26 @@ pub async fn create_deployment(
     ))
 }
 
-async fn public_url_for_project(
+async fn public_url_for_deployment(
     state: &AppState,
     project: &crate::db::models::Project,
-) -> Result<String, AppError> {
-    Ok(match domains::get_primary_domain_for_project(&state.pool, project.id).await? {
-        Some(domain) => state.config.public_url_for_host(&domain.domain),
-        None => state.config.public_url_for_subdomain(&project.subdomain),
-    })
+    deployment: &crate::db::models::Deployment,
+) -> Result<Option<String>, AppError> {
+    if let Some(domain) = domains::get_primary_domain_for_project(&state.pool, project.id).await? {
+        return Ok(Some(state.config.public_url_for_host(&domain.domain)));
+    }
+    // No domain — use direct IP:port from the deployment
+    match deployment.port {
+        Some(port) => {
+            let ip = state.public_ip.as_deref().unwrap_or("localhost");
+            Ok(Some(format!("http://{}:{}", ip, port)))
+        }
+        None => Ok(None),
+    }
 }
 
 impl DeploymentResponse {
-    fn from_deployment(value: crate::db::models::Deployment, public_url: String) -> Self {
+    fn from_deployment(value: crate::db::models::Deployment, public_url: Option<String>) -> Self {
         Self {
             id: value.id,
             project_id: value.project_id,
@@ -103,7 +111,7 @@ impl DeploymentResponse {
             status: value.status,
             build_duration_ms: value.build_duration_ms,
             url: value.url,
-            public_url: Some(public_url),
+            public_url,
             started_at: value.started_at,
             finished_at: value.finished_at,
             created_at: value.created_at,

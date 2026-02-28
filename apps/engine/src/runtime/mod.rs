@@ -46,25 +46,26 @@ impl RuntimeManager {
         }
     }
 
-    pub async fn deploy(&self, spec: RuntimeLaunchSpec) -> Result<String, AppError> {
+    /// Deploy a project and return `(internal_url, port)`.
+    pub async fn deploy(&self, spec: RuntimeLaunchSpec) -> Result<(String, u16), AppError> {
         self.stop_project(spec.project_id).await?;
 
         let port = allocate_port()?;
         let child = match &spec.kind {
             RuntimeKind::StaticDir { dir } => spawn_shell(
                 &format!(
-                    "python3 -m http.server {port} --bind 127.0.0.1 --directory '{}'",
+                    "python3 -m http.server {port} --bind 0.0.0.0 --directory '{}'",
                     dir.display()
                 ),
                 dir,
                 &[],
             )?,
             RuntimeKind::NextApp { dir } => spawn_shell(
-                &format!("npx next start -H 127.0.0.1 -p {port}"),
+                &format!("npx next start -H 0.0.0.0 -p {port}"),
                 dir,
                 &[
                     ("PORT", port.to_string()),
-                    ("HOSTNAME", "127.0.0.1".to_owned()),
+                    ("HOSTNAME", "0.0.0.0".to_owned()),
                     ("NODE_ENV", "production".to_owned()),
                 ],
             )?,
@@ -86,7 +87,7 @@ impl RuntimeManager {
             },
         );
 
-        Ok(format!("http://127.0.0.1:{port}"))
+        Ok((format!("http://127.0.0.1:{port}"), port))
     }
 
     pub async fn stop_project(&self, project_id: Uuid) -> Result<(), AppError> {

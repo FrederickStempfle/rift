@@ -62,6 +62,7 @@ pub struct Deployment {
     pub status: String,
     pub build_duration_ms: Option<i32>,
     pub url: Option<String>,
+    pub port: Option<i32>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,

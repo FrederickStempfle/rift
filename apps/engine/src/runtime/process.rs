@@ -1,18 +1,33 @@
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicU16, Ordering};
 
 use tokio::process::{Child, Command};
 
 use crate::error::AppError;
 
+/// Port range for deployed apps. Must match the range exposed in docker-compose.yml.
+const PORT_RANGE_START: u16 = 10000;
+const PORT_RANGE_END: u16 = 10100;
+
+static NEXT_PORT: AtomicU16 = AtomicU16::new(PORT_RANGE_START);
+
 pub fn allocate_port() -> Result<u16, AppError> {
-    let listener = TcpListener::bind(("127.0.0.1", 0))
-        .map_err(|error| AppError::Internal(format!("failed to allocate port: {error}")))?;
-    let port = listener
-        .local_addr()
-        .map_err(|error| AppError::Internal(format!("failed to read local addr: {error}")))?
-        .port();
-    drop(listener);
-    Ok(port)
+    // Try each port in the range until we find one that's free
+    for _ in 0..=(PORT_RANGE_END - PORT_RANGE_START) {
+        let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+        // Wrap around if we exceed the range
+        if port > PORT_RANGE_END {
+            NEXT_PORT.store(PORT_RANGE_START, Ordering::Relaxed);
+            continue;
+        }
+        // Check if the port is actually available
+        if TcpListener::bind(("0.0.0.0", port)).is_ok() {
+            return Ok(port);
+        }
+    }
+    Err(AppError::Internal(
+        "no available ports in deployment range".into(),
+    ))
 }
 
 pub fn spawn_shell(

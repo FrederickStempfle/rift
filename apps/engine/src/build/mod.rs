@@ -208,7 +208,7 @@ impl BuildManager {
             }
         };
 
-        let url = match self
+        let (url, port) = match self
             .runtime_manager
             .deploy(RuntimeLaunchSpec {
                 project_id: project.id,
@@ -217,7 +217,7 @@ impl BuildManager {
             })
             .await
         {
-            Ok(url) => url,
+            Ok(result) => result,
             Err(error) => {
                 deployments::insert_log(
                     &self.pool,
@@ -233,12 +233,13 @@ impl BuildManager {
             }
         };
 
-        deployments::mark_ready(&self.pool, deployment_id, &url, elapsed_ms(started_at)).await?;
+        deployments::mark_ready(&self.pool, deployment_id, &url, port, elapsed_ms(started_at))
+            .await?;
         deployments::insert_log(
             &self.pool,
             deployment_id,
             "info",
-            &format!("Deployment ready at {url}"),
+            &format!("Deployment ready on port {port}"),
             "runtime",
         )
         .await?;

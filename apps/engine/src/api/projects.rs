@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::{
     api::{auth::AuthUser, AppState},
     db::{
-        domains,
+        deployments, domains,
         projects::{self, NewProject, UpdateProject},
     },
     error::{AppError, AppResult},
@@ -248,11 +248,24 @@ impl ProjectResponse {
         state: &AppState,
         value: crate::db::models::Project,
     ) -> Result<Self, AppError> {
-        let public_url = match domains::get_primary_domain_for_project(&state.pool, value.id).await?
-        {
-            Some(domain) => state.config.public_url_for_host(&domain.domain),
-            None => state.config.public_url_for_subdomain(&value.subdomain),
-        };
+        // Use custom domain if configured, otherwise build IP:port URL from latest deployment
+        let public_url =
+            match domains::get_primary_domain_for_project(&state.pool, value.id).await? {
+                Some(domain) => state.config.public_url_for_host(&domain.domain),
+                None => {
+                    // No domain — use direct IP:port access
+                    let deployment =
+                        deployments::latest_ready_deployment_for_project(&state.pool, value.id)
+                            .await?;
+                    match deployment.and_then(|d| d.port) {
+                        Some(port) => {
+                            let ip = state.public_ip.as_deref().unwrap_or("localhost");
+                            format!("http://{}:{}", ip, port)
+                        }
+                        None => String::new(),
+                    }
+                }
+            };
         Ok(Self {
             id: value.id,
             user_id: value.user_id,

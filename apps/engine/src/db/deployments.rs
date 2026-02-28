@@ -39,6 +39,7 @@ pub async fn create_deployment(
             status::text AS status,
             build_duration_ms,
             url,
+            port,
             started_at,
             finished_at,
             created_at
@@ -93,6 +94,7 @@ pub async fn get_deployment_for_user(
             d.status::text AS status,
             d.build_duration_ms,
             d.url,
+            d.port,
             d.started_at,
             d.finished_at,
             d.created_at
@@ -124,6 +126,7 @@ pub async fn list_deployments_for_project(
             d.status::text AS status,
             d.build_duration_ms,
             d.url,
+            d.port,
             d.started_at,
             d.finished_at,
             d.created_at
@@ -165,6 +168,7 @@ pub async fn mark_ready(
     pool: &PgPool,
     deployment_id: Uuid,
     url: &str,
+    port: u16,
     build_duration_ms: i32,
 ) -> Result<(), AppError> {
     sqlx::query(
@@ -172,13 +176,15 @@ pub async fn mark_ready(
         UPDATE deployments
         SET status = 'ready',
             url = $2,
-            build_duration_ms = $3,
+            port = $3,
+            build_duration_ms = $4,
             finished_at = now()
         WHERE id = $1
         "#,
     )
     .bind(deployment_id)
     .bind(url)
+    .bind(port as i32)
     .bind(build_duration_ms)
     .execute(pool)
     .await
@@ -277,6 +283,7 @@ pub async fn latest_ready_deployment_for_project(
             status::text AS status,
             build_duration_ms,
             url,
+            port,
             started_at,
             finished_at,
             created_at
