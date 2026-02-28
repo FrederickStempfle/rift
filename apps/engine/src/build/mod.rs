@@ -388,12 +388,14 @@ impl BuildManager {
             return Ok(());
         }
 
-        // Insert `output: "standalone"` after the first `{` in the config object
-        let injected = if let Some(pos) = content.find('{') {
-            let (before, after) = content.split_at(pos + 1);
+        // Find the config object: look for `= {` pattern (e.g. `const nextConfig = {`)
+        // which indicates an object literal, not an import `{ ... }`.
+        let injected = if let Some(eq_pos) = content.find("= {") {
+            let brace_pos = eq_pos + 2; // position of `{`
+            let (before, after) = content.split_at(brace_pos + 1);
             format!("{before}\n  output: \"standalone\",{after}")
         } else {
-            // Fallback: couldn't find object literal, skip injection
+            // Fallback: couldn't find config object, skip injection
             return Ok(());
         };
 
