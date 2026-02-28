@@ -11,7 +11,7 @@ RUN cargo build --release -p rift-engine
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl bash postgresql-client iptables unzip git \
+    && apt-get install -y --no-install-recommends ca-certificates curl bash postgresql-client iptables unzip git python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
