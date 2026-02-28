@@ -88,6 +88,12 @@ async fn main() -> anyhow::Result<()> {
         cert_resolver,
     };
 
+    // Restore deployments that were running before the engine restarted
+    let restored = state.runtime_manager.restore_deployments(&state.pool, &config).await;
+    if restored > 0 {
+        tracing::info!(count = restored, "restored deployments from previous run");
+    }
+
     // Spawn certificate renewal background task
     ssl_manager.spawn_renewal_task();
 

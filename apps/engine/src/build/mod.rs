@@ -368,6 +368,31 @@ impl BuildManager {
             "runtime",
         )
         .await?;
+
+        // Clean up old deployments for this project
+        let deploy_root = self.deploy_root.clone();
+        let pool = self.pool.clone();
+        tokio::spawn(async move {
+            if let Ok(old) =
+                deployments::list_old_ready_deployments(&pool, project.id, deployment_id).await
+            {
+                for old_deployment in old {
+                    // Mark as superseded
+                    let _ =
+                        deployments::update_status(&pool, old_deployment.id, "cancelled").await;
+                    // Remove workspace directory
+                    let old_dir = deploy_root.join(old_deployment.id.to_string());
+                    if old_dir.exists() {
+                        let _ = fs::remove_dir_all(&old_dir).await;
+                        tracing::debug!(
+                            deployment_id = %old_deployment.id,
+                            "cleaned up old deployment workspace"
+                        );
+                    }
+                }
+            }
+        });
+
         Ok(())
     }
 

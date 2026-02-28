@@ -4,10 +4,11 @@ pub mod scaler;
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
+use sqlx::PgPool;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::error::AppError;
+use crate::{config::Config, db::{deployments, env_vars}, error::AppError};
 
 use self::{
     health::wait_for_port,
@@ -124,6 +125,109 @@ impl RuntimeManager {
             .get(&project_id)
             .map(|runtime| runtime.deployment_id)
     }
+
+    /// Restore deployments that were running before the engine restarted.
+    ///
+    /// Queries the DB for all `status = 'ready'` deployments (latest per project),
+    /// detects the runtime kind from the filesystem, decrypts env vars, and
+    /// re-launches the Deno processes.
+    pub async fn restore_deployments(&self, pool: &PgPool, config: &Config) -> usize {
+        let ready = match deployments::list_latest_ready_per_project(pool).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to query ready deployments for restore");
+                return 0;
+            }
+        };
+
+        if ready.is_empty() {
+            return 0;
+        }
+
+        tracing::info!(count = ready.len(), "restoring deployments from previous run");
+        let mut restored = 0;
+
+        for deployment in ready {
+            let workspace_dir = PathBuf::from(&config.deploy_root).join(deployment.id.to_string());
+            if !workspace_dir.exists() {
+                tracing::warn!(
+                    deployment_id = %deployment.id,
+                    project_id = %deployment.project_id,
+                    "workspace directory missing, skipping restore"
+                );
+                continue;
+            }
+
+            // Detect runtime kind from filesystem
+            let kind = if workspace_dir.join(".next/standalone/server.js").exists() {
+                RuntimeKind::NextDeno { dir: workspace_dir }
+            } else if let Some(entry_dir) = find_entry_ts(&workspace_dir) {
+                RuntimeKind::StaticDeno { dir: entry_dir }
+            } else {
+                tracing::warn!(
+                    deployment_id = %deployment.id,
+                    "cannot detect runtime kind, skipping restore"
+                );
+                continue;
+            };
+
+            // Decrypt env vars
+            let env_vars = env_vars::get_decrypted_env_vars(
+                pool,
+                deployment.project_id,
+                &config.master_key,
+            )
+            .await
+            .unwrap_or_default();
+
+            match self
+                .deploy(RuntimeLaunchSpec {
+                    project_id: deployment.project_id,
+                    deployment_id: deployment.id,
+                    kind,
+                    env_vars,
+                })
+                .await
+            {
+                Ok((url, port)) => {
+                    tracing::info!(
+                        deployment_id = %deployment.id,
+                        project_id = %deployment.project_id,
+                        url = %url,
+                        port = port,
+                        "restored deployment"
+                    );
+                    restored += 1;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        deployment_id = %deployment.id,
+                        project_id = %deployment.project_id,
+                        error = %e,
+                        "failed to restore deployment"
+                    );
+                }
+            }
+        }
+
+        restored
+    }
+}
+
+/// Find the directory containing `_entry.ts` for static site deployments.
+fn find_entry_ts(workspace_dir: &PathBuf) -> Option<PathBuf> {
+    // Check common build output locations
+    for subdir in ["", "dist", "build", "out", "public", ".output/public"] {
+        let dir = if subdir.is_empty() {
+            workspace_dir.clone()
+        } else {
+            workspace_dir.join(subdir)
+        };
+        if dir.join("_entry.ts").exists() {
+            return Some(dir);
+        }
+    }
+    None
 }
 
 impl Default for RuntimeManager {

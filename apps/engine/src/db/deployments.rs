@@ -342,3 +342,48 @@ pub async fn set_started_at(
 
     Ok(())
 }
+
+/// Returns the latest `ready` deployment per project (one per project).
+pub async fn list_latest_ready_per_project(
+    pool: &PgPool,
+) -> Result<Vec<Deployment>, AppError> {
+    sqlx::query_as::<_, Deployment>(
+        r#"
+        SELECT DISTINCT ON (project_id)
+            id, project_id, commit_sha, commit_message, branch,
+            status::text AS status, build_duration_ms, url, port,
+            started_at, finished_at, created_at
+        FROM deployments
+        WHERE status = 'ready'
+        ORDER BY project_id, created_at DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Db)
+}
+
+/// Returns all `ready` deployments for a project except the given one.
+pub async fn list_old_ready_deployments(
+    pool: &PgPool,
+    project_id: Uuid,
+    current_deployment_id: Uuid,
+) -> Result<Vec<Deployment>, AppError> {
+    sqlx::query_as::<_, Deployment>(
+        r#"
+        SELECT
+            id, project_id, commit_sha, commit_message, branch,
+            status::text AS status, build_duration_ms, url, port,
+            started_at, finished_at, created_at
+        FROM deployments
+        WHERE project_id = $1
+          AND status = 'ready'
+          AND id != $2
+        "#,
+    )
+    .bind(project_id)
+    .bind(current_deployment_id)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Db)
+}
