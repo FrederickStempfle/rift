@@ -62,9 +62,10 @@ async fn flush_loop(mut rx: mpsc::UnboundedReceiver<RequestEvent>, pool: PgPool)
         // Flush aggregated buckets to DB
         let entries: Vec<_> = buffer.drain().collect();
         for ((project_id, bucket), (requests, errors, total_ms)) in entries {
-            if let Err(e) =
-                crate::db::analytics::upsert_hourly(&pool, project_id, bucket, requests, errors, total_ms)
-                    .await
+            if let Err(e) = crate::db::analytics::upsert_hourly(
+                &pool, project_id, bucket, requests, errors, total_ms,
+            )
+            .await
             {
                 tracing::warn!(error = %e, "failed to flush analytics bucket");
             }

@@ -16,7 +16,10 @@ impl AcmeChallengeStore {
     }
 
     pub async fn set(&self, token: String, key_authorization: String) {
-        self.challenges.write().await.insert(token, key_authorization);
+        self.challenges
+            .write()
+            .await
+            .insert(token, key_authorization);
     }
 
     pub async fn get(&self, token: &str) -> Option<String> {

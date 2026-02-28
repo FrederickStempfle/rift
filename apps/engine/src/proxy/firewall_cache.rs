@@ -66,11 +66,7 @@ impl FirewallCache {
                 let net = r
                     .cidr
                     .parse::<IpNet>()
-                    .or_else(|_| {
-                        r.cidr
-                            .parse::<IpAddr>()
-                            .map(|ip| IpNet::from(ip))
-                    })
+                    .or_else(|_| r.cidr.parse::<IpAddr>().map(|ip| IpNet::from(ip)))
                     .ok()?;
                 Some((net, r.action))
             })

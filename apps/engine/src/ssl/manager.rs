@@ -55,9 +55,9 @@ impl SslManager {
         tracing::info!(domain = %domain, "starting SSL certificate provisioning");
 
         // Mark as provisioning
-        domains::update_ssl_provisioning(&self.pool, domain).await.map_err(|e| {
-            anyhow::anyhow!("failed to update ssl_status to provisioning: {e}")
-        })?;
+        domains::update_ssl_provisioning(&self.pool, domain)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to update ssl_status to provisioning: {e}"))?;
 
         match self.do_provision(domain, email).await {
             Ok(()) => {
@@ -151,8 +151,8 @@ impl SslManager {
         let mut params = CertificateParams::new(vec![domain.to_owned()])
             .map_err(|e| anyhow::anyhow!("failed to create cert params: {e}"))?;
         params.distinguished_name = DistinguishedName::new();
-        let private_key = KeyPair::generate()
-            .map_err(|e| anyhow::anyhow!("failed to generate key pair: {e}"))?;
+        let private_key =
+            KeyPair::generate().map_err(|e| anyhow::anyhow!("failed to generate key pair: {e}"))?;
         let signing_request = params
             .serialize_request(&private_key)
             .map_err(|e| anyhow::anyhow!("failed to serialize CSR: {e}"))?;

@@ -1,6 +1,6 @@
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
-    Aes256Gcm, AeadCore, Key,
+    AeadCore, Aes256Gcm, Key,
 };
 use axum::{
     extract::{Path, Query, State},
@@ -62,7 +62,11 @@ fn encrypt_value(master_key: &str, plaintext: &str) -> Result<(Vec<u8>, Vec<u8>)
     Ok((ciphertext, nonce.to_vec()))
 }
 
-fn decrypt_value(master_key: &str, ciphertext: &[u8], nonce_bytes: &[u8]) -> Result<String, AppError> {
+fn decrypt_value(
+    master_key: &str,
+    ciphertext: &[u8],
+    nonce_bytes: &[u8],
+) -> Result<String, AppError> {
     let key = derive_key(master_key);
     let cipher = Aes256Gcm::new(&key);
     let nonce = aes_gcm::Nonce::from_slice(nonce_bytes);
@@ -136,10 +140,11 @@ async fn list_env_vars(
     let items = vars
         .into_iter()
         .map(|v| {
-            let preview = match decrypt_value(&state.config.master_key, &v.encrypted_value, &v.nonce) {
-                Ok(plain) => mask_value(&plain),
-                Err(_) => "••••••••".to_owned(),
-            };
+            let preview =
+                match decrypt_value(&state.config.master_key, &v.encrypted_value, &v.nonce) {
+                    Ok(plain) => mask_value(&plain),
+                    Err(_) => "••••••••".to_owned(),
+                };
             EnvVarResponse {
                 id: v.id,
                 project_id: v.project_id,

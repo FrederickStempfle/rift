@@ -6,10 +6,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::{
-    db::is_unique_violation,
-    error::AppError,
-};
+use crate::{db::is_unique_violation, error::AppError};
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct EnvVar {
@@ -52,10 +49,7 @@ pub async fn create_env_var(
     })
 }
 
-pub async fn list_env_vars(
-    pool: &PgPool,
-    project_id: Uuid,
-) -> Result<Vec<EnvVar>, AppError> {
+pub async fn list_env_vars(pool: &PgPool, project_id: Uuid) -> Result<Vec<EnvVar>, AppError> {
     sqlx::query_as::<_, EnvVar>(
         r#"
         SELECT id, project_id, key, encrypted_value, nonce
@@ -70,11 +64,7 @@ pub async fn list_env_vars(
     .map_err(AppError::Db)
 }
 
-pub async fn delete_env_var(
-    pool: &PgPool,
-    id: Uuid,
-    project_id: Uuid,
-) -> Result<bool, AppError> {
+pub async fn delete_env_var(pool: &PgPool, id: Uuid, project_id: Uuid) -> Result<bool, AppError> {
     let result = sqlx::query(
         r#"
         DELETE FROM env_vars

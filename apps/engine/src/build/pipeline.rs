@@ -6,7 +6,11 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::{db::deployments, error::AppError, ws::{broadcast::DeployLogMessage, LogBroadcaster}};
+use crate::{
+    db::deployments,
+    error::AppError,
+    ws::{broadcast::DeployLogMessage, LogBroadcaster},
+};
 
 /// Insert a log into the database AND broadcast it to WebSocket subscribers.
 pub async fn insert_and_broadcast_log(
@@ -17,7 +21,8 @@ pub async fn insert_and_broadcast_log(
     message: &str,
     source: &str,
 ) -> Result<(), AppError> {
-    let log = deployments::insert_log_returning(pool, deployment_id, level, message, source).await?;
+    let log =
+        deployments::insert_log_returning(pool, deployment_id, level, message, source).await?;
     broadcaster
         .send(
             deployment_id,
@@ -54,7 +59,15 @@ pub async fn run_command_and_log_with_env(
     command: &str,
     envs: &[(String, String)],
 ) -> Result<(), AppError> {
-    insert_and_broadcast_log(pool, broadcaster, deployment_id, "info", &format!("$ {command}"), source).await?;
+    insert_and_broadcast_log(
+        pool,
+        broadcaster,
+        deployment_id,
+        "info",
+        &format!("$ {command}"),
+        source,
+    )
+    .await?;
 
     let mut cmd = Command::new("sh");
     cmd.arg("-lc")
@@ -120,7 +133,15 @@ async fn read_stream(
     if let Some(stream) = stream {
         let mut lines = BufReader::new(stream).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            let _ = insert_and_broadcast_log(&pool, &broadcaster, deployment_id, &level, &line, &source).await;
+            let _ = insert_and_broadcast_log(
+                &pool,
+                &broadcaster,
+                deployment_id,
+                &level,
+                &line,
+                &source,
+            )
+            .await;
         }
     }
 }

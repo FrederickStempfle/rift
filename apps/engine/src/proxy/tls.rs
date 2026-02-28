@@ -19,7 +19,12 @@ impl CertResolver {
         }
     }
 
-    pub async fn load_cert(&self, domain: &str, cert_pem: &[u8], key_pem: &[u8]) -> anyhow::Result<()> {
+    pub async fn load_cert(
+        &self,
+        domain: &str,
+        cert_pem: &[u8],
+        key_pem: &[u8],
+    ) -> anyhow::Result<()> {
         let certs = rustls_pemfile::certs(&mut BufReader::new(cert_pem))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("failed to parse cert PEM: {e}"))?;
@@ -32,7 +37,10 @@ impl CertResolver {
             .map_err(|e| anyhow::anyhow!("unsupported private key type: {e}"))?;
 
         let certified = Arc::new(CertifiedKey::new(certs, signing_key));
-        self.certs.write().await.insert(domain.to_lowercase(), certified);
+        self.certs
+            .write()
+            .await
+            .insert(domain.to_lowercase(), certified);
         Ok(())
     }
 

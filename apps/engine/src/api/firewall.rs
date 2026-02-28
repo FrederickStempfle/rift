@@ -74,7 +74,9 @@ async fn create_rule(
     if payload.cidr.parse::<ipnet::IpNet>().is_err()
         && payload.cidr.parse::<std::net::IpAddr>().is_err()
     {
-        return Err(AppError::BadRequest("invalid IP address or CIDR range".into()));
+        return Err(AppError::BadRequest(
+            "invalid IP address or CIDR range".into(),
+        ));
     }
 
     let rule = firewall::create_rule(

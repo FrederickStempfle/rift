@@ -15,6 +15,7 @@ pub enum PackageManager {
 #[derive(Clone, Debug)]
 pub enum BuildOutput {
     Next,
+    Nuxt,
     Static { dir: String },
 }
 
@@ -48,6 +49,8 @@ struct WorkspaceApp {
     framework: String,
     /// Whether the package has Next.js.
     is_next: bool,
+    /// Whether the package has Nuxt.
+    is_nuxt: bool,
 }
 
 pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<BuildPlan, AppError> {
@@ -145,6 +148,16 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
                 });
             }
 
+            if app.is_nuxt {
+                return Ok(BuildPlan {
+                    framework: "nuxt".to_owned(),
+                    package_manager,
+                    install_command,
+                    build_command: full_build_command,
+                    output: BuildOutput::Nuxt,
+                });
+            }
+
             return Ok(BuildPlan {
                 framework: app.framework.clone(),
                 package_manager,
@@ -188,6 +201,18 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
             install_command,
             build_command,
             output: BuildOutput::Next,
+        });
+    }
+
+    let looks_like_nuxt = all_deps.iter().any(|dep| *dep == "nuxt");
+
+    if looks_like_nuxt {
+        return Ok(BuildPlan {
+            framework: "nuxt".to_owned(),
+            package_manager,
+            install_command,
+            build_command,
+            output: BuildOutput::Nuxt,
         });
     }
 
@@ -372,6 +397,7 @@ fn find_deployable_app(workspace_dir: &Path) -> Option<WorkspaceApp> {
                         rel_path: format!("{container}/{dir_name_str}"),
                         framework: if fw == "next" { "nextjs" } else { fw }.to_owned(),
                         is_next: fw == "next",
+                        is_nuxt: fw == "nuxt",
                     },
                     container == "apps",
                     has_index_html,

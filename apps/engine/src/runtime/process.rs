@@ -104,3 +104,35 @@ pub fn spawn_deno_next(
         ))
     })
 }
+
+/// Spawn a Node.js process to run a Nuxt server (.output/server/index.mjs).
+///
+/// Nuxt's production server listens on HOST:PORT by default.
+pub fn spawn_nuxt_node(
+    dir: &std::path::Path,
+    port: u16,
+    envs: &[(String, String)],
+) -> Result<Child, AppError> {
+    let server_entry = dir.join(".output/server/index.mjs");
+    let mut cmd = Command::new("node");
+    cmd.arg(&server_entry)
+        .current_dir(dir)
+        .env("PORT", port.to_string())
+        .env("HOST", "0.0.0.0")
+        .env("NODE_ENV", "production")
+        .env("NITRO_PORT", port.to_string())
+        .env("NITRO_HOST", "0.0.0.0")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+
+    cmd.spawn().map_err(|e| {
+        AppError::Internal(format!(
+            "failed to spawn Nuxt server in {}: {e}",
+            dir.display()
+        ))
+    })
+}

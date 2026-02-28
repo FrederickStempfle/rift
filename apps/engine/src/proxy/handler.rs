@@ -2,9 +2,7 @@ use std::{convert::Infallible, net::SocketAddr};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
-use hyper::{
-    body::Incoming, header::HOST, HeaderMap, Request, Response, StatusCode, Uri,
-};
+use hyper::{body::Incoming, header::HOST, HeaderMap, Request, Response, StatusCode, Uri};
 use hyper_util::client::legacy::Client;
 use uuid::Uuid;
 

@@ -8,11 +8,15 @@ use sqlx::PgPool;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::{config::Config, db::{deployments, env_vars}, error::AppError};
+use crate::{
+    config::Config,
+    db::{deployments, env_vars},
+    error::AppError,
+};
 
 use self::{
     health::wait_for_port,
-    process::{allocate_port, spawn_deno_next, spawn_deno_static},
+    process::{allocate_port, spawn_deno_next, spawn_deno_static, spawn_nuxt_node},
 };
 
 #[derive(Clone, Debug)]
@@ -50,6 +54,8 @@ pub enum RuntimeKind {
     StaticDeno { dir: PathBuf },
     /// Next.js app: Deno runs the standalone server.js via Node compat.
     NextDeno { dir: PathBuf },
+    /// Nuxt app: Node.js runs .output/server/index.mjs.
+    NuxtNode { dir: PathBuf },
 }
 
 #[derive(Clone, Debug)]
@@ -76,19 +82,13 @@ impl RuntimeManager {
     /// Zero-downtime: the new process is started and health-checked before the
     /// old one is touched. After the atomic swap the old process gets a 5-second
     /// drain period before being killed.
-    pub async fn deploy(
-        &self,
-        spec: RuntimeLaunchSpec,
-    ) -> Result<(String, u16), AppError> {
+    pub async fn deploy(&self, spec: RuntimeLaunchSpec) -> Result<(String, u16), AppError> {
         let port = allocate_port()?;
 
         let child = match &spec.kind {
-            RuntimeKind::StaticDeno { dir } => {
-                spawn_deno_static(dir, port, &spec.env_vars)?
-            }
-            RuntimeKind::NextDeno { dir } => {
-                spawn_deno_next(dir, port, &spec.env_vars)?
-            }
+            RuntimeKind::StaticDeno { dir } => spawn_deno_static(dir, port, &spec.env_vars)?,
+            RuntimeKind::NextDeno { dir } => spawn_deno_next(dir, port, &spec.env_vars)?,
+            RuntimeKind::NuxtNode { dir } => spawn_nuxt_node(dir, port, &spec.env_vars)?,
         };
 
         if !wait_for_port("127.0.0.1", port, 40).await {
@@ -175,9 +175,7 @@ impl RuntimeManager {
     /// Wake a suspended project: re-spawn the Deno process and return the URL.
     /// Returns `None` if the project isn't suspended.
     pub async fn wake(&self, project_id: Uuid) -> Result<Option<String>, AppError> {
-        let suspended = {
-            self.inner.lock().await.suspended.remove(&project_id)
-        };
+        let suspended = { self.inner.lock().await.suspended.remove(&project_id) };
 
         let suspended = match suspended {
             Some(s) => s,
@@ -264,7 +262,10 @@ impl RuntimeManager {
             return 0;
         }
 
-        tracing::info!(count = ready.len(), "restoring deployments from previous run");
+        tracing::info!(
+            count = ready.len(),
+            "restoring deployments from previous run"
+        );
         let mut restored = 0;
 
         for deployment in ready {
@@ -281,6 +282,8 @@ impl RuntimeManager {
             // Detect runtime kind from filesystem
             let kind = if workspace_dir.join(".next/standalone/server.js").exists() {
                 RuntimeKind::NextDeno { dir: workspace_dir }
+            } else if workspace_dir.join(".output/server/index.mjs").exists() {
+                RuntimeKind::NuxtNode { dir: workspace_dir }
             } else if let Some(entry_dir) = find_entry_ts(&workspace_dir) {
                 RuntimeKind::StaticDeno { dir: entry_dir }
             } else {
@@ -292,13 +295,10 @@ impl RuntimeManager {
             };
 
             // Decrypt env vars
-            let env_vars = env_vars::get_decrypted_env_vars(
-                pool,
-                deployment.project_id,
-                &config.master_key,
-            )
-            .await
-            .unwrap_or_default();
+            let env_vars =
+                env_vars::get_decrypted_env_vars(pool, deployment.project_id, &config.master_key)
+                    .await
+                    .unwrap_or_default();
 
             match self
                 .deploy(RuntimeLaunchSpec {

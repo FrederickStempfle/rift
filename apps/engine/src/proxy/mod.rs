@@ -23,10 +23,7 @@ pub async fn serve(state: AppState) -> anyhow::Result<()> {
 
     if has_certs || has_acme_email {
         // Run both HTTP and HTTPS listeners
-        tokio::try_join!(
-            serve_http(state.clone()),
-            serve_https(state),
-        )?;
+        tokio::try_join!(serve_http(state.clone()), serve_https(state),)?;
     } else {
         // No TLS configured — run HTTP-only proxy (original behavior)
         serve_http_proxy(state).await?;

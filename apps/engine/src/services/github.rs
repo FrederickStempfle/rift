@@ -85,9 +85,7 @@ pub async fn delete_webhook(
 
 /// Parse "owner/repo" from a GitHub URL like "https://github.com/owner/repo"
 pub fn parse_owner_repo(repo_url: &str) -> Option<(String, String)> {
-    let url = repo_url
-        .trim_end_matches('/')
-        .trim_end_matches(".git");
+    let url = repo_url.trim_end_matches('/').trim_end_matches(".git");
 
     let path = url.strip_prefix("https://github.com/")?;
     let mut parts = path.splitn(2, '/');

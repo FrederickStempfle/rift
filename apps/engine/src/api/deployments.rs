@@ -48,10 +48,9 @@ pub async fn list_deployments(
     auth_user: AuthUser,
     Query(query): Query<ListDeploymentsQuery>,
 ) -> AppResult<Json<Vec<DeploymentResponse>>> {
-    let project =
-        projects::get_project_for_user(&state.pool, query.project_id, auth_user.user_id)
-            .await?
-            .ok_or_else(|| AppError::NotFound("project not found".into()))?;
+    let project = projects::get_project_for_user(&state.pool, query.project_id, auth_user.user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("project not found".into()))?;
     let items =
         deployments::list_deployments_for_project(&state.pool, query.project_id, auth_user.user_id)
             .await?;
@@ -73,7 +72,10 @@ pub async fn create_deployment(
             .await?
             .ok_or_else(|| AppError::NotFound("project not found".into()))?;
 
-    let deployment = state.build_manager.enqueue_project_build(project.clone()).await?;
+    let deployment = state
+        .build_manager
+        .enqueue_project_build(project.clone())
+        .await?;
     let public_url = public_url_for_deployment(&state, &project).await?;
 
     Ok((
@@ -90,7 +92,9 @@ async fn public_url_for_deployment(
         return Ok(Some(state.config.public_url_for_host(&domain.domain)));
     }
     // No custom domain — use subdomain-based URL
-    Ok(Some(state.config.public_url_for_subdomain(&project.subdomain)))
+    Ok(Some(
+        state.config.public_url_for_subdomain(&project.subdomain),
+    ))
 }
 
 impl DeploymentResponse {

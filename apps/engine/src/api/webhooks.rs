@@ -9,11 +9,7 @@ use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
 
-use crate::{
-    api::AppState,
-    db::projects,
-    error::AppError,
-};
+use crate::{api::AppState, db::projects, error::AppError};
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/github", post(handle_github_webhook))
@@ -34,7 +30,10 @@ async fn handle_github_webhook(
     }
 
     if event != "push" {
-        return Ok((StatusCode::OK, Json(json!({ "status": "ignored", "event": event }))));
+        return Ok((
+            StatusCode::OK,
+            Json(json!({ "status": "ignored", "event": event })),
+        ));
     }
 
     let payload: Value = serde_json::from_slice(&body)
@@ -46,22 +45,24 @@ async fn handle_github_webhook(
         .and_then(Value::as_str)
         .unwrap_or("");
 
-    let push_ref = payload
-        .get("ref")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let push_ref = payload.get("ref").and_then(Value::as_str).unwrap_or("");
 
     // refs/heads/main -> main
     let branch = push_ref.strip_prefix("refs/heads/").unwrap_or(push_ref);
 
     if repo_url.is_empty() || branch.is_empty() {
-        return Ok((StatusCode::OK, Json(json!({ "status": "ignored", "reason": "missing repo or branch" }))));
+        return Ok((
+            StatusCode::OK,
+            Json(json!({ "status": "ignored", "reason": "missing repo or branch" })),
+        ));
     }
 
     // Normalize URL for matching (strip .git suffix, lowercase)
     let normalized = normalize_repo_url(repo_url);
 
-    let project = match projects::find_project_by_repo_and_branch(&state.pool, &normalized, branch).await? {
+    let project = match projects::find_project_by_repo_and_branch(&state.pool, &normalized, branch)
+        .await?
+    {
         Some(p) => p,
         None => {
             // Also try with .git suffix
@@ -69,10 +70,13 @@ async fn handle_github_webhook(
             match projects::find_project_by_repo_and_branch(&state.pool, &with_git, branch).await? {
                 Some(p) => p,
                 None => {
-                    return Ok((StatusCode::OK, Json(json!({
-                        "status": "ignored",
-                        "reason": "no matching project"
-                    }))));
+                    return Ok((
+                        StatusCode::OK,
+                        Json(json!({
+                            "status": "ignored",
+                            "reason": "no matching project"
+                        })),
+                    ));
                 }
             }
         }

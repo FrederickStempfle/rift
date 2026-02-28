@@ -272,10 +272,7 @@ pub async fn set_webhook(
     Ok(())
 }
 
-pub async fn clear_webhook(
-    pool: &PgPool,
-    project_id: Uuid,
-) -> Result<(), AppError> {
+pub async fn clear_webhook(pool: &PgPool, project_id: Uuid) -> Result<(), AppError> {
     sqlx::query(
         r#"
         UPDATE projects

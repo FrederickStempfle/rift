@@ -1,18 +1,13 @@
+use axum::extract::ws::{Message, WebSocket};
 use axum::{
     extract::{Query, State, WebSocketUpgrade},
     response::IntoResponse,
 };
-use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::{
-    api::AppState,
-    db::deployments,
-    error::AppError,
-    ws::broadcast::DeployLogMessage,
-};
+use crate::{api::AppState, db::deployments, error::AppError, ws::broadcast::DeployLogMessage};
 
 #[derive(Debug, Deserialize)]
 pub struct WsQuery {
@@ -28,13 +23,10 @@ pub async fn ws_logs_handler(
     let claims = state.token_service.verify_access_token(&query.token)?;
     let user_id = claims.sub;
 
-    let deployment = deployments::get_deployment_for_user(
-        &state.pool,
-        query.deployment_id,
-        user_id,
-    )
-    .await?
-    .ok_or_else(|| AppError::NotFound("deployment not found".into()))?;
+    let deployment =
+        deployments::get_deployment_for_user(&state.pool, query.deployment_id, user_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("deployment not found".into()))?;
 
     let deployment_id = deployment.id;
 
@@ -48,14 +40,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, deployment_id: Uuid, 
     let mut rx = state.log_broadcaster.subscribe(deployment_id).await;
 
     // Send existing logs from the database.
-    let existing_logs = match deployments::list_logs_for_deployment(&state.pool, deployment_id, user_id).await {
-        Ok(logs) => logs,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to fetch existing logs for ws");
-            let _ = sender.send(Message::Close(None)).await;
-            return;
-        }
-    };
+    let existing_logs =
+        match deployments::list_logs_for_deployment(&state.pool, deployment_id, user_id).await {
+            Ok(logs) => logs,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to fetch existing logs for ws");
+                let _ = sender.send(Message::Close(None)).await;
+                return;
+            }
+        };
 
     let mut last_id: i64 = 0;
     for log in existing_logs {

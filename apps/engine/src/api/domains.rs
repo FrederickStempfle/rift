@@ -89,13 +89,10 @@ pub async fn create_domain(
 
     // If a project_id is provided, verify the user owns it
     if let Some(project_id) = payload.project_id {
-        let project = crate::db::projects::get_project_for_user(
-            &state.pool,
-            project_id,
-            auth_user.user_id,
-        )
-        .await?
-        .ok_or_else(|| AppError::NotFound("project not found".into()))?;
+        let project =
+            crate::db::projects::get_project_for_user(&state.pool, project_id, auth_user.user_id)
+                .await?
+                .ok_or_else(|| AppError::NotFound("project not found".into()))?;
 
         // Auto-set is_primary if this is the first domain for the project
         let existing = domains::list_domains_for_project(&state.pool, project.id).await?;
@@ -237,25 +234,15 @@ pub async fn assign_domain(
     let updated = match payload.project_id {
         Some(project_id) => {
             // Verify user owns the project
-            crate::db::projects::get_project_for_user(
-                &state.pool,
-                project_id,
-                auth_user.user_id,
-            )
-            .await?
-            .ok_or_else(|| AppError::NotFound("project not found".into()))?;
+            crate::db::projects::get_project_for_user(&state.pool, project_id, auth_user.user_id)
+                .await?
+                .ok_or_else(|| AppError::NotFound("project not found".into()))?;
 
-            domains::assign_domain_to_project(
-                &state.pool,
-                domain_id,
-                project_id,
-                auth_user.user_id,
-            )
-            .await?
+            domains::assign_domain_to_project(&state.pool, domain_id, project_id, auth_user.user_id)
+                .await?
         }
         None => {
-            domains::unassign_domain_from_project(&state.pool, domain_id, auth_user.user_id)
-                .await?
+            domains::unassign_domain_from_project(&state.pool, domain_id, auth_user.user_id).await?
         }
     };
 
@@ -288,9 +275,7 @@ pub async fn verify_domain(
     let expected_ip = state
         .public_ip
         .as_deref()
-        .ok_or_else(|| {
-            AppError::Internal("public IP not available — cannot verify DNS".into())
-        })?;
+        .ok_or_else(|| AppError::Internal("public IP not available — cannot verify DNS".into()))?;
     let expected_addr: std::net::Ipv4Addr = expected_ip
         .parse()
         .map_err(|_| AppError::Internal("RIFT_PUBLIC_IP is not a valid IPv4 address".into()))?;
@@ -298,14 +283,11 @@ pub async fn verify_domain(
     let resolver = hickory_resolver::Resolver::builder_tokio()
         .map_err(|_| AppError::Internal("failed to create DNS resolver".into()))?
         .build();
-    let lookup = resolver
-        .ipv4_lookup(&domain.domain)
-        .await
-        .map_err(|_| {
-            AppError::BadRequest(
-                "DNS lookup failed — A records not found. Check your DNS configuration.".into(),
-            )
-        })?;
+    let lookup = resolver.ipv4_lookup(&domain.domain).await.map_err(|_| {
+        AppError::BadRequest(
+            "DNS lookup failed — A records not found. Check your DNS configuration.".into(),
+        )
+    })?;
 
     let matched = lookup
         .iter()

@@ -42,29 +42,22 @@ pub async fn list_rules(pool: &PgPool, project_id: Uuid) -> Result<Vec<FirewallR
     .map_err(AppError::Db)
 }
 
-pub async fn delete_rule(
-    pool: &PgPool,
-    rule_id: Uuid,
-    project_id: Uuid,
-) -> Result<bool, AppError> {
-    let result =
-        sqlx::query("DELETE FROM firewall_rules WHERE id = $1 AND project_id = $2")
-            .bind(rule_id)
-            .bind(project_id)
-            .execute(pool)
-            .await
-            .map_err(AppError::Db)?;
+pub async fn delete_rule(pool: &PgPool, rule_id: Uuid, project_id: Uuid) -> Result<bool, AppError> {
+    let result = sqlx::query("DELETE FROM firewall_rules WHERE id = $1 AND project_id = $2")
+        .bind(rule_id)
+        .bind(project_id)
+        .execute(pool)
+        .await
+        .map_err(AppError::Db)?;
     Ok(result.rows_affected() > 0)
 }
 
 pub async fn get_firewall_mode(pool: &PgPool, project_id: Uuid) -> Result<String, AppError> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT firewall_mode::text FROM projects WHERE id = $1",
-    )
-    .bind(project_id)
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Db)
+    sqlx::query_scalar::<_, String>("SELECT firewall_mode::text FROM projects WHERE id = $1")
+        .bind(project_id)
+        .fetch_one(pool)
+        .await
+        .map_err(AppError::Db)
 }
 
 pub async fn set_firewall_mode(

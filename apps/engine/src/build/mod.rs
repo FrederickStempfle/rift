@@ -19,7 +19,10 @@ use crate::{
 use self::{
     bundler::generate_deno_entry,
     detect::{detect_build_plan, detect_output_dir, BuildOutput, PackageManager},
-    pipeline::{elapsed_ms, insert_and_broadcast_log, read_git_metadata, run_command_and_log, run_command_and_log_with_env},
+    pipeline::{
+        elapsed_ms, insert_and_broadcast_log, read_git_metadata, run_command_and_log,
+        run_command_and_log_with_env,
+    },
 };
 
 #[derive(Clone, Debug)]
@@ -110,9 +113,10 @@ impl BuildManager {
         let clone_url = match users::find_user_by_id(&self.pool, project.user_id).await? {
             Some(user) if user.github_token.is_some() => {
                 let token = user.github_token.unwrap();
-                project
-                    .repo_url
-                    .replace("https://github.com/", &format!("https://x-access-token:{token}@github.com/"))
+                project.repo_url.replace(
+                    "https://github.com/",
+                    &format!("https://x-access-token:{token}@github.com/"),
+                )
             }
             _ => project.repo_url.clone(),
         };
@@ -156,13 +160,10 @@ impl BuildManager {
         .await?;
 
         // Fetch env vars early so they're available during install & build
-        let user_env_vars = env_vars::get_decrypted_env_vars(
-            &self.pool,
-            project.id,
-            &self.config.master_key,
-        )
-        .await
-        .unwrap_or_default();
+        let user_env_vars =
+            env_vars::get_decrypted_env_vars(&self.pool, project.id, &self.config.master_key)
+                .await
+                .unwrap_or_default();
 
         if !user_env_vars.is_empty() {
             insert_and_broadcast_log(
@@ -210,8 +211,15 @@ impl BuildManager {
             PackageManager::Bun => None,
         };
         if let Some(cmd) = cache_clean {
-            let _ = run_command_and_log(&self.pool, &self.log_broadcaster, deployment_id, "build", &workspace_dir, cmd)
-                .await;
+            let _ = run_command_and_log(
+                &self.pool,
+                &self.log_broadcaster,
+                deployment_id,
+                "build",
+                &workspace_dir,
+                cmd,
+            )
+            .await;
         }
 
         // For Next.js: inject standalone config before building
@@ -225,7 +233,12 @@ impl BuildManager {
                     if let Ok(entries) = fs::read_dir(&container_dir).await {
                         let mut entries = entries;
                         while let Ok(Some(entry)) = entries.next_entry().await {
-                            if entry.file_type().await.map(|ft| ft.is_dir()).unwrap_or(false) {
+                            if entry
+                                .file_type()
+                                .await
+                                .map(|ft| ft.is_dir())
+                                .unwrap_or(false)
+                            {
                                 let _ = self
                                     .inject_next_standalone_config(&entry.path(), deployment_id)
                                     .await;
@@ -263,6 +276,46 @@ impl BuildManager {
 
         deployments::update_status(&self.pool, deployment_id, "deploying").await?;
         let runtime_kind = match plan.output {
+            BuildOutput::Nuxt => {
+                // Find the Nuxt output directory (.output/server/index.mjs)
+                let nuxt_app_dir = find_nuxt_output(&workspace_dir).await;
+
+                let nuxt_app_dir = match nuxt_app_dir {
+                    Some(dir) => dir,
+                    None => {
+                        insert_and_broadcast_log(
+                            &self.pool,
+                            &self.log_broadcaster,
+                            deployment_id,
+                            "error",
+                            "Nuxt server output not found (.output/server/index.mjs). Build may have failed.",
+                            "build",
+                        )
+                        .await?;
+                        deployments::mark_failed(
+                            &self.pool,
+                            deployment_id,
+                            Some(elapsed_ms(started_at)),
+                        )
+                        .await?;
+                        return Err(AppError::Internal(
+                            "Nuxt server output not found".into(),
+                        ));
+                    }
+                };
+
+                insert_and_broadcast_log(
+                    &self.pool,
+                    &self.log_broadcaster,
+                    deployment_id,
+                    "info",
+                    "Detected Nuxt server output (.output/server/index.mjs)",
+                    "build",
+                )
+                .await?;
+
+                RuntimeKind::NuxtNode { dir: nuxt_app_dir }
+            }
             BuildOutput::Next => {
                 // Find the directory containing .next/standalone/server.js
                 // Could be at root or inside a workspace package (monorepo)
@@ -305,9 +358,7 @@ impl BuildManager {
                     copy_dir_recursive(&public_src, &public_dst).await?;
                 }
 
-                RuntimeKind::NextDeno {
-                    dir: next_app_dir,
-                }
+                RuntimeKind::NextDeno { dir: next_app_dir }
             }
             BuildOutput::Static { .. } => {
                 let detected_dir = detect_output_dir(&project, &workspace_dir);
@@ -378,8 +429,14 @@ impl BuildManager {
             }
         };
 
-        deployments::mark_ready(&self.pool, deployment_id, &url, port, elapsed_ms(started_at))
-            .await?;
+        deployments::mark_ready(
+            &self.pool,
+            deployment_id,
+            &url,
+            port,
+            elapsed_ms(started_at),
+        )
+        .await?;
         insert_and_broadcast_log(
             &self.pool,
             &self.log_broadcaster,
@@ -399,8 +456,7 @@ impl BuildManager {
             {
                 for old_deployment in old {
                     // Mark as superseded
-                    let _ =
-                        deployments::update_status(&pool, old_deployment.id, "cancelled").await;
+                    let _ = deployments::update_status(&pool, old_deployment.id, "cancelled").await;
                     // Remove workspace directory
                     let old_dir = deploy_root.join(old_deployment.id.to_string());
                     if old_dir.exists() {
@@ -495,7 +551,12 @@ async fn find_next_standalone(workspace_dir: &std::path::Path) -> Option<std::pa
             continue;
         };
         while let Ok(Some(entry)) = entries.next_entry().await {
-            if entry.file_type().await.map(|ft| ft.is_dir()).unwrap_or(false) {
+            if entry
+                .file_type()
+                .await
+                .map(|ft| ft.is_dir())
+                .unwrap_or(false)
+            {
                 let candidate = entry.path();
                 if candidate.join(".next/standalone/server.js").exists() {
                     return Some(candidate);
@@ -507,25 +568,58 @@ async fn find_next_standalone(workspace_dir: &std::path::Path) -> Option<std::pa
     None
 }
 
+/// Find the directory containing `.output/server/index.mjs` (Nuxt output).
+/// Checks the workspace root first, then scans workspace packages (apps/*, packages/*).
+async fn find_nuxt_output(workspace_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    // Check root
+    if workspace_dir.join(".output/server/index.mjs").exists() {
+        return Some(workspace_dir.to_path_buf());
+    }
+
+    // Scan monorepo package directories
+    for container in ["apps", "packages"] {
+        let container_dir = workspace_dir.join(container);
+        if !container_dir.exists() {
+            continue;
+        }
+        let Ok(mut entries) = fs::read_dir(&container_dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry
+                .file_type()
+                .await
+                .map(|ft| ft.is_dir())
+                .unwrap_or(false)
+            {
+                let candidate = entry.path();
+                if candidate.join(".output/server/index.mjs").exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Recursively copy a directory tree.
 async fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), AppError> {
-    fs::create_dir_all(dst).await.map_err(|e| {
-        AppError::Internal(format!(
-            "failed to create dir {}: {e}",
-            dst.display()
-        ))
-    })?;
+    fs::create_dir_all(dst)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to create dir {}: {e}", dst.display())))?;
 
-    let mut entries = fs::read_dir(src).await.map_err(|e| {
-        AppError::Internal(format!("failed to read dir {}: {e}", src.display()))
-    })?;
+    let mut entries = fs::read_dir(src)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to read dir {}: {e}", src.display())))?;
 
     while let Some(entry) = entries.next_entry().await.map_err(|e| {
         AppError::Internal(format!("failed to read entry in {}: {e}", src.display()))
     })? {
-        let file_type = entry.file_type().await.map_err(|e| {
-            AppError::Internal(format!("failed to get file type: {e}"))
-        })?;
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to get file type: {e}")))?;
         let dest_path = dst.join(entry.file_name());
 
         if file_type.is_dir() {
