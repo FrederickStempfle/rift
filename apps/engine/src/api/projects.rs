@@ -13,11 +13,11 @@ use uuid::Uuid;
 use crate::{
     api::{auth::AuthUser, AppState},
     db::{
-        deployments, domains,
+        deployments, domains, users,
         projects::{self, NewProject, UpdateProject},
     },
     error::{AppError, AppResult},
-    services::audit::AuditEvent,
+    services::{audit::AuditEvent, github},
     validation,
 };
 
@@ -126,6 +126,36 @@ pub async fn create_project(
         })
         .await?;
 
+    // Auto-register GitHub webhook for push events
+    if let Some((owner, repo)) = github::parse_owner_repo(&project.repo_url) {
+        if let Ok(Some(user)) = users::find_user_by_id(&state.pool, auth_user.user_id).await {
+            if let Some(token) = &user.github_token {
+                let secret: String = (0..32)
+                    .map(|_| format!("{:02x}", rand::random::<u8>()))
+                    .collect();
+                let webhook_url = format!(
+                    "http://{}:{}/api/webhooks/github",
+                    state.public_ip.as_deref().unwrap_or("localhost"),
+                    state.config.api_port,
+                );
+                match github::register_webhook(token, &owner, &repo, &webhook_url, &secret).await {
+                    Ok(webhook_id) => {
+                        let _ = projects::set_webhook(&state.pool, project.id, webhook_id, &secret).await;
+                        tracing::info!(project_id = %project.id, webhook_id, "registered GitHub webhook");
+                    }
+                    Err(e) => {
+                        tracing::warn!(project_id = %project.id, error = %e, "failed to register webhook, auto-deploy disabled");
+                    }
+                }
+            }
+        }
+    }
+
+    // Re-fetch project to include webhook fields
+    let project = projects::get_project_for_user(&state.pool, project.id, auth_user.user_id)
+        .await?
+        .unwrap_or(project);
+
     Ok((
         StatusCode::CREATED,
         Json(ProjectResponse::from_project(&state, project).await?),
@@ -203,6 +233,21 @@ pub async fn delete_project(
     headers: HeaderMap,
     Path(project_id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
+    // Clean up GitHub webhook before deleting
+    if let Ok(Some(project)) =
+        projects::get_project_for_user(&state.pool, project_id, auth_user.user_id).await
+    {
+        if let (Some(webhook_id), Some((owner, repo))) =
+            (project.webhook_id, github::parse_owner_repo(&project.repo_url))
+        {
+            if let Ok(Some(user)) = users::find_user_by_id(&state.pool, auth_user.user_id).await {
+                if let Some(token) = &user.github_token {
+                    let _ = github::delete_webhook(token, &owner, &repo, webhook_id).await;
+                }
+            }
+        }
+    }
+
     let deleted =
         projects::delete_project_for_user(&state.pool, project_id, auth_user.user_id).await?;
     if !deleted {

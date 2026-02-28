@@ -226,6 +226,70 @@ pub async fn delete_project_for_user(
     Ok(result.rows_affected() > 0)
 }
 
+pub async fn find_project_by_repo_and_branch(
+    pool: &PgPool,
+    repo_url: &str,
+    branch: &str,
+) -> Result<Option<Project>, AppError> {
+    sqlx::query_as::<_, Project>(
+        r#"
+        SELECT
+            id, user_id, name, repo_url, branch,
+            framework::text AS framework,
+            build_command, output_dir, install_command, subdomain,
+            webhook_id, webhook_secret, created_at, updated_at
+        FROM projects
+        WHERE LOWER(TRIM(TRAILING '/' FROM TRIM(TRAILING '.git' FROM repo_url))) = LOWER($1)
+          AND branch = $2
+        "#,
+    )
+    .bind(repo_url)
+    .bind(branch)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Db)
+}
+
+pub async fn set_webhook(
+    pool: &PgPool,
+    project_id: Uuid,
+    webhook_id: i64,
+    webhook_secret: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE projects
+        SET webhook_id = $2, webhook_secret = $3, updated_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(project_id)
+    .bind(webhook_id)
+    .bind(webhook_secret)
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+    Ok(())
+}
+
+pub async fn clear_webhook(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE projects
+        SET webhook_id = NULL, webhook_secret = NULL, updated_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(project_id)
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+    Ok(())
+}
+
 pub async fn get_project_by_subdomain(
     pool: &PgPool,
     subdomain: &str,
