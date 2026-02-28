@@ -32,8 +32,7 @@ COPY --from=builder /app/target/release/rift-engine /usr/local/bin/rift-engine
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 RUN chmod +x /usr/local/bin/entrypoint.sh \
-    && mkdir -p /var/rift/deployments /var/rift/builds /var/rift/ssl \
-    && chown -R rift:rift /var/rift
+    && mkdir -p /var/rift/deployments /var/rift/builds /var/rift/ssl
 
 ENV RUST_LOG=rift_engine=info,tower_http=info
 EXPOSE 3001 8080
