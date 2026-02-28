@@ -37,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
     let analytics_collector = AnalyticsCollector::new(pool.clone());
     let build_manager = BuildManager::new(
         pool.clone(),
+        Arc::clone(&config),
         runtime_manager.clone(),
         analytics_collector.clone(),
         config.build_root.clone().into(),

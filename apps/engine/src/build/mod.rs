@@ -9,7 +9,8 @@ use tokio::{fs, sync::Semaphore};
 use uuid::Uuid;
 
 use crate::{
-    db::{deployments, models::Project, users},
+    config::Config,
+    db::{deployments, env_vars, models::Project, users},
     error::AppError,
     proxy::analytics_collector::AnalyticsCollector,
     runtime::{RuntimeKind, RuntimeLaunchSpec, RuntimeManager},
@@ -17,12 +18,13 @@ use crate::{
 
 use self::{
     detect::{detect_build_plan, detect_output_dir, BuildOutput, PackageManager},
-    pipeline::{elapsed_ms, read_git_metadata, run_command_and_log},
+    pipeline::{elapsed_ms, read_git_metadata, run_command_and_log, run_command_and_log_with_env},
 };
 
 #[derive(Clone, Debug)]
 pub struct BuildManager {
     pool: sqlx::PgPool,
+    config: Arc<Config>,
     runtime_manager: RuntimeManager,
     analytics_collector: AnalyticsCollector,
     build_root: PathBuf,
@@ -33,6 +35,7 @@ pub struct BuildManager {
 impl BuildManager {
     pub fn new(
         pool: sqlx::PgPool,
+        config: Arc<Config>,
         runtime_manager: RuntimeManager,
         analytics_collector: AnalyticsCollector,
         build_root: PathBuf,
@@ -40,6 +43,7 @@ impl BuildManager {
     ) -> Self {
         Self {
             pool,
+            config,
             runtime_manager,
             analytics_collector,
             build_root,
@@ -148,13 +152,34 @@ impl BuildManager {
         )
         .await?;
 
+        // Fetch env vars early so they're available during install & build
+        let user_env_vars = env_vars::get_decrypted_env_vars(
+            &self.pool,
+            project.id,
+            &self.config.master_key,
+        )
+        .await
+        .unwrap_or_default();
+
+        if !user_env_vars.is_empty() {
+            deployments::insert_log(
+                &self.pool,
+                deployment_id,
+                "info",
+                &format!("Injecting {} environment variable(s)", user_env_vars.len()),
+                "build",
+            )
+            .await?;
+        }
+
         deployments::update_status(&self.pool, deployment_id, "building").await?;
-        if let Err(error) = run_command_and_log(
+        if let Err(error) = run_command_and_log_with_env(
             &self.pool,
             deployment_id,
             "build",
             &workspace_dir,
             &plan.install_command,
+            &user_env_vars,
         )
         .await
         {
@@ -183,12 +208,13 @@ impl BuildManager {
                 .await;
         }
 
-        if let Err(error) = run_command_and_log(
+        if let Err(error) = run_command_and_log_with_env(
             &self.pool,
             deployment_id,
             "build",
             &workspace_dir,
             &plan.build_command,
+            &user_env_vars,
         )
         .await
         {
@@ -251,6 +277,7 @@ impl BuildManager {
                     project_id: project.id,
                     deployment_id,
                     kind: runtime_kind,
+                    env_vars: user_env_vars,
                 },
                 self.analytics_collector.clone(),
             )

@@ -52,6 +52,8 @@ pub struct RuntimeLaunchSpec {
     pub project_id: Uuid,
     pub deployment_id: Uuid,
     pub kind: RuntimeKind,
+    /// User-defined environment variables injected at runtime.
+    pub env_vars: Vec<(String, String)>,
 }
 
 impl RuntimeManager {
@@ -76,21 +78,32 @@ impl RuntimeManager {
         let external_port = allocate_port()?;
         let internal_port = external_port + INTERNAL_PORT_OFFSET;
 
+        // Convert user env vars to (&str, String) for spawn_shell
+        let user_envs: Vec<(&str, String)> = spec
+            .env_vars
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect();
+
         let child = match &spec.kind {
             RuntimeKind::StaticDir { dir } => spawn_shell(
                 &format!("serve -s '{}' -l {internal_port} -n", dir.display()),
                 dir,
-                &[],
+                &user_envs,
             )?,
-            RuntimeKind::NextApp { dir } => spawn_shell(
-                &format!("npx next start -H 0.0.0.0 -p {internal_port}"),
-                dir,
-                &[
+            RuntimeKind::NextApp { dir } => {
+                let mut envs = vec![
                     ("PORT", internal_port.to_string()),
                     ("HOSTNAME", "0.0.0.0".to_owned()),
                     ("NODE_ENV", "production".to_owned()),
-                ],
-            )?,
+                ];
+                envs.extend(user_envs);
+                spawn_shell(
+                    &format!("npx next start -H 0.0.0.0 -p {internal_port}"),
+                    dir,
+                    &envs,
+                )?
+            }
         };
 
         if !wait_for_port("127.0.0.1", internal_port, 40).await {

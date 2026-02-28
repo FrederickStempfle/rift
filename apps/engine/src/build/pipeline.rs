@@ -15,14 +15,31 @@ pub async fn run_command_and_log(
     cwd: &Path,
     command: &str,
 ) -> Result<(), AppError> {
+    run_command_and_log_with_env(pool, deployment_id, source, cwd, command, &[]).await
+}
+
+pub async fn run_command_and_log_with_env(
+    pool: &sqlx::PgPool,
+    deployment_id: Uuid,
+    source: &str,
+    cwd: &Path,
+    command: &str,
+    envs: &[(String, String)],
+) -> Result<(), AppError> {
     deployments::insert_log(pool, deployment_id, "info", &format!("$ {command}"), source).await?;
 
-    let mut child = Command::new("sh")
-        .arg("-lc")
+    let mut cmd = Command::new("sh");
+    cmd.arg("-lc")
         .arg(command)
         .current_dir(cwd)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+
+    let mut child = cmd
         .spawn()
         .map_err(|error| AppError::Internal(format!("failed to spawn '{command}': {error}")))?;
 
