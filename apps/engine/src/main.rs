@@ -12,6 +12,7 @@ use rift_engine::{
         audit::AuditLogger, auth::TokenService, password::PasswordService,
         rate_limit::AuthRateLimiters,
     },
+    ws::LogBroadcaster,
 };
 
 #[tokio::main]
@@ -35,12 +36,14 @@ async fn main() -> anyhow::Result<()> {
         PasswordService::new().context("failed to initialize password service")?;
     let runtime_manager = RuntimeManager::new();
     let analytics_collector = AnalyticsCollector::new(pool.clone());
+    let log_broadcaster = LogBroadcaster::new();
     let build_manager = BuildManager::new(
         pool.clone(),
         Arc::clone(&config),
         runtime_manager.clone(),
         config.build_root.clone().into(),
         config.deploy_root.clone().into(),
+        log_broadcaster.clone(),
     );
 
     let public_ip = config.resolve_public_ip().await;
@@ -61,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
         public_ip,
         firewall_cache: FirewallCache::new(),
         analytics_collector,
+        log_broadcaster,
     };
 
     let api_state = state.clone();

@@ -13,12 +13,13 @@ use crate::{
     db::{deployments, env_vars, models::Project, users},
     error::AppError,
     runtime::{RuntimeKind, RuntimeLaunchSpec, RuntimeManager},
+    ws::LogBroadcaster,
 };
 
 use self::{
     bundler::generate_deno_entry,
     detect::{detect_build_plan, detect_output_dir, BuildOutput, PackageManager},
-    pipeline::{elapsed_ms, read_git_metadata, run_command_and_log, run_command_and_log_with_env},
+    pipeline::{elapsed_ms, insert_and_broadcast_log, read_git_metadata, run_command_and_log, run_command_and_log_with_env},
 };
 
 #[derive(Clone, Debug)]
@@ -29,6 +30,7 @@ pub struct BuildManager {
     build_root: PathBuf,
     deploy_root: PathBuf,
     concurrency: Arc<Semaphore>,
+    log_broadcaster: LogBroadcaster,
 }
 
 impl BuildManager {
@@ -38,6 +40,7 @@ impl BuildManager {
         runtime_manager: RuntimeManager,
         build_root: PathBuf,
         deploy_root: PathBuf,
+        log_broadcaster: LogBroadcaster,
     ) -> Self {
         Self {
             pool,
@@ -46,6 +49,7 @@ impl BuildManager {
             build_root,
             deploy_root,
             concurrency: Arc::new(Semaphore::new(1)),
+            log_broadcaster,
         }
     }
 
@@ -115,6 +119,7 @@ impl BuildManager {
 
         run_command_and_log(
             &self.pool,
+            &self.log_broadcaster,
             deployment_id,
             "build",
             &self.build_root,
@@ -140,8 +145,9 @@ impl BuildManager {
             .await?;
 
         let plan = detect_build_plan(&project, &workspace_dir)?;
-        deployments::insert_log(
+        insert_and_broadcast_log(
             &self.pool,
+            &self.log_broadcaster,
             deployment_id,
             "info",
             &format!("Detected framework: {}", plan.framework),
@@ -159,8 +165,9 @@ impl BuildManager {
         .unwrap_or_default();
 
         if !user_env_vars.is_empty() {
-            deployments::insert_log(
+            insert_and_broadcast_log(
                 &self.pool,
+                &self.log_broadcaster,
                 deployment_id,
                 "info",
                 &format!("Injecting {} environment variable(s)", user_env_vars.len()),
@@ -172,6 +179,7 @@ impl BuildManager {
         deployments::update_status(&self.pool, deployment_id, "building").await?;
         if let Err(error) = run_command_and_log_with_env(
             &self.pool,
+            &self.log_broadcaster,
             deployment_id,
             "build",
             &workspace_dir,
@@ -180,8 +188,9 @@ impl BuildManager {
         )
         .await
         {
-            deployments::insert_log(
+            insert_and_broadcast_log(
                 &self.pool,
+                &self.log_broadcaster,
                 deployment_id,
                 "error",
                 &error.to_string(),
@@ -201,7 +210,7 @@ impl BuildManager {
             PackageManager::Bun => None,
         };
         if let Some(cmd) = cache_clean {
-            let _ = run_command_and_log(&self.pool, deployment_id, "build", &workspace_dir, cmd)
+            let _ = run_command_and_log(&self.pool, &self.log_broadcaster, deployment_id, "build", &workspace_dir, cmd)
                 .await;
         }
 
@@ -213,6 +222,7 @@ impl BuildManager {
 
         if let Err(error) = run_command_and_log_with_env(
             &self.pool,
+            &self.log_broadcaster,
             deployment_id,
             "build",
             &workspace_dir,
@@ -221,8 +231,9 @@ impl BuildManager {
         )
         .await
         {
-            deployments::insert_log(
+            insert_and_broadcast_log(
                 &self.pool,
+                &self.log_broadcaster,
                 deployment_id,
                 "error",
                 &error.to_string(),
@@ -240,10 +251,9 @@ impl BuildManager {
                 // Verify standalone output exists
                 let standalone_server = workspace_dir.join(".next/standalone/server.js");
                 if !standalone_server.exists() {
-                    // The build may not have produced standalone output if
-                    // next.config was already set but the build failed silently.
-                    deployments::insert_log(
+                    insert_and_broadcast_log(
                         &self.pool,
+                        &self.log_broadcaster,
                         deployment_id,
                         "error",
                         "Next.js standalone output not found (.next/standalone/server.js). Ensure `output: \"standalone\"` is in next.config.",
@@ -281,8 +291,9 @@ impl BuildManager {
             BuildOutput::Static { .. } => {
                 let detected_dir = detect_output_dir(&project, &workspace_dir);
                 let output_dir = workspace_dir.join(&detected_dir);
-                deployments::insert_log(
+                insert_and_broadcast_log(
                     &self.pool,
+                    &self.log_broadcaster,
                     deployment_id,
                     "info",
                     &format!("Detected output directory: {detected_dir}"),
@@ -290,8 +301,9 @@ impl BuildManager {
                 )
                 .await?;
                 if !output_dir.exists() {
-                    deployments::insert_log(
+                    insert_and_broadcast_log(
                         &self.pool,
+                        &self.log_broadcaster,
                         deployment_id,
                         "error",
                         "Build output directory not found",
@@ -330,8 +342,9 @@ impl BuildManager {
         {
             Ok(result) => result,
             Err(error) => {
-                deployments::insert_log(
+                insert_and_broadcast_log(
                     &self.pool,
+                    &self.log_broadcaster,
                     deployment_id,
                     "error",
                     &error.to_string(),
@@ -346,8 +359,9 @@ impl BuildManager {
 
         deployments::mark_ready(&self.pool, deployment_id, &url, port, elapsed_ms(started_at))
             .await?;
-        deployments::insert_log(
+        insert_and_broadcast_log(
             &self.pool,
+            &self.log_broadcaster,
             deployment_id,
             "info",
             &format!("Deployment ready on port {port}"),
@@ -403,8 +417,9 @@ impl BuildManager {
             AppError::Internal(format!("failed to write {}: {e}", config_path.display()))
         })?;
 
-        deployments::insert_log(
+        insert_and_broadcast_log(
             &self.pool,
+            &self.log_broadcaster,
             deployment_id,
             "info",
             "Injected output: \"standalone\" into next.config",

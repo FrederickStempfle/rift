@@ -240,6 +240,29 @@ pub async fn insert_log(
     Ok(())
 }
 
+pub async fn insert_log_returning(
+    pool: &PgPool,
+    deployment_id: Uuid,
+    level: &str,
+    message: &str,
+    source: &str,
+) -> Result<DeployLog, AppError> {
+    sqlx::query_as::<_, DeployLog>(
+        r#"
+        INSERT INTO deploy_logs (deployment_id, level, message, source)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, deployment_id, timestamp, level, message, source
+        "#,
+    )
+    .bind(deployment_id)
+    .bind(level)
+    .bind(message)
+    .bind(source)
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Db)
+}
+
 pub async fn list_logs_for_deployment(
     pool: &PgPool,
     deployment_id: Uuid,

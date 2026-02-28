@@ -25,6 +25,7 @@ use crate::{
         audit::AuditLogger, auth::TokenService, password::PasswordService,
         rate_limit::AuthRateLimiters,
     },
+    ws::LogBroadcaster,
 };
 
 pub mod analytics;
@@ -52,6 +53,7 @@ pub struct AppState {
     pub public_ip: Option<String>,
     pub firewall_cache: FirewallCache,
     pub analytics_collector: AnalyticsCollector,
+    pub log_broadcaster: LogBroadcaster,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -105,6 +107,7 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/webhooks", webhooks::routes())
         .route("/api/analytics", get(analytics::get_analytics))
         .route("/api/logs", get(logs::list_logs))
+        .route("/api/ws/logs", get(crate::ws::handler::ws_logs_handler))
         .layer(DefaultBodyLimit::max(1_048_576))
         .layer(
             ServiceBuilder::new()

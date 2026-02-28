@@ -12,6 +12,7 @@ axum = { version = "0.8", features = ["macros", "json", "ws"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 clap = { version = "4", features = ["derive", "env"] }
+futures-util = "0.3"
 hex = "0.4"
 hickory-resolver = "0.25"
 ipnet = "2"

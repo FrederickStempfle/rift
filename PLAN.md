@@ -296,33 +296,33 @@ shadcn/ui         SWR or TanStack Query
 - [x] Webhook receiver with HMAC verification
 - [ ] Framework detection (Next.js, Vite, Remix, Astro, Svelte, static)
 - [x] Full build pipeline: clone -> install -> build -> log capture
-- [ ] Build queue (tokio mpsc, configurable concurrency)
-- [ ] Log broadcaster (tokio broadcast channels)
+- [x] Build queue (tokio mpsc, configurable concurrency)
+- [x] Log broadcaster (tokio broadcast channels)
 - [ ] **Verify**: create project -> push to GitHub -> build runs with streamed logs
 
 ### Phase 3: Deno Runtime + Reverse Proxy
-- [ ] Deno bundle creation (_entry.ts per framework type)
+- [x] Deno bundle creation (_entry.ts per framework type)
 - [ ] Deno process spawning with sandboxed permissions
 - [x] Health check polling
-- [ ] RuntimeManager: deploy, resolve, zero-downtime swap
+- [x] RuntimeManager: deploy, resolve, zero-downtime swap
 - [ ] hyper reverse proxy with Host-based routing
 - [x] Wire build -> deploy -> proxy routing
 - [ ] **Verify**: push -> build -> deploy -> curl returns app
 
 ### Phase 4: Dashboard UI
 - [x] Scaffold Next.js + Tailwind + shadcn/ui
-- [ ] API client with JWT, WebSocket hook
+- [x] API client with JWT, WebSocket hook
 - [x] Login page, sidebar layout
 - [x] Project list, new project wizard
-- [ ] Deployment list, real-time log viewer (terminal-style)
+- [x] Deployment list, real-time log viewer (terminal-style)
 - [x] Manual redeploy button
 - [ ] Dark-mode-first, minimal design
 - [ ] **Verify**: full flow through the UI
 
 ### Phase 5: Env Vars + Custom Domains + SSL
-- [ ] AES-256-GCM encryption for env var values
-- [ ] Env var CRUD API (masked in responses)
-- [ ] Inject decrypted env vars into Deno process
+- [x] AES-256-GCM encryption for env var values
+- [x] Env var CRUD API (masked in responses)
+- [x] Inject decrypted env vars into Deno process
 - [x] Domain CRUD, DNS verification
 - [ ] Auto-SSL via Let's Encrypt (rustls-acme / instant_acme)
 - [ ] Dashboard pages for env vars and domains
@@ -331,6 +331,7 @@ shadcn/ui         SWR or TanStack Query
 ### Phase 6: Scale to Zero + Docker + Polish
 - [ ] Idle detection loop, process suspend/wake
 - [ ] Wake-on-request in proxy
+- [ ] Fail-safe runtime reconciliation and automatic restart after engine/app crashes or restarts (clean up ghost projects/processes, restore routing, recover healthy deployments)
 - [ ] Multi-stage Dockerfile (engine + web + deno + node)
 - [x] docker-compose.yml with PostgreSQL
 - [x] entrypoint.sh (migrations + service start)

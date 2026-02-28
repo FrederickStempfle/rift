@@ -6,27 +6,55 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::{db::deployments, error::AppError};
+use crate::{db::deployments, error::AppError, ws::{broadcast::DeployLogMessage, LogBroadcaster}};
+
+/// Insert a log into the database AND broadcast it to WebSocket subscribers.
+pub async fn insert_and_broadcast_log(
+    pool: &sqlx::PgPool,
+    broadcaster: &LogBroadcaster,
+    deployment_id: Uuid,
+    level: &str,
+    message: &str,
+    source: &str,
+) -> Result<(), AppError> {
+    let log = deployments::insert_log_returning(pool, deployment_id, level, message, source).await?;
+    broadcaster
+        .send(
+            deployment_id,
+            DeployLogMessage {
+                id: log.id,
+                deployment_id: log.deployment_id,
+                timestamp: log.timestamp,
+                level: log.level,
+                message: log.message,
+                source: log.source,
+            },
+        )
+        .await;
+    Ok(())
+}
 
 pub async fn run_command_and_log(
     pool: &sqlx::PgPool,
+    broadcaster: &LogBroadcaster,
     deployment_id: Uuid,
     source: &str,
     cwd: &Path,
     command: &str,
 ) -> Result<(), AppError> {
-    run_command_and_log_with_env(pool, deployment_id, source, cwd, command, &[]).await
+    run_command_and_log_with_env(pool, broadcaster, deployment_id, source, cwd, command, &[]).await
 }
 
 pub async fn run_command_and_log_with_env(
     pool: &sqlx::PgPool,
+    broadcaster: &LogBroadcaster,
     deployment_id: Uuid,
     source: &str,
     cwd: &Path,
     command: &str,
     envs: &[(String, String)],
 ) -> Result<(), AppError> {
-    deployments::insert_log(pool, deployment_id, "info", &format!("$ {command}"), source).await?;
+    insert_and_broadcast_log(pool, broadcaster, deployment_id, "info", &format!("$ {command}"), source).await?;
 
     let mut cmd = Command::new("sh");
     cmd.arg("-lc")
@@ -49,6 +77,7 @@ pub async fn run_command_and_log_with_env(
     let stdout_task = tokio::spawn(read_stream(
         stdout,
         pool.clone(),
+        broadcaster.clone(),
         deployment_id,
         source.to_owned(),
         "info".to_owned(),
@@ -56,6 +85,7 @@ pub async fn run_command_and_log_with_env(
     let stderr_task = tokio::spawn(read_stream(
         stderr,
         pool.clone(),
+        broadcaster.clone(),
         deployment_id,
         source.to_owned(),
         "error".to_owned(),
@@ -82,6 +112,7 @@ pub async fn run_command_and_log_with_env(
 async fn read_stream(
     stream: Option<impl AsyncRead + Unpin + Send + 'static>,
     pool: sqlx::PgPool,
+    broadcaster: LogBroadcaster,
     deployment_id: Uuid,
     source: String,
     level: String,
@@ -89,7 +120,7 @@ async fn read_stream(
     if let Some(stream) = stream {
         let mut lines = BufReader::new(stream).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            let _ = deployments::insert_log(&pool, deployment_id, &level, &line, &source).await;
+            let _ = insert_and_broadcast_log(&pool, &broadcaster, deployment_id, &level, &line, &source).await;
         }
     }
 }
