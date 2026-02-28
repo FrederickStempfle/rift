@@ -41,7 +41,7 @@ services:
       - /tmp:size=5G,exec
       - /var/rift/builds:size=5G,exec
       - /root:size=3G
-      - /usr/local/share/.cache:size=3G
+      - /usr/local/share/.cache:size=5G
     volumes:
       - deployments:/var/rift/deployments
       - ssl:/var/rift/ssl

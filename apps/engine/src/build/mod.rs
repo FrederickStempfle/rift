@@ -15,7 +15,7 @@ use crate::{
 };
 
 use self::{
-    detect::{detect_build_plan, BuildOutput},
+    detect::{detect_build_plan, BuildOutput, PackageManager},
     pipeline::{elapsed_ms, read_git_metadata, run_command_and_log},
 };
 
@@ -154,6 +154,18 @@ impl BuildManager {
             deployments::mark_failed(&self.pool, deployment_id, Some(elapsed_ms(started_at)))
                 .await?;
             return Err(error);
+        }
+
+        // Clean package manager cache to free tmpfs space before build
+        let cache_clean = match plan.package_manager {
+            PackageManager::Yarn => Some("yarn cache clean"),
+            PackageManager::Npm => Some("npm cache clean --force"),
+            PackageManager::Pnpm => Some("pnpm store prune"),
+            PackageManager::Bun => None,
+        };
+        if let Some(cmd) = cache_clean {
+            let _ = run_command_and_log(&self.pool, deployment_id, "build", &workspace_dir, cmd)
+                .await;
         }
 
         if let Err(error) = run_command_and_log(
