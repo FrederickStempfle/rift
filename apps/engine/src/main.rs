@@ -6,7 +6,7 @@ use rift_engine::{
     build::BuildManager,
     config::Config,
     db,
-    proxy,
+    proxy::{self, firewall_cache::FirewallCache},
     runtime::RuntimeManager,
     services::{
         audit::AuditLogger, auth::TokenService, password::PasswordService,
@@ -57,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
         runtime_manager,
         build_manager,
         public_ip,
+        firewall_cache: FirewallCache::new(),
     };
 
     let api_state = state.clone();

@@ -19,6 +19,7 @@ use crate::{
     build::BuildManager,
     config::Config,
     db::DbPool,
+    proxy::firewall_cache::FirewallCache,
     runtime::RuntimeManager,
     services::{
         audit::AuditLogger, auth::TokenService, password::PasswordService,
@@ -30,6 +31,7 @@ pub mod auth;
 pub mod deployments;
 pub mod domains;
 pub mod env_vars;
+pub mod firewall;
 pub mod logs;
 pub mod projects;
 pub mod users;
@@ -47,6 +49,7 @@ pub struct AppState {
     pub build_manager: BuildManager,
     /// Auto-detected or overridden via RIFT_PUBLIC_IP. Resolved once at startup.
     pub public_ip: Option<String>,
+    pub firewall_cache: FirewallCache,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -96,6 +99,7 @@ pub fn router(state: AppState) -> Router {
         )
         .nest("/api/env-vars", env_vars::routes())
         .nest("/api/domains", domains::routes())
+        .nest("/api/firewall", firewall::routes())
         .nest("/api/webhooks", webhooks::routes())
         .route("/api/logs", get(logs::list_logs))
         .layer(DefaultBodyLimit::max(1_048_576))

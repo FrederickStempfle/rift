@@ -40,6 +40,15 @@ pub async fn proxy_request(
         .map_err(map_proxy_error)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    let allowed = state
+        .firewall_cache
+        .is_allowed(&state.pool, project_id, addr.ip())
+        .await
+        .map_err(map_proxy_error)?;
+    if !allowed {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     let deployment = deployments::latest_ready_deployment_for_project(&state.pool, project_id)
         .await
         .map_err(map_proxy_error)?

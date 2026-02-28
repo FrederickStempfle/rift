@@ -78,6 +78,16 @@ pub struct DeployLog {
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]
+pub struct FirewallRule {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub cidr: String,
+    pub action: String,
+    pub description: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
 pub struct AuditLog {
     pub id: i64,
     pub timestamp: DateTime<Utc>,

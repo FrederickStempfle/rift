@@ -1,3 +1,4 @@
+pub mod firewall_cache;
 pub mod handler;
 pub mod router;
 

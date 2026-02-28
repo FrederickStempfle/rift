@@ -5,6 +5,7 @@ use crate::error::AppError;
 pub mod audit;
 pub mod deployments;
 pub mod domains;
+pub mod firewall;
 pub mod models;
 pub mod projects;
 pub mod refresh_tokens;
