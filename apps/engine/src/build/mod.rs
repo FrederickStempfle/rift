@@ -345,15 +345,26 @@ impl BuildManager {
                     }
                 };
 
-                // Copy static assets into standalone dir (Next.js requires this)
+                // Copy static assets into the directory where server.js lives.
+                // In monorepos, Next.js nests server.js inside standalone/
+                // (e.g. .next/standalone/apps/web/server.js), so assets must
+                // go next to it, not in the standalone root.
                 let standalone_dir = next_app_dir.join(".next/standalone");
+                let server_dir = if standalone_dir.join("server.js").exists() {
+                    standalone_dir.clone()
+                } else {
+                    // Search for server.js in subdirectories
+                    find_server_js_dir(&standalone_dir)
+                        .unwrap_or_else(|| standalone_dir.clone())
+                };
+
                 let static_src = next_app_dir.join(".next/static");
-                let static_dst = standalone_dir.join(".next/static");
+                let static_dst = server_dir.join(".next/static");
                 if static_src.exists() {
                     copy_dir_recursive(&static_src, &static_dst).await?;
                 }
                 let public_src = next_app_dir.join("public");
-                let public_dst = standalone_dir.join("public");
+                let public_dst = server_dir.join("public");
                 if public_src.exists() {
                     copy_dir_recursive(&public_src, &public_dst).await?;
                 }
@@ -596,6 +607,36 @@ async fn find_next_standalone(workspace_dir: &std::path::Path) -> Option<std::pa
         }
     }
 
+    None
+}
+
+/// Find the directory containing `server.js` inside a `.next/standalone/` dir.
+/// In monorepos this is a nested path like `standalone/apps/web/`.
+fn find_server_js_dir(standalone_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(standalone_dir) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let d1 = entry.path();
+        if d1.join("server.js").exists() {
+            return Some(d1);
+        }
+        let Ok(sub) = std::fs::read_dir(&d1) else {
+            continue;
+        };
+        for sub_entry in sub.flatten() {
+            if !sub_entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let d2 = sub_entry.path();
+            if d2.join("server.js").exists() {
+                return Some(d2);
+            }
+        }
+    }
     None
 }
 
