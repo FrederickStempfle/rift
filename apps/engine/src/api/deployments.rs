@@ -57,7 +57,7 @@ pub async fn list_deployments(
             .await?;
     let mut responses = Vec::with_capacity(items.len());
     for deployment in items {
-        let public_url = public_url_for_deployment(&state, &project, &deployment).await?;
+        let public_url = public_url_for_deployment(&state, &project).await?;
         responses.push(DeploymentResponse::from_deployment(deployment, public_url));
     }
     Ok(Json(responses))
@@ -74,7 +74,7 @@ pub async fn create_deployment(
             .ok_or_else(|| AppError::NotFound("project not found".into()))?;
 
     let deployment = state.build_manager.enqueue_project_build(project.clone()).await?;
-    let public_url = public_url_for_deployment(&state, &project, &deployment).await?;
+    let public_url = public_url_for_deployment(&state, &project).await?;
 
     Ok((
         StatusCode::CREATED,
@@ -85,19 +85,12 @@ pub async fn create_deployment(
 async fn public_url_for_deployment(
     state: &AppState,
     project: &crate::db::models::Project,
-    deployment: &crate::db::models::Deployment,
 ) -> Result<Option<String>, AppError> {
     if let Some(domain) = domains::get_primary_domain_for_project(&state.pool, project.id).await? {
         return Ok(Some(state.config.public_url_for_host(&domain.domain)));
     }
-    // No domain — use direct IP:port from the deployment
-    match deployment.port {
-        Some(port) => {
-            let ip = state.public_ip.as_deref().unwrap_or("localhost");
-            Ok(Some(format!("http://{}:{}", ip, port)))
-        }
-        None => Ok(None),
-    }
+    // No custom domain — use subdomain-based URL
+    Ok(Some(state.config.public_url_for_subdomain(&project.subdomain)))
 }
 
 impl DeploymentResponse {

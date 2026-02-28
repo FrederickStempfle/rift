@@ -9,9 +9,24 @@ const DENO_STATIC_ENTRY: &str = r#"import { serveDir } from "jsr:@std/http/file-
 const port = parseInt(Deno.env.get("PORT") ?? "3000");
 
 Deno.serve({ port, hostname: "0.0.0.0" }, async (req) => {
-  const resp = await serveDir(req, { fsRoot: ".", quiet: true });
+  const url = new URL(req.url);
+  let resp = await serveDir(req, { fsRoot: ".", quiet: true });
+
+  // Handle Vite base path: if /base/assets/foo.css 404s, try /assets/foo.css
   if (resp.status === 404) {
-    const url = new URL(req.url);
+    const segments = url.pathname.split("/").filter(Boolean);
+    if (segments.length > 1) {
+      const stripped = "/" + segments.slice(1).join("/");
+      const strippedReq = new Request(new URL(stripped, req.url), req);
+      const strippedResp = await serveDir(strippedReq, { fsRoot: ".", quiet: true });
+      if (strippedResp.status !== 404) {
+        return strippedResp;
+      }
+    }
+  }
+
+  // SPA fallback: serve index.html for non-file routes
+  if (resp.status === 404) {
     const lastSegment = url.pathname.split("/").pop() ?? "";
     if (!lastSegment.includes(".")) {
       return serveDir(new Request(new URL("/index.html", req.url)), {
@@ -20,6 +35,7 @@ Deno.serve({ port, hostname: "0.0.0.0" }, async (req) => {
       });
     }
   }
+
   return resp;
 });
 "#;
