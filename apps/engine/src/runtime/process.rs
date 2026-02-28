@@ -82,6 +82,7 @@ pub fn spawn_deno_next(
         .arg("--allow-read")
         .arg(format!("--allow-write={}/.next", dir.display()))
         .arg("--allow-env")
+        .arg("--allow-sys")
         .arg("--unstable-detect-cjs")
         .arg("--no-prompt")
         .arg(&server_js)
