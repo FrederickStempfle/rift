@@ -258,6 +258,36 @@ pub async fn get_primary_domain_for_project(
     .map_err(AppError::Db)
 }
 
+pub async fn list_primary_domains_for_projects(
+    pool: &PgPool,
+    project_ids: &[Uuid],
+) -> Result<Vec<Domain>, AppError> {
+    if project_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, Domain>(
+        r#"
+        SELECT
+            id,
+            project_id,
+            domain,
+            is_primary,
+            ssl_status::text AS ssl_status,
+            ssl_expires_at,
+            ssl_error
+        FROM domains
+        WHERE project_id = ANY($1)
+          AND is_primary = true
+          AND ssl_status = 'active'
+        "#,
+    )
+    .bind(project_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Db)
+}
+
 pub async fn set_primary_domain(
     pool: &PgPool,
     project_id: Option<Uuid>,
@@ -269,11 +299,13 @@ pub async fn set_primary_domain(
 
     let mut tx = pool.begin().await.map_err(AppError::Db)?;
 
-    sqlx::query("UPDATE domains SET is_primary = false WHERE project_id = $1 AND is_primary = true")
-        .bind(project_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Db)?;
+    sqlx::query(
+        "UPDATE domains SET is_primary = false WHERE project_id = $1 AND is_primary = true",
+    )
+    .bind(project_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::Db)?;
 
     sqlx::query("UPDATE domains SET is_primary = true WHERE id = $1 AND project_id = $2")
         .bind(domain_id)
@@ -334,13 +366,12 @@ pub async fn assign_domain_to_project(
     let mut tx = pool.begin().await.map_err(AppError::Db)?;
 
     // Auto-set primary if project has no existing domains
-    let existing_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM domains WHERE project_id = $1",
-    )
-    .bind(project_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(AppError::Db)?;
+    let existing_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM domains WHERE project_id = $1")
+            .bind(project_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(AppError::Db)?;
 
     let is_primary = existing_count == 0;
 
@@ -402,10 +433,7 @@ pub async fn unassign_domain_from_project(
     .map_err(AppError::Db)
 }
 
-pub async fn update_ssl_provisioning(
-    pool: &PgPool,
-    domain_name: &str,
-) -> Result<(), AppError> {
+pub async fn update_ssl_provisioning(pool: &PgPool, domain_name: &str) -> Result<(), AppError> {
     sqlx::query(
         "UPDATE domains SET ssl_status = 'provisioning', ssl_error = NULL WHERE domain = $1",
     )
@@ -441,14 +469,12 @@ pub async fn update_ssl_failed(
     domain_name: &str,
     error: &str,
 ) -> Result<(), AppError> {
-    sqlx::query(
-        "UPDATE domains SET ssl_status = 'failed', ssl_error = $1 WHERE domain = $2",
-    )
-    .bind(error)
-    .bind(domain_name)
-    .execute(pool)
-    .await
-    .map_err(AppError::Db)?;
+    sqlx::query("UPDATE domains SET ssl_status = 'failed', ssl_error = $1 WHERE domain = $2")
+        .bind(error)
+        .bind(domain_name)
+        .execute(pool)
+        .await
+        .map_err(AppError::Db)?;
     Ok(())
 }
 

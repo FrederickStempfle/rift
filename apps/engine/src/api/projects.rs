@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{collections::HashMap, net::SocketAddr};
 
 use axum::{
     extract::{ConnectInfo, Path, State},
@@ -13,8 +13,9 @@ use uuid::Uuid;
 use crate::{
     api::{auth::AuthUser, AppState},
     db::{
-        domains, users,
+        deployments, domains,
         projects::{self, NewProject, UpdateProject},
+        users,
     },
     error::{AppError, AppResult},
     services::{audit::AuditEvent, github},
@@ -69,9 +70,22 @@ pub struct ProjectResponse {
     pub install_command: Option<String>,
     pub subdomain: String,
     pub public_url: String,
+    pub primary_domain: Option<String>,
+    pub latest_deployment: Option<ProjectDeploymentSummary>,
+    pub runtime_status: String,
     pub webhook_id: Option<i64>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectDeploymentSummary {
+    pub id: Uuid,
+    pub status: String,
+    pub commit_sha: String,
+    pub commit_message: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub async fn create_project(
@@ -140,7 +154,8 @@ pub async fn create_project(
                 );
                 match github::register_webhook(token, &owner, &repo, &webhook_url, &secret).await {
                     Ok(webhook_id) => {
-                        let _ = projects::set_webhook(&state.pool, project.id, webhook_id, &secret).await;
+                        let _ = projects::set_webhook(&state.pool, project.id, webhook_id, &secret)
+                            .await;
                         tracing::info!(project_id = %project.id, webhook_id, "registered GitHub webhook");
                     }
                     Err(e) => {
@@ -158,7 +173,7 @@ pub async fn create_project(
 
     Ok((
         StatusCode::CREATED,
-        Json(ProjectResponse::from_project(&state, project).await?),
+        Json(build_project_response(&state, project).await?),
     ))
 }
 
@@ -167,9 +182,33 @@ pub async fn list_projects(
     auth_user: AuthUser,
 ) -> AppResult<Json<Vec<ProjectResponse>>> {
     let projects = projects::list_projects_for_user(&state.pool, auth_user.user_id).await?;
+    let project_ids: Vec<_> = projects.iter().map(|project| project.id).collect();
+    let primary_domains = domains::list_primary_domains_for_projects(&state.pool, &project_ids)
+        .await?
+        .into_iter()
+        .filter_map(|domain| {
+            domain
+                .project_id
+                .map(|project_id| (project_id, domain.domain))
+        })
+        .collect::<HashMap<_, _>>();
+    let latest_deployments = deployments::list_latest_for_projects(&state.pool, &project_ids)
+        .await?
+        .into_iter()
+        .map(|deployment| (deployment.project_id, deployment))
+        .collect::<HashMap<_, _>>();
     let mut items = Vec::with_capacity(projects.len());
     for project in projects {
-        items.push(ProjectResponse::from_project(&state, project).await?);
+        let project_id = project.id;
+        items.push(
+            project_response_from_parts(
+                &state,
+                project,
+                primary_domains.get(&project_id).cloned(),
+                latest_deployments.get(&project_id).cloned(),
+            )
+            .await?,
+        );
     }
     Ok(Json(items))
 }
@@ -183,7 +222,7 @@ pub async fn get_project(
         .await?
         .ok_or_else(|| AppError::NotFound("project not found".into()))?;
 
-    Ok(Json(ProjectResponse::from_project(&state, project).await?))
+    Ok(Json(build_project_response(&state, project).await?))
 }
 
 pub async fn update_project(
@@ -223,7 +262,7 @@ pub async fn update_project(
     .await?
     .ok_or_else(|| AppError::NotFound("project not found".into()))?;
 
-    Ok(Json(ProjectResponse::from_project(&state, updated).await?))
+    Ok(Json(build_project_response(&state, updated).await?))
 }
 
 pub async fn delete_project(
@@ -237,9 +276,10 @@ pub async fn delete_project(
     if let Ok(Some(project)) =
         projects::get_project_for_user(&state.pool, project_id, auth_user.user_id).await
     {
-        if let (Some(webhook_id), Some((owner, repo))) =
-            (project.webhook_id, github::parse_owner_repo(&project.repo_url))
-        {
+        if let (Some(webhook_id), Some((owner, repo))) = (
+            project.webhook_id,
+            github::parse_owner_repo(&project.repo_url),
+        ) {
             if let Ok(Some(user)) = users::find_user_by_id(&state.pool, auth_user.user_id).await {
                 if let Some(token) = &user.github_token {
                     let _ = github::delete_webhook(token, &owner, &repo, webhook_id).await;
@@ -288,32 +328,71 @@ fn user_agent(headers: &HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
-impl ProjectResponse {
-    async fn from_project(
-        state: &AppState,
-        value: crate::db::models::Project,
-    ) -> Result<Self, AppError> {
-        // Use custom domain if configured, otherwise use subdomain-based URL
-        let public_url =
-            match domains::get_primary_domain_for_project(&state.pool, value.id).await? {
-                Some(domain) => state.config.public_url_for_host(&domain.domain),
-                None => state.config.public_url_for_subdomain(&value.subdomain),
-            };
-        Ok(Self {
+async fn build_project_response(
+    state: &AppState,
+    project: crate::db::models::Project,
+) -> Result<ProjectResponse, AppError> {
+    let primary_domain = domains::get_primary_domain_for_project(&state.pool, project.id)
+        .await?
+        .map(|domain| domain.domain);
+    let latest_deployment =
+        deployments::latest_deployment_for_project(&state.pool, project.id).await?;
+
+    project_response_from_parts(state, project, primary_domain, latest_deployment).await
+}
+
+async fn project_response_from_parts(
+    state: &AppState,
+    value: crate::db::models::Project,
+    primary_domain: Option<String>,
+    latest_deployment: Option<crate::db::models::Deployment>,
+) -> Result<ProjectResponse, AppError> {
+    let public_url = match primary_domain.as_deref() {
+        Some(domain) => state.config.public_url_for_host(domain),
+        None => state.config.public_url_for_subdomain(&value.subdomain),
+    };
+    let runtime_status = runtime_status_for_project(state, value.id).await.to_owned();
+
+    Ok(ProjectResponse {
+        id: value.id,
+        user_id: value.user_id,
+        name: value.name,
+        repo_url: value.repo_url,
+        branch: value.branch,
+        framework: value.framework,
+        build_command: value.build_command,
+        output_dir: value.output_dir,
+        install_command: value.install_command,
+        subdomain: value.subdomain,
+        public_url,
+        primary_domain,
+        latest_deployment: latest_deployment.map(ProjectDeploymentSummary::from),
+        runtime_status,
+        webhook_id: value.webhook_id,
+        created_at: value.created_at,
+        updated_at: value.updated_at,
+    })
+}
+
+async fn runtime_status_for_project(state: &AppState, project_id: Uuid) -> &'static str {
+    if state.runtime_manager.active_url(project_id).await.is_some() {
+        "active"
+    } else if state.runtime_manager.is_suspended(project_id).await {
+        "suspended"
+    } else {
+        "inactive"
+    }
+}
+
+impl From<crate::db::models::Deployment> for ProjectDeploymentSummary {
+    fn from(value: crate::db::models::Deployment) -> Self {
+        Self {
             id: value.id,
-            user_id: value.user_id,
-            name: value.name,
-            repo_url: value.repo_url,
-            branch: value.branch,
-            framework: value.framework,
-            build_command: value.build_command,
-            output_dir: value.output_dir,
-            install_command: value.install_command,
-            subdomain: value.subdomain,
-            public_url,
-            webhook_id: value.webhook_id,
+            status: value.status,
+            commit_sha: value.commit_sha,
+            commit_message: value.commit_message,
             created_at: value.created_at,
-            updated_at: value.updated_at,
-        })
+            finished_at: value.finished_at,
+        }
     }
 }

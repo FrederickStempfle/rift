@@ -322,6 +322,37 @@ pub async fn latest_ready_deployment_for_project(
     .map_err(AppError::Db)
 }
 
+pub async fn latest_deployment_for_project(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Option<Deployment>, AppError> {
+    sqlx::query_as::<_, Deployment>(
+        r#"
+        SELECT
+            id,
+            project_id,
+            commit_sha,
+            commit_message,
+            branch,
+            status::text AS status,
+            build_duration_ms,
+            url,
+            port,
+            started_at,
+            finished_at,
+            created_at
+        FROM deployments
+        WHERE project_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Db)
+}
+
 pub async fn set_started_at(
     pool: &PgPool,
     deployment_id: Uuid,
@@ -344,9 +375,7 @@ pub async fn set_started_at(
 }
 
 /// Returns the latest `ready` deployment per project (one per project).
-pub async fn list_latest_ready_per_project(
-    pool: &PgPool,
-) -> Result<Vec<Deployment>, AppError> {
+pub async fn list_latest_ready_per_project(pool: &PgPool) -> Result<Vec<Deployment>, AppError> {
     sqlx::query_as::<_, Deployment>(
         r#"
         SELECT DISTINCT ON (project_id)
@@ -358,6 +387,40 @@ pub async fn list_latest_ready_per_project(
         ORDER BY project_id, created_at DESC
         "#,
     )
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Db)
+}
+
+pub async fn list_latest_for_projects(
+    pool: &PgPool,
+    project_ids: &[Uuid],
+) -> Result<Vec<Deployment>, AppError> {
+    if project_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, Deployment>(
+        r#"
+        SELECT DISTINCT ON (project_id)
+            id,
+            project_id,
+            commit_sha,
+            commit_message,
+            branch,
+            status::text AS status,
+            build_duration_ms,
+            url,
+            port,
+            started_at,
+            finished_at,
+            created_at
+        FROM deployments
+        WHERE project_id = ANY($1)
+        ORDER BY project_id, created_at DESC
+        "#,
+    )
+    .bind(project_ids)
     .fetch_all(pool)
     .await
     .map_err(AppError::Db)

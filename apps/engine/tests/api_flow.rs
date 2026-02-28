@@ -6,11 +6,17 @@ use rift_engine::{
     build::BuildManager,
     config::Config,
     db,
+    proxy::{
+        acme::AcmeChallengeStore, analytics_collector::AnalyticsCollector,
+        firewall_cache::FirewallCache, tls::CertResolver,
+    },
     runtime::RuntimeManager,
     services::{
         audit::AuditLogger, auth::TokenService, password::PasswordService,
         rate_limit::AuthRateLimiters,
     },
+    ssl::SslManager,
+    ws::LogBroadcaster,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -60,13 +66,31 @@ impl TestServer {
             cors_origin: None,
             build_root: "/tmp/rift-test-builds".into(),
             deploy_root: "/tmp/rift-test-deployments".into(),
+            public_port: None,
+            public_ip: Some("127.0.0.1".into()),
+            ssl_dir: "/tmp/rift-test-ssl".into(),
+            acme_email: None,
+            acme_staging: false,
+            https_port: 0,
         });
         let runtime_manager = RuntimeManager::new();
+        let log_broadcaster = LogBroadcaster::new();
         let build_manager = BuildManager::new(
             pool.clone(),
+            Arc::clone(&config),
             runtime_manager.clone(),
             config.build_root.clone().into(),
             config.deploy_root.clone().into(),
+            log_broadcaster.clone(),
+        );
+        let analytics_collector = AnalyticsCollector::new(pool.clone());
+        let cert_resolver = CertResolver::new();
+        let challenge_store = AcmeChallengeStore::new();
+        let ssl_manager = SslManager::new(
+            pool.clone(),
+            Arc::clone(&config),
+            cert_resolver.clone(),
+            challenge_store.clone(),
         );
 
         let state = AppState {
@@ -83,6 +107,13 @@ impl TestServer {
             audit_logger: AuditLogger::new(pool),
             runtime_manager,
             build_manager,
+            public_ip: config.public_ip.clone(),
+            firewall_cache: FirewallCache::new(),
+            analytics_collector,
+            log_broadcaster,
+            ssl_manager,
+            challenge_store,
+            cert_resolver,
         };
 
         let app = api::router(state);
@@ -196,6 +227,75 @@ async fn project_crud_is_user_scoped() -> anyhow::Result<()> {
         .send()
         .await?;
     assert_eq!(delete_resp.status(), StatusCode::NO_CONTENT);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn list_projects_includes_latest_deployment_summary() -> anyhow::Result<()> {
+    let Some(server) = TestServer::start().await? else {
+        return Ok(());
+    };
+
+    let client = reqwest::Client::builder().cookie_store(true).build()?;
+    let token = register_user(&client, &server.base_url).await?;
+    let subdomain = format!("sub-{}", uuid::Uuid::new_v4().simple());
+
+    let create_project_resp = client
+        .post(format!("{}/api/projects/", server.base_url))
+        .bearer_auth(&token)
+        .json(&json!({
+            "name": "summary-app",
+            "repo_url": "https://github.com/example/repo",
+            "subdomain": subdomain,
+            "framework": "nextjs"
+        }))
+        .send()
+        .await?;
+
+    assert_eq!(create_project_resp.status(), StatusCode::CREATED);
+    let project_json: serde_json::Value = create_project_resp.json().await?;
+    let project_id = project_json["id"]
+        .as_str()
+        .expect("project id should be present");
+
+    let create_deployment_resp = client
+        .post(format!("{}/api/deployments", server.base_url))
+        .bearer_auth(&token)
+        .json(&json!({ "project_id": project_id }))
+        .send()
+        .await?;
+    assert_eq!(create_deployment_resp.status(), StatusCode::CREATED);
+
+    let list_projects_resp = client
+        .get(format!("{}/api/projects/", server.base_url))
+        .bearer_auth(&token)
+        .send()
+        .await?;
+    assert_eq!(list_projects_resp.status(), StatusCode::OK);
+
+    let projects: serde_json::Value = list_projects_resp.json().await?;
+    let first = projects
+        .as_array()
+        .and_then(|items| items.first())
+        .expect("project list should include one item");
+
+    assert_eq!(
+        first["runtime_status"].as_str().unwrap_or_default(),
+        "inactive"
+    );
+    assert_eq!(first["primary_domain"], serde_json::Value::Null);
+    assert_eq!(
+        first["public_url"].as_str().unwrap_or_default(),
+        format!("http://{}.localhost", subdomain)
+    );
+    assert_eq!(
+        first["latest_deployment"]["status"]
+            .as_str()
+            .unwrap_or_default(),
+        "queued"
+    );
 
     Ok(())
 }
