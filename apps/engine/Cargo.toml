@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 aes-gcm = "0.10"
 anyhow = "1"
+bytes = "1"
 argon2 = "0.5"
 axum = { version = "0.8", features = ["macros", "json", "ws"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
@@ -15,6 +16,9 @@ hex = "0.4"
 hickory-resolver = "0.25"
 ipnet = "2"
 http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
 jsonwebtoken = "9"
 once_cell = "1"
 rand = "0.8"
@@ -36,6 +40,5 @@ uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = "1"
 
 [dev-dependencies]
-http-body-util = "0.1"
 reqwest = { version = "0.12", features = ["json", "cookies", "rustls-tls"] }
 serial_test = "3"

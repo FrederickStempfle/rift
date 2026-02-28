@@ -39,7 +39,6 @@ async fn main() -> anyhow::Result<()> {
         pool.clone(),
         Arc::clone(&config),
         runtime_manager.clone(),
-        analytics_collector.clone(),
         config.build_root.clone().into(),
         config.deploy_root.clone().into(),
     );

@@ -12,11 +12,11 @@ use crate::{
     config::Config,
     db::{deployments, env_vars, models::Project, users},
     error::AppError,
-    proxy::analytics_collector::AnalyticsCollector,
     runtime::{RuntimeKind, RuntimeLaunchSpec, RuntimeManager},
 };
 
 use self::{
+    bundler::generate_deno_entry,
     detect::{detect_build_plan, detect_output_dir, BuildOutput, PackageManager},
     pipeline::{elapsed_ms, read_git_metadata, run_command_and_log, run_command_and_log_with_env},
 };
@@ -26,7 +26,6 @@ pub struct BuildManager {
     pool: sqlx::PgPool,
     config: Arc<Config>,
     runtime_manager: RuntimeManager,
-    analytics_collector: AnalyticsCollector,
     build_root: PathBuf,
     deploy_root: PathBuf,
     concurrency: Arc<Semaphore>,
@@ -37,7 +36,6 @@ impl BuildManager {
         pool: sqlx::PgPool,
         config: Arc<Config>,
         runtime_manager: RuntimeManager,
-        analytics_collector: AnalyticsCollector,
         build_root: PathBuf,
         deploy_root: PathBuf,
     ) -> Self {
@@ -45,7 +43,6 @@ impl BuildManager {
             pool,
             config,
             runtime_manager,
-            analytics_collector,
             build_root,
             deploy_root,
             concurrency: Arc::new(Semaphore::new(1)),
@@ -208,6 +205,12 @@ impl BuildManager {
                 .await;
         }
 
+        // For Next.js: inject standalone config before building
+        if matches!(plan.output, BuildOutput::Next) {
+            self.inject_next_standalone_config(&workspace_dir, deployment_id)
+                .await?;
+        }
+
         if let Err(error) = run_command_and_log_with_env(
             &self.pool,
             deployment_id,
@@ -233,9 +236,48 @@ impl BuildManager {
 
         deployments::update_status(&self.pool, deployment_id, "deploying").await?;
         let runtime_kind = match plan.output {
-            BuildOutput::Next => RuntimeKind::NextApp {
-                dir: workspace_dir.clone(),
-            },
+            BuildOutput::Next => {
+                // Verify standalone output exists
+                let standalone_server = workspace_dir.join(".next/standalone/server.js");
+                if !standalone_server.exists() {
+                    // The build may not have produced standalone output if
+                    // next.config was already set but the build failed silently.
+                    deployments::insert_log(
+                        &self.pool,
+                        deployment_id,
+                        "error",
+                        "Next.js standalone output not found (.next/standalone/server.js). Ensure `output: \"standalone\"` is in next.config.",
+                        "build",
+                    )
+                    .await?;
+                    deployments::mark_failed(
+                        &self.pool,
+                        deployment_id,
+                        Some(elapsed_ms(started_at)),
+                    )
+                    .await?;
+                    return Err(AppError::Internal(
+                        "Next.js standalone output not found".into(),
+                    ));
+                }
+
+                // Copy static assets into standalone dir (Next.js requires this)
+                let standalone_dir = workspace_dir.join(".next/standalone");
+                let static_src = workspace_dir.join(".next/static");
+                let static_dst = standalone_dir.join(".next/static");
+                if static_src.exists() {
+                    copy_dir_recursive(&static_src, &static_dst).await?;
+                }
+                let public_src = workspace_dir.join("public");
+                let public_dst = standalone_dir.join("public");
+                if public_src.exists() {
+                    copy_dir_recursive(&public_src, &public_dst).await?;
+                }
+
+                RuntimeKind::NextDeno {
+                    dir: workspace_dir.clone(),
+                }
+            }
             BuildOutput::Static { .. } => {
                 let detected_dir = detect_output_dir(&project, &workspace_dir);
                 let output_dir = workspace_dir.join(&detected_dir);
@@ -266,21 +308,24 @@ impl BuildManager {
                         "build output directory not found".into(),
                     ));
                 }
-                RuntimeKind::StaticDir { dir: output_dir }
+
+                // Generate Deno static file server entry point
+                generate_deno_entry(&output_dir).await.map_err(|e| {
+                    AppError::Internal(format!("failed to generate Deno entry: {e}"))
+                })?;
+
+                RuntimeKind::StaticDeno { dir: output_dir }
             }
         };
 
         let (url, port) = match self
             .runtime_manager
-            .deploy(
-                RuntimeLaunchSpec {
-                    project_id: project.id,
-                    deployment_id,
-                    kind: runtime_kind,
-                    env_vars: user_env_vars,
-                },
-                self.analytics_collector.clone(),
-            )
+            .deploy(RuntimeLaunchSpec {
+                project_id: project.id,
+                deployment_id,
+                kind: runtime_kind,
+                env_vars: user_env_vars,
+            })
             .await
         {
             Ok(result) => result,
@@ -311,4 +356,97 @@ impl BuildManager {
         .await?;
         Ok(())
     }
+
+    /// Inject `output: "standalone"` into next.config.{js,mjs,ts} if not
+    /// already present. This is required for Deno to run the Next.js app.
+    async fn inject_next_standalone_config(
+        &self,
+        workspace_dir: &std::path::Path,
+        deployment_id: Uuid,
+    ) -> Result<(), AppError> {
+        let config_files = ["next.config.ts", "next.config.mjs", "next.config.js"];
+        let mut found = None;
+        for name in &config_files {
+            let path = workspace_dir.join(name);
+            if path.exists() {
+                found = Some(path);
+                break;
+            }
+        }
+
+        let config_path = match found {
+            Some(p) => p,
+            None => return Ok(()), // No config file — Next.js will use defaults
+        };
+
+        let content = fs::read_to_string(&config_path).await.map_err(|e| {
+            AppError::Internal(format!("failed to read {}: {e}", config_path.display()))
+        })?;
+
+        if content.contains("output") {
+            // Already has an output field — don't overwrite user's config
+            return Ok(());
+        }
+
+        // Insert `output: "standalone"` after the first `{` in the config object
+        let injected = if let Some(pos) = content.find('{') {
+            let (before, after) = content.split_at(pos + 1);
+            format!("{before}\n  output: \"standalone\",{after}")
+        } else {
+            // Fallback: couldn't find object literal, skip injection
+            return Ok(());
+        };
+
+        fs::write(&config_path, &injected).await.map_err(|e| {
+            AppError::Internal(format!("failed to write {}: {e}", config_path.display()))
+        })?;
+
+        deployments::insert_log(
+            &self.pool,
+            deployment_id,
+            "info",
+            "Injected output: \"standalone\" into next.config",
+            "build",
+        )
+        .await?;
+
+        Ok(())
+    }
+}
+
+/// Recursively copy a directory tree.
+async fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), AppError> {
+    fs::create_dir_all(dst).await.map_err(|e| {
+        AppError::Internal(format!(
+            "failed to create dir {}: {e}",
+            dst.display()
+        ))
+    })?;
+
+    let mut entries = fs::read_dir(src).await.map_err(|e| {
+        AppError::Internal(format!("failed to read dir {}: {e}", src.display()))
+    })?;
+
+    while let Some(entry) = entries.next_entry().await.map_err(|e| {
+        AppError::Internal(format!("failed to read entry in {}: {e}", src.display()))
+    })? {
+        let file_type = entry.file_type().await.map_err(|e| {
+            AppError::Internal(format!("failed to get file type: {e}"))
+        })?;
+        let dest_path = dst.join(entry.file_name());
+
+        if file_type.is_dir() {
+            Box::pin(copy_dir_recursive(&entry.path(), &dest_path)).await?;
+        } else {
+            fs::copy(entry.path(), &dest_path).await.map_err(|e| {
+                AppError::Internal(format!(
+                    "failed to copy {} to {}: {e}",
+                    entry.path().display(),
+                    dest_path.display()
+                ))
+            })?;
+        }
+    }
+
+    Ok(())
 }

@@ -1,24 +1,23 @@
-use std::net::SocketAddr;
+use std::{convert::Infallible, net::SocketAddr};
 
-use axum::{
-    body::{to_bytes, Body},
-    extract::{ConnectInfo, OriginalUri, Request, State},
-    http::{
-        header::{HOST, HeaderName},
-        HeaderMap, Response, StatusCode, Uri,
-    },
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::{
+    body::Incoming, header::HOST, HeaderMap, Request, Response, StatusCode, Uri,
 };
+use hyper_util::client::legacy::Client;
 use uuid::Uuid;
 
 use crate::{
     api::AppState,
-    db::{deployments, domains, projects},
+    db::{domains, projects},
     error::AppError,
     proxy::analytics_collector::RequestEvent,
 };
 
-const MAX_PROXY_BODY_BYTES: usize = 10 * 1024 * 1024;
-const HOP_BY_HOP_HEADERS: &[&str] = &[
+type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Full<Bytes>>;
+
+const HOP_BY_HOP: &[&str] = &[
     "connection",
     "keep-alive",
     "proxy-authenticate",
@@ -29,102 +28,146 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
     "upgrade",
 ];
 
-pub async fn proxy_request(
-    State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    original_uri: OriginalUri,
-    request: Request,
-) -> Result<Response<Body>, StatusCode> {
+pub async fn handle_request(
+    req: Request<Incoming>,
+    remote_addr: SocketAddr,
+    client: HttpClient,
+    state: AppState,
+) -> Result<Response<Full<Bytes>>, Infallible> {
     let start = std::time::Instant::now();
-    let host = extract_host(request.headers()).ok_or(StatusCode::BAD_REQUEST)?;
-    let project_id = resolve_project_id(&state, &host)
-        .await
-        .map_err(map_proxy_error)?
-        .ok_or(StatusCode::NOT_FOUND)?;
 
-    let result = proxy_inner(&state, addr, &original_uri, request, project_id).await;
+    let result = route_and_forward(req, remote_addr, &client, &state).await;
 
-    let status_code = match &result {
-        Ok(resp) => resp.status().as_u16(),
-        Err(sc) => sc.as_u16(),
+    let (status_code, project_id) = match &result {
+        Ok((resp, pid)) => (resp.status().as_u16(), *pid),
+        Err((sc, pid)) => (sc.as_u16(), *pid),
     };
-    state.analytics_collector.record(RequestEvent {
-        project_id,
-        status: status_code,
-        duration_ms: start.elapsed().as_millis() as u64,
-    });
 
-    result
-}
-
-async fn proxy_inner(
-    state: &AppState,
-    addr: SocketAddr,
-    original_uri: &OriginalUri,
-    request: Request,
-    project_id: Uuid,
-) -> Result<Response<Body>, StatusCode> {
-    let allowed = state
-        .firewall_cache
-        .is_allowed(&state.pool, project_id, addr.ip())
-        .await
-        .map_err(map_proxy_error)?;
-    if !allowed {
-        return Err(StatusCode::FORBIDDEN);
+    if let Some(pid) = project_id {
+        state.analytics_collector.record(RequestEvent {
+            project_id: pid,
+            status: status_code,
+            duration_ms: start.elapsed().as_millis() as u64,
+        });
     }
 
-    let deployment = deployments::latest_ready_deployment_for_project(&state.pool, project_id)
+    match result {
+        Ok((resp, _)) => Ok(resp),
+        Err((sc, _)) => Ok(error_response(sc)),
+    }
+}
+
+async fn route_and_forward(
+    req: Request<Incoming>,
+    remote_addr: SocketAddr,
+    client: &HttpClient,
+    state: &AppState,
+) -> Result<(Response<Full<Bytes>>, Option<Uuid>), (StatusCode, Option<Uuid>)> {
+    let host = extract_host(req.headers()).ok_or((StatusCode::BAD_REQUEST, None))?;
+
+    let project_id = resolve_project_id(state, &host)
         .await
-        .map_err(map_proxy_error)?
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let target_base = deployment.url.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let target_url = format!("{}{}", target_base, path_and_query(original_uri));
+        .map_err(|e| (map_app_error(e), None))?
+        .ok_or((StatusCode::NOT_FOUND, None))?;
 
-    let host = extract_host(request.headers()).unwrap_or_default();
-    let (parts, body) = request.into_parts();
-    let body = to_bytes(body, MAX_PROXY_BODY_BYTES)
+    let pid = Some(project_id);
+
+    // Firewall check
+    let allowed = state
+        .firewall_cache
+        .is_allowed(&state.pool, project_id, remote_addr.ip())
         .await
-        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+        .map_err(|e| (map_app_error(e), pid))?;
+    if !allowed {
+        return Err((StatusCode::FORBIDDEN, pid));
+    }
 
-    let client = reqwest::Client::new();
-    let mut upstream = client.request(parts.method.clone(), target_url);
-    upstream = upstream.body(body.to_vec());
+    // Look up active runtime URL (in-memory, no DB hit)
+    let target_base = state
+        .runtime_manager
+        .active_url(project_id)
+        .await
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, pid))?;
 
+    // Build target URL
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+    let target_url: Uri = format!("{target_base}{path_and_query}")
+        .parse()
+        .map_err(|_| (StatusCode::BAD_REQUEST, pid))?;
+
+    // Decompose request
+    let (parts, body) = req.into_parts();
+
+    // Read body (bounded)
+    let body_bytes = body
+        .collect()
+        .await
+        .map_err(|_| (StatusCode::BAD_REQUEST, pid))?
+        .to_bytes();
+
+    // Build upstream request
+    let mut upstream = Request::builder()
+        .method(parts.method.clone())
+        .uri(&target_url);
+
+    // Copy headers, filtering hop-by-hop and forwarding headers
     for (name, value) in &parts.headers {
-        if should_skip_request_header(name) {
+        let lower = name.as_str().to_ascii_lowercase();
+        if lower == "host"
+            || lower.starts_with("x-forwarded-")
+            || lower == "forwarded"
+            || HOP_BY_HOP.contains(&lower.as_str())
+        {
             continue;
         }
         upstream = upstream.header(name, value);
     }
 
+    // Set forwarding headers
     upstream = upstream
-        .header("x-forwarded-for", addr.ip().to_string())
-        .header("x-forwarded-host", host.clone())
-        .header("x-forwarded-proto", state.config.proxy_scheme.clone())
-        .header(HOST, host);
+        .header("x-forwarded-for", remote_addr.ip().to_string())
+        .header("x-forwarded-host", &host)
+        .header("x-forwarded-proto", &state.config.proxy_scheme)
+        .header(HOST, &host);
 
-    let upstream_response = upstream
-        .send()
+    let upstream_req = upstream
+        .body(Full::new(body_bytes))
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, pid))?;
+
+    // Forward
+    let upstream_resp = client
+        .request(upstream_req)
         .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        .map_err(|_| (StatusCode::BAD_GATEWAY, pid))?;
 
-    let status = upstream_response.status();
+    // Build response
+    let status = upstream_resp.status();
     let mut response = Response::builder().status(status);
-    for (name, value) in upstream_response.headers() {
-        if should_skip_response_header(name) {
+
+    for (name, value) in upstream_resp.headers() {
+        let lower = name.as_str().to_ascii_lowercase();
+        if HOP_BY_HOP.contains(&lower.as_str()) {
             continue;
         }
         response = response.header(name, value);
     }
 
-    let bytes = upstream_response
-        .bytes()
+    let resp_bytes = upstream_resp
+        .into_body()
+        .collect()
         .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        .map_err(|_| (StatusCode::BAD_GATEWAY, pid))?
+        .to_bytes();
 
-    response
-        .body(Body::from(bytes))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    let resp = response
+        .body(Full::new(resp_bytes))
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, pid))?;
+
+    Ok((resp, pid))
 }
 
 async fn resolve_project_id(state: &AppState, host: &str) -> Result<Option<Uuid>, AppError> {
@@ -147,33 +190,22 @@ fn extract_host(headers: &HeaderMap) -> Option<String> {
     Some(host.split(':').next()?.to_owned())
 }
 
-fn path_and_query(uri: &Uri) -> String {
-    uri.path_and_query()
-        .map(|value| value.as_str().to_owned())
-        .unwrap_or_else(|| "/".to_owned())
+fn error_response(status: StatusCode) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(status)
+        .body(Full::new(Bytes::from(
+            status.canonical_reason().unwrap_or("Error"),
+        )))
+        .unwrap()
 }
 
-fn should_skip_request_header(name: &HeaderName) -> bool {
-    let lower = name.as_str().to_ascii_lowercase();
-    if lower == "host" || lower.starts_with("x-forwarded-") || lower == "forwarded" {
-        return true;
-    }
-    HOP_BY_HOP_HEADERS.contains(&lower.as_str())
-}
-
-fn should_skip_response_header(name: &HeaderName) -> bool {
-    HOP_BY_HOP_HEADERS.contains(&name.as_str().to_ascii_lowercase().as_str())
-}
-
-fn map_proxy_error(error: AppError) -> StatusCode {
+fn map_app_error(error: AppError) -> StatusCode {
     match error {
         AppError::NotFound(_) => StatusCode::NOT_FOUND,
         AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
         AppError::Conflict(_) => StatusCode::CONFLICT,
         AppError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
         AppError::Unauthorized(_) | AppError::Forbidden(_) => StatusCode::FORBIDDEN,
-        AppError::Db(_) | AppError::Internal(_) => {
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
+        AppError::Db(_) | AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
