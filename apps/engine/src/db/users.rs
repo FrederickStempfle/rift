@@ -12,6 +12,7 @@ pub struct GitHubIdentity {
     pub github_login: String,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
+    pub github_token: Option<String>,
 }
 
 pub async fn create_user(
@@ -23,7 +24,7 @@ pub async fn create_user(
         r#"
         INSERT INTO users (email, password_hash)
         VALUES ($1, $2)
-        RETURNING id, email, password_hash, github_id, github_login, display_name, avatar_url, created_at
+        RETURNING id, email, password_hash, github_id, github_login, display_name, avatar_url, github_token, created_at
         "#,
     )
     .bind(email)
@@ -42,7 +43,7 @@ pub async fn create_user(
 pub async fn find_user_by_email(pool: &PgPool, email: &str) -> Result<Option<User>, AppError> {
     sqlx::query_as::<_, User>(
         r#"
-        SELECT id, email, password_hash, github_id, github_login, display_name, avatar_url, created_at
+        SELECT id, email, password_hash, github_id, github_login, display_name, avatar_url, github_token, created_at
         FROM users
         WHERE email = $1
         "#,
@@ -56,7 +57,7 @@ pub async fn find_user_by_email(pool: &PgPool, email: &str) -> Result<Option<Use
 pub async fn find_user_by_id(pool: &PgPool, user_id: uuid::Uuid) -> Result<Option<User>, AppError> {
     sqlx::query_as::<_, User>(
         r#"
-        SELECT id, email, password_hash, github_id, github_login, display_name, avatar_url, created_at
+        SELECT id, email, password_hash, github_id, github_login, display_name, avatar_url, github_token, created_at
         FROM users
         WHERE id = $1
         "#,
@@ -102,10 +103,11 @@ pub async fn upsert_github_user(
             github_id,
             github_login,
             display_name,
-            avatar_url
+            avatar_url,
+            github_token
         )
-        VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING id, email, password_hash, github_id, github_login, display_name, avatar_url, created_at
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id, email, password_hash, github_id, github_login, display_name, avatar_url, github_token, created_at
         "#,
     )
     .bind(email)
@@ -114,6 +116,7 @@ pub async fn upsert_github_user(
     .bind(&identity.github_login)
     .bind(&identity.display_name)
     .bind(&identity.avatar_url)
+    .bind(&identity.github_token)
     .fetch_one(&mut *tx)
     .await
     .map_err(|error| {
@@ -134,7 +137,7 @@ async fn find_user_by_github_id_tx(
 ) -> Result<Option<User>, AppError> {
     sqlx::query_as::<_, User>(
         r#"
-        SELECT id, email, password_hash, github_id, github_login, display_name, avatar_url, created_at
+        SELECT id, email, password_hash, github_id, github_login, display_name, avatar_url, github_token, created_at
         FROM users
         WHERE github_id = $1
         "#,
@@ -151,7 +154,7 @@ async fn find_user_by_email_tx(
 ) -> Result<Option<User>, AppError> {
     sqlx::query_as::<_, User>(
         r#"
-        SELECT id, email, password_hash, github_id, github_login, display_name, avatar_url, created_at
+        SELECT id, email, password_hash, github_id, github_login, display_name, avatar_url, github_token, created_at
         FROM users
         WHERE email = $1
         "#,
@@ -180,9 +183,10 @@ async fn update_github_user_tx(
             github_id = $3,
             github_login = $4,
             display_name = $5,
-            avatar_url = $6
+            avatar_url = $6,
+            github_token = $7
         WHERE id = $1
-        RETURNING id, email, password_hash, github_id, github_login, display_name, avatar_url, created_at
+        RETURNING id, email, password_hash, github_id, github_login, display_name, avatar_url, github_token, created_at
         "#,
     )
     .bind(user_id)
@@ -191,6 +195,7 @@ async fn update_github_user_tx(
     .bind(&identity.github_login)
     .bind(&identity.display_name)
     .bind(&identity.avatar_url)
+    .bind(&identity.github_token)
     .fetch_one(&mut **tx)
     .await
     .map_err(|error| {

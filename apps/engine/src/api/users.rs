@@ -55,6 +55,7 @@ pub struct GitHubExchangeRequest {
     pub login: String,
     pub name: Option<String>,
     pub avatar_url: Option<String>,
+    pub github_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -316,6 +317,7 @@ pub async fn exchange_github_session(
             github_login: payload.login,
             display_name: payload.name,
             avatar_url: payload.avatar_url,
+            github_token: payload.github_token,
         },
         &fallback_password_hash,
     )

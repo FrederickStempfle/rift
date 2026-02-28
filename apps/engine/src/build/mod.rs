@@ -9,7 +9,7 @@ use tokio::{fs, sync::Semaphore};
 use uuid::Uuid;
 
 use crate::{
-    db::{deployments, models::Project},
+    db::{deployments, models::Project, users},
     error::AppError,
     runtime::{RuntimeKind, RuntimeLaunchSpec, RuntimeManager},
 };
@@ -97,6 +97,17 @@ impl BuildManager {
             })?;
         }
 
+        // Inject GitHub token into clone URL for private repos
+        let clone_url = match users::find_user_by_id(&self.pool, project.user_id).await? {
+            Some(user) if user.github_token.is_some() => {
+                let token = user.github_token.unwrap();
+                project
+                    .repo_url
+                    .replace("https://github.com/", &format!("https://x-access-token:{token}@github.com/"))
+            }
+            _ => project.repo_url.clone(),
+        };
+
         run_command_and_log(
             &self.pool,
             deployment_id,
@@ -105,7 +116,7 @@ impl BuildManager {
             &format!(
                 "git clone --depth 1 --branch '{}' '{}' '{}'",
                 project.branch,
-                project.repo_url,
+                clone_url,
                 workspace_dir.display()
             ),
         )
