@@ -27,6 +27,24 @@ pub struct BuildPlan {
     pub output: BuildOutput,
 }
 
+/// Known web frameworks that produce deployable output.
+const WEB_FRAMEWORKS: &[&str] = &[
+    "next", "vite", "nuxt", "@remix-run/dev", "astro", "@sveltejs/kit",
+];
+
+/// A workspace package that looks like a deployable web app.
+#[derive(Debug)]
+struct WorkspaceApp {
+    /// The package name from package.json (e.g. "@lifo-sh/playground").
+    name: String,
+    /// Relative path from workspace root (e.g. "apps/playground").
+    rel_path: String,
+    /// The detected web framework dependency.
+    framework: String,
+    /// Whether the package has Next.js.
+    is_next: bool,
+}
+
 pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<BuildPlan, AppError> {
     let package_json_path = workspace_dir.join("package.json");
     let package_json = fs::read_to_string(&package_json_path).map_err(|error| {
@@ -75,6 +93,67 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
                 PackageManager::Npm => "npm install".to_owned(),
             });
 
+    // Check if this is a monorepo with a deployable web app
+    let is_monorepo = workspace_dir.join("pnpm-workspace.yaml").exists()
+        || parsed.get("workspaces").is_some();
+
+    if is_monorepo {
+        if let Some(app) = find_deployable_app(workspace_dir) {
+            let build_command = project.build_command.clone().unwrap_or_else(|| {
+                match package_manager {
+                    PackageManager::Pnpm => format!("pnpm --filter {} build", app.name),
+                    PackageManager::Yarn => format!("yarn workspace {} build", app.name),
+                    PackageManager::Bun => format!("bun run --filter {} build", app.name),
+                    PackageManager::Npm => format!("npm run build --workspace={}", app.name),
+                }
+            });
+
+            // Run root install first, then the root build if it exists (for
+            // building shared library packages the app depends on), then
+            // the app-specific build.
+            let full_build_command = if project.build_command.is_some() {
+                build_command
+            } else {
+                let has_root_build = scripts
+                    .and_then(|s| s.get("build"))
+                    .is_some();
+                if has_root_build {
+                    let root_build = match package_manager {
+                        PackageManager::Pnpm => "pnpm build".to_owned(),
+                        PackageManager::Yarn => "yarn build".to_owned(),
+                        PackageManager::Bun => "bun run build".to_owned(),
+                        PackageManager::Npm => "npm run build".to_owned(),
+                    };
+                    format!("{root_build} && {build_command}")
+                } else {
+                    build_command
+                }
+            };
+
+            if app.is_next {
+                return Ok(BuildPlan {
+                    framework: "nextjs".to_owned(),
+                    package_manager,
+                    install_command,
+                    build_command: full_build_command,
+                    output: BuildOutput::Next,
+                });
+            }
+
+            return Ok(BuildPlan {
+                framework: app.framework.clone(),
+                package_manager,
+                install_command,
+                build_command: full_build_command,
+                output: BuildOutput::Static {
+                    dir: format!("{}/dist", app.rel_path),
+                },
+            });
+        }
+    }
+
+    // Non-monorepo or no deployable app found in workspace — fall through to
+    // standard single-package detection.
     let build_command = project
         .build_command
         .clone()
@@ -96,8 +175,7 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
         .any(|dep| *dep == "next")
         || workspace_dir.join("next.config.js").exists()
         || workspace_dir.join("next.config.ts").exists()
-        || workspace_dir.join("next.config.mjs").exists()
-        || has_dep_in_workspace(workspace_dir, "next");
+        || workspace_dir.join("next.config.mjs").exists();
 
     if looks_like_next {
         return Ok(BuildPlan {
@@ -112,8 +190,7 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
     let looks_like_vite = dependencies.iter().chain(dev_dependencies.iter()).any(|dep| *dep == "vite")
         || workspace_dir.join("vite.config.ts").exists()
         || workspace_dir.join("vite.config.js").exists()
-        || workspace_dir.join("vite.config.mts").exists()
-        || has_dep_in_workspace(workspace_dir, "vite");
+        || workspace_dir.join("vite.config.mts").exists();
 
     let framework = if looks_like_vite {
         "vite".to_owned()
@@ -141,33 +218,51 @@ pub fn detect_output_dir(project: &Project, workspace_dir: &Path) -> String {
 
     const OUTPUT_DIRS: &[&str] = &["dist", "build", "out", ".output/public"];
 
-    // Check root-level output dirs first
+    // Check root-level output dirs that contain an index.html (web app output)
     for dir in OUTPUT_DIRS {
-        if workspace_dir.join(dir).exists() {
+        let candidate = workspace_dir.join(dir);
+        if candidate.join("index.html").exists() {
             return (*dir).to_owned();
         }
     }
 
-    // Scan up to 2 levels deep for monorepo structures
-    // e.g. apps/web/dist, packages/app/build
+    // Scan apps/ first (preferred), then packages/, looking for web output with index.html
+    for container in ["apps", "packages"] {
+        for pkg_dir in list_subdirs(&workspace_dir.join(container)) {
+            let pkg_name = pkg_dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+            for output in OUTPUT_DIRS {
+                let candidate = pkg_dir.join(output);
+                if candidate.join("index.html").exists() {
+                    return format!("{container}/{pkg_name}/{output}");
+                }
+            }
+        }
+    }
+
+    // Fallback: any output dir with index.html at any depth
     for depth1 in list_subdirs(workspace_dir) {
         let d1_name = depth1.file_name().unwrap_or_default().to_string_lossy().to_string();
-
-        // Check depth-1 output dirs (e.g. web/dist)
         for output in OUTPUT_DIRS {
-            if depth1.join(output).exists() {
+            let candidate = depth1.join(output);
+            if candidate.join("index.html").exists() {
                 return format!("{d1_name}/{output}");
             }
         }
-
-        // Check depth-2 output dirs (e.g. apps/web/dist, packages/app/build)
         for depth2 in list_subdirs(&depth1) {
             let d2_name = depth2.file_name().unwrap_or_default().to_string_lossy().to_string();
             for output in OUTPUT_DIRS {
-                if depth2.join(output).exists() {
+                let candidate = depth2.join(output);
+                if candidate.join("index.html").exists() {
                     return format!("{d1_name}/{d2_name}/{output}");
                 }
             }
+        }
+    }
+
+    // Last resort: any root output dir that exists (even without index.html)
+    for dir in OUTPUT_DIRS {
+        if workspace_dir.join(dir).exists() {
+            return (*dir).to_owned();
         }
     }
 
@@ -192,9 +287,18 @@ fn list_subdirs(dir: &Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-/// Check if any workspace package has a given dependency.
-/// Scans package.json files in common monorepo locations (apps/*, packages/*).
-fn has_dep_in_workspace(workspace_dir: &Path, dep_name: &str) -> bool {
+/// Scan workspace packages to find a deployable web app.
+///
+/// Looks in `apps/` (preferred) then `packages/` for a package that:
+/// 1. Has a known web framework (vite, next, nuxt, etc.) as a dependency
+/// 2. Has a `build` script
+///
+/// Prefers `apps/` over `packages/`, and within each container prefers
+/// packages that have an `index.html` (SPA entry point).
+fn find_deployable_app(workspace_dir: &Path) -> Option<WorkspaceApp> {
+    let mut candidates = Vec::new();
+
+    // Scan apps/ first, then packages/
     for container in ["apps", "packages"] {
         let container_dir = workspace_dir.join(container);
         if !container_dir.is_dir() {
@@ -207,22 +311,74 @@ fn has_dep_in_workspace(workspace_dir: &Path, dep_name: &str) -> bool {
             if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
                 continue;
             }
-            let pkg_json = entry.path().join("package.json");
-            if let Ok(content) = fs::read_to_string(&pkg_json) {
-                if let Ok(parsed) = serde_json::from_str::<Value>(&content) {
-                    for section in ["dependencies", "devDependencies"] {
-                        if parsed
-                            .get(section)
-                            .and_then(Value::as_object)
-                            .map(|deps| deps.contains_key(dep_name))
-                            .unwrap_or(false)
-                        {
-                            return true;
-                        }
-                    }
-                }
+            let pkg_json_path = entry.path().join("package.json");
+            let Ok(content) = fs::read_to_string(&pkg_json_path) else {
+                continue;
+            };
+            let Ok(parsed) = serde_json::from_str::<Value>(&content) else {
+                continue;
+            };
+
+            // Must have a build script
+            let has_build = parsed
+                .get("scripts")
+                .and_then(Value::as_object)
+                .and_then(|s| s.get("build"))
+                .is_some();
+            if !has_build {
+                continue;
+            }
+
+            // Check for web framework dependencies
+            let all_deps: Vec<&str> = ["dependencies", "devDependencies"]
+                .iter()
+                .flat_map(|section| {
+                    parsed
+                        .get(*section)
+                        .and_then(Value::as_object)
+                        .into_iter()
+                        .flatten()
+                        .map(|(k, _)| k.as_str())
+                })
+                .collect();
+
+            let framework = WEB_FRAMEWORKS
+                .iter()
+                .find(|&&fw| all_deps.iter().any(|dep| *dep == fw));
+
+            if let Some(&fw) = framework {
+                let dir_name_str = entry.file_name().to_string_lossy().to_string();
+                let pkg_name = parsed
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(|s| s.to_owned())
+                    .unwrap_or_else(|| dir_name_str.clone());
+
+                let has_index_html = entry.path().join("index.html").exists();
+
+                candidates.push((
+                    WorkspaceApp {
+                        name: pkg_name,
+                        rel_path: format!("{container}/{dir_name_str}"),
+                        framework: if fw == "next" { "nextjs" } else { fw }.to_owned(),
+                        is_next: fw == "next",
+                    },
+                    container == "apps",
+                    has_index_html,
+                ));
             }
         }
     }
-    false
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Sort: prefer apps/ over packages/, then prefer those with index.html
+    candidates.sort_by(|a, b| {
+        b.1.cmp(&a.1) // apps/ first
+            .then(b.2.cmp(&a.2)) // has index.html first
+    });
+
+    Some(candidates.into_iter().next().unwrap().0)
 }
