@@ -2,7 +2,7 @@ pub mod health;
 pub mod process;
 pub mod scaler;
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
 
 use sqlx::PgPool;
 use tokio::sync::Mutex;
@@ -17,7 +17,13 @@ use self::{
 
 #[derive(Clone, Debug)]
 pub struct RuntimeManager {
-    inner: Arc<Mutex<HashMap<Uuid, ActiveRuntime>>>,
+    inner: Arc<Mutex<RuntimeState>>,
+}
+
+#[derive(Debug)]
+struct RuntimeState {
+    active: HashMap<Uuid, ActiveRuntime>,
+    suspended: HashMap<Uuid, SuspendedRuntime>,
 }
 
 #[derive(Debug)]
@@ -25,6 +31,17 @@ struct ActiveRuntime {
     deployment_id: Uuid,
     port: u16,
     child: Arc<Mutex<tokio::process::Child>>,
+    kind: RuntimeKind,
+    env_vars: Vec<(String, String)>,
+    last_request: Instant,
+}
+
+/// A runtime that was killed due to inactivity but can be re-launched.
+#[derive(Debug, Clone)]
+struct SuspendedRuntime {
+    deployment_id: Uuid,
+    kind: RuntimeKind,
+    env_vars: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -47,7 +64,10 @@ pub struct RuntimeLaunchSpec {
 impl RuntimeManager {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
+            inner: Arc::new(Mutex::new(RuntimeState {
+                active: HashMap::new(),
+                suspended: HashMap::new(),
+            })),
         }
     }
 
@@ -80,15 +100,25 @@ impl RuntimeManager {
             ));
         }
 
+        let mut state = self.inner.lock().await;
+
+        // Remove from suspended if present (fresh deploy replaces any suspended state)
+        state.suspended.remove(&spec.project_id);
+
         // Atomic swap — old runtime returned, new one inserted.
-        let old = self.inner.lock().await.insert(
+        let old = state.active.insert(
             spec.project_id,
             ActiveRuntime {
                 deployment_id: spec.deployment_id,
                 port,
                 child: Arc::new(Mutex::new(child)),
+                kind: spec.kind,
+                env_vars: spec.env_vars,
+                last_request: Instant::now(),
             },
         );
+
+        drop(state);
 
         // Graceful drain: give the old process 5 seconds to finish in-flight
         // requests before killing it.
@@ -103,7 +133,9 @@ impl RuntimeManager {
     }
 
     pub async fn stop_project(&self, project_id: Uuid) -> Result<(), AppError> {
-        if let Some(runtime) = self.inner.lock().await.remove(&project_id) {
+        let mut state = self.inner.lock().await;
+        state.suspended.remove(&project_id);
+        if let Some(runtime) = state.active.remove(&project_id) {
             let mut child = runtime.child.lock().await;
             let _ = child.kill().await;
         }
@@ -114,6 +146,7 @@ impl RuntimeManager {
         self.inner
             .lock()
             .await
+            .active
             .get(&project_id)
             .map(|runtime| format!("http://127.0.0.1:{}", runtime.port))
     }
@@ -122,8 +155,95 @@ impl RuntimeManager {
         self.inner
             .lock()
             .await
+            .active
             .get(&project_id)
             .map(|runtime| runtime.deployment_id)
+    }
+
+    /// Record a request to a project, keeping it alive for scale-to-zero.
+    pub async fn touch(&self, project_id: Uuid) {
+        if let Some(runtime) = self.inner.lock().await.active.get_mut(&project_id) {
+            runtime.last_request = Instant::now();
+        }
+    }
+
+    /// Check if a project has a suspended runtime that can be woken.
+    pub async fn is_suspended(&self, project_id: Uuid) -> bool {
+        self.inner.lock().await.suspended.contains_key(&project_id)
+    }
+
+    /// Wake a suspended project: re-spawn the Deno process and return the URL.
+    /// Returns `None` if the project isn't suspended.
+    pub async fn wake(&self, project_id: Uuid) -> Result<Option<String>, AppError> {
+        let suspended = {
+            self.inner.lock().await.suspended.remove(&project_id)
+        };
+
+        let suspended = match suspended {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        tracing::info!(
+            project_id = %project_id,
+            deployment_id = %suspended.deployment_id,
+            "waking suspended deployment"
+        );
+
+        let (url, _port) = self
+            .deploy(RuntimeLaunchSpec {
+                project_id,
+                deployment_id: suspended.deployment_id,
+                kind: suspended.kind,
+                env_vars: suspended.env_vars,
+            })
+            .await?;
+
+        Ok(Some(url))
+    }
+
+    /// Suspend idle projects. Returns the number of projects suspended.
+    /// Called by the scaler background loop.
+    pub async fn suspend_idle(&self, idle_threshold: std::time::Duration) -> usize {
+        let now = Instant::now();
+        let mut to_suspend = Vec::new();
+
+        {
+            let state = self.inner.lock().await;
+            for (&project_id, runtime) in &state.active {
+                if now.duration_since(runtime.last_request) > idle_threshold {
+                    to_suspend.push(project_id);
+                }
+            }
+        }
+
+        let mut suspended = 0;
+        for project_id in to_suspend {
+            let mut state = self.inner.lock().await;
+            if let Some(runtime) = state.active.remove(&project_id) {
+                // Store the info needed to re-launch
+                state.suspended.insert(
+                    project_id,
+                    SuspendedRuntime {
+                        deployment_id: runtime.deployment_id,
+                        kind: runtime.kind.clone(),
+                        env_vars: runtime.env_vars.clone(),
+                    },
+                );
+                drop(state);
+
+                // Kill the process
+                let _ = runtime.child.lock().await.kill().await;
+                tracing::info!(
+                    project_id = %project_id,
+                    deployment_id = %runtime.deployment_id,
+                    "suspended idle deployment (scale-to-zero)"
+                );
+                suspended += 1;
+            }
+        }
+
+        suspended
     }
 
     /// Restore deployments that were running before the engine restarted.

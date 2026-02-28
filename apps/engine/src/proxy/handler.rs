@@ -83,11 +83,20 @@ async fn route_and_forward(
     }
 
     // Look up active runtime URL (in-memory, no DB hit)
-    let target_base = state
-        .runtime_manager
-        .active_url(project_id)
-        .await
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, pid))?;
+    let target_base = match state.runtime_manager.active_url(project_id).await {
+        Some(url) => {
+            state.runtime_manager.touch(project_id).await;
+            url
+        }
+        None => {
+            // Not running — try waking a suspended deployment
+            match state.runtime_manager.wake(project_id).await {
+                Ok(Some(url)) => url,
+                Ok(None) => return Err((StatusCode::SERVICE_UNAVAILABLE, pid)),
+                Err(_) => return Err((StatusCode::SERVICE_UNAVAILABLE, pid)),
+            }
+        }
+    };
 
     // Build target URL
     let path_and_query = req

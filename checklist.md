@@ -22,8 +22,8 @@ Rule for syncing `PLAN.md`:
 | Phase 2 | 5 | 1 | 2 |
 | Phase 3 | 4 | 1 | 2 |
 | Phase 4 | 6 | 1 | 1 |
-| Phase 5 | 4 | 1 | 2 |
-| Phase 6 | 3 | 2 | 4 |
+| Phase 5 | 5 | 1 | 1 |
+| Phase 6 | 6 | 2 | 1 |
 
 ## Phase 1: Scaffolding + Database + API
 
@@ -83,7 +83,7 @@ Rule for syncing `PLAN.md`:
 | Env var CRUD API (masked in responses) | Done | `apps/engine/src/api/env_vars.rs` | Create, list (masked), delete endpoints with proper encryption. |
 | Inject decrypted env vars into Deno process | Done | `apps/engine/src/build/mod.rs` | Build pipeline decrypts and injects env vars during build and runtime launch. |
 | Domain CRUD, DNS verification | Done | `apps/engine/src/api/domains.rs`, `apps/engine/src/db/domains.rs` | Create, list, assign, primary selection, and DNS verification are implemented. |
-| Auto-SSL via Let's Encrypt | Missing | `apps/engine/src/api/domains.rs`, `apps/engine/src/db/domains.rs` | Domain status exists, but certificate provisioning is not implemented. |
+| Auto-SSL via Let's Encrypt | Done | `apps/engine/src/ssl/manager.rs`, `apps/engine/src/proxy/tls.rs`, `apps/engine/src/proxy/acme.rs` | Full ACME HTTP-01 flow via instant-acme, CertResolver with SNI, dual HTTP/HTTPS proxy, background renewal every 24h. |
 | Dashboard pages for env vars and domains | Partial | `templates/template-app/src/app/(dashboard)/domains/page.tsx`, `templates/template-app/src/app/(dashboard)/environment/page.tsx` | Domains UI is substantial; environment page is static placeholder content. |
 | Verify: set env var -> redeploy -> app reads it; custom domain with SSL works | Not verified | `apps/engine/src/api/env_vars.rs` | Env var CRUD is implemented; SSL is still missing. Partial verification possible. |
 
@@ -91,9 +91,9 @@ Rule for syncing `PLAN.md`:
 
 | Item | Status | Evidence | Notes |
 | --- | --- | --- | --- |
-| Idle detection loop, process suspend/wake | Missing | `apps/engine/src/runtime/scaler.rs` | Scaler module is still a stub. |
-| Wake-on-request in proxy | Missing | `apps/engine/src/proxy/handler.rs` | Proxy forwards only to already-running ready deployments. |
-| Fail-safe runtime reconciliation and automatic restart after engine/app crashes or restarts | Missing | `apps/engine/src/runtime/`, `apps/engine/src/proxy/` | There is no startup reconciliation or crash recovery flow yet for restoring healthy deployments and cleaning up ghost runtimes or stale routing state. |
+| Idle detection loop, process suspend/wake | Done | `apps/engine/src/runtime/scaler.rs`, `apps/engine/src/runtime/mod.rs` | Background loop every 30s suspends deployments idle >5min, stores launch spec for re-wake. |
+| Wake-on-request in proxy | Done | `apps/engine/src/proxy/handler.rs`, `apps/engine/src/runtime/mod.rs` | Proxy detects suspended projects and wakes them on demand before forwarding. |
+| Fail-safe runtime reconciliation and automatic restart after engine/app crashes or restarts | Done | `apps/engine/src/runtime/mod.rs`, `apps/engine/src/build/mod.rs`, `apps/engine/src/db/deployments.rs` | On startup, queries ready deployments from DB, detects runtime kind from filesystem, re-launches Deno processes. Old deployments cleaned up after successful new deploys. |
 | Multi-stage Dockerfile (engine + web + deno + node) | Partial | `docker/Dockerfile`, `docker/Dockerfile.frontend` | Multi-stage engine image exists and includes Deno and Node; frontend is built from a separate Dockerfile. |
 | docker-compose.yml with PostgreSQL | Done | `docker/docker-compose.yml` | Compose file includes `db`, `engine`, and `frontend` services. |
 | entrypoint.sh (migrations + service start) | Done | `docker/entrypoint.sh`, `apps/engine/src/db/mod.rs` | Entrypoint starts the engine; migrations run on engine startup. |

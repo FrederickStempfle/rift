@@ -97,6 +97,9 @@ async fn main() -> anyhow::Result<()> {
     // Spawn certificate renewal background task
     ssl_manager.spawn_renewal_task();
 
+    // Spawn scale-to-zero background task
+    rift_engine::runtime::scaler::spawn_scaler(state.runtime_manager.clone());
+
     let api_state = state.clone();
     let proxy_state = state;
 

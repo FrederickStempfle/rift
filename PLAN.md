@@ -324,14 +324,14 @@ shadcn/ui         SWR or TanStack Query
 - [x] Env var CRUD API (masked in responses)
 - [x] Inject decrypted env vars into Deno process
 - [x] Domain CRUD, DNS verification
-- [ ] Auto-SSL via Let's Encrypt (rustls-acme / instant_acme)
+- [x] Auto-SSL via Let's Encrypt (rustls-acme / instant_acme)
 - [ ] Dashboard pages for env vars and domains
 - [ ] **Verify**: set env var -> redeploy -> app reads it; custom domain with SSL works
 
 ### Phase 6: Scale to Zero + Docker + Polish
-- [ ] Idle detection loop, process suspend/wake
-- [ ] Wake-on-request in proxy
-- [ ] Fail-safe runtime reconciliation and automatic restart after engine/app crashes or restarts (clean up ghost projects/processes, restore routing, recover healthy deployments)
+- [x] Idle detection loop, process suspend/wake
+- [x] Wake-on-request in proxy
+- [x] Fail-safe runtime reconciliation and automatic restart after engine/app crashes or restarts (clean up ghost projects/processes, restore routing, recover healthy deployments)
 - [ ] Multi-stage Dockerfile (engine + web + deno + node)
 - [x] docker-compose.yml with PostgreSQL
 - [x] entrypoint.sh (migrations + service start)
