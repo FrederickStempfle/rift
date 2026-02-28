@@ -7,6 +7,7 @@ use crate::{db::models::Project, error::AppError};
 #[derive(Clone, Debug)]
 pub enum PackageManager {
     Npm,
+    Yarn,
     Pnpm,
     Bun,
 }
@@ -55,6 +56,8 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
 
     let package_manager = if workspace_dir.join("pnpm-lock.yaml").exists() {
         PackageManager::Pnpm
+    } else if workspace_dir.join("yarn.lock").exists() {
+        PackageManager::Yarn
     } else if workspace_dir.join("bun.lock").exists() || workspace_dir.join("bun.lockb").exists() {
         PackageManager::Bun
     } else {
@@ -73,6 +76,7 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
                         "pnpm install".to_owned()
                     }
                 }
+                PackageManager::Yarn => "yarn install".to_owned(),
                 PackageManager::Bun => "bun install".to_owned(),
                 PackageManager::Npm => {
                     if workspace_dir.join("package-lock.json").exists() {
@@ -91,6 +95,7 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
                 .and_then(|scripts| scripts.get("build"))
                 .map(|_| match package_manager {
                     PackageManager::Pnpm => "pnpm build".to_owned(),
+                    PackageManager::Yarn => "yarn build".to_owned(),
                     PackageManager::Bun => "bun run build".to_owned(),
                     PackageManager::Npm => "npm run build".to_owned(),
                 })
@@ -131,7 +136,7 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
         .clone()
         .or_else(|| {
             // Check root-level output dirs first
-            for dir in &["dist", "build", "out", "public"] {
+            for dir in &["dist", "build", "out"] {
                 if workspace_dir.join(dir).exists() {
                     return Some((*dir).to_owned());
                 }
