@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -21,6 +22,8 @@ pub struct DomainWithProject {
     pub domain: String,
     pub is_primary: bool,
     pub ssl_status: String,
+    pub ssl_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub ssl_error: Option<String>,
     pub project_name: Option<String>,
 }
 
@@ -52,7 +55,9 @@ pub async fn create_domain(pool: &PgPool, input: NewDomain) -> Result<Domain, Ap
             project_id,
             domain,
             is_primary,
-            ssl_status::text AS ssl_status
+            ssl_status::text AS ssl_status,
+            ssl_expires_at,
+            ssl_error
         "#,
     )
     .bind(input.project_id)
@@ -89,6 +94,8 @@ pub async fn list_domains_for_user(
             d.domain,
             d.is_primary,
             d.ssl_status::text AS ssl_status,
+            d.ssl_expires_at,
+            d.ssl_error,
             p.name AS project_name
         FROM domains d
         LEFT JOIN projects p ON p.id = d.project_id
@@ -115,7 +122,9 @@ pub async fn get_domain(
             d.project_id,
             d.domain,
             d.is_primary,
-            d.ssl_status::text AS ssl_status
+            d.ssl_status::text AS ssl_status,
+            d.ssl_expires_at,
+            d.ssl_error
         FROM domains d
         LEFT JOIN projects p ON p.id = d.project_id
         WHERE d.id = $1
@@ -164,7 +173,9 @@ pub async fn list_domains_for_project(
             project_id,
             domain,
             is_primary,
-            ssl_status::text AS ssl_status
+            ssl_status::text AS ssl_status,
+            ssl_expires_at,
+            ssl_error
         FROM domains
         WHERE project_id = $1
         ORDER BY is_primary DESC, domain ASC
@@ -188,6 +199,8 @@ pub async fn list_domains_for_project_with_name(
             d.domain,
             d.is_primary,
             d.ssl_status::text AS ssl_status,
+            d.ssl_expires_at,
+            d.ssl_error,
             p.name AS project_name
         FROM domains d
         LEFT JOIN projects p ON p.id = d.project_id
@@ -231,7 +244,9 @@ pub async fn get_primary_domain_for_project(
             project_id,
             domain,
             is_primary,
-            ssl_status::text AS ssl_status
+            ssl_status::text AS ssl_status,
+            ssl_expires_at,
+            ssl_error
         FROM domains
         WHERE project_id = $1 AND is_primary = true AND ssl_status = 'active'
         LIMIT 1
@@ -291,7 +306,9 @@ pub async fn mark_domain_active(
             project_id,
             domain,
             is_primary,
-            ssl_status::text AS ssl_status
+            ssl_status::text AS ssl_status,
+            ssl_expires_at,
+            ssl_error
         "#,
     )
     .bind(domain_id)
@@ -337,7 +354,9 @@ pub async fn assign_domain_to_project(
             project_id,
             domain,
             is_primary,
-            ssl_status::text AS ssl_status
+            ssl_status::text AS ssl_status,
+            ssl_expires_at,
+            ssl_error
         "#,
     )
     .bind(project_id)
@@ -371,12 +390,97 @@ pub async fn unassign_domain_from_project(
             project_id,
             domain,
             is_primary,
-            ssl_status::text AS ssl_status
+            ssl_status::text AS ssl_status,
+            ssl_expires_at,
+            ssl_error
         "#,
     )
     .bind(domain_id)
     .bind(user_id)
     .fetch_optional(pool)
+    .await
+    .map_err(AppError::Db)
+}
+
+pub async fn update_ssl_provisioning(
+    pool: &PgPool,
+    domain_name: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE domains SET ssl_status = 'provisioning', ssl_error = NULL WHERE domain = $1",
+    )
+    .bind(domain_name)
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+    Ok(())
+}
+
+pub async fn update_ssl_active_with_cert(
+    pool: &PgPool,
+    domain_name: &str,
+    expires_at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE domains
+        SET ssl_status = 'active', ssl_expires_at = $1, ssl_error = NULL
+        WHERE domain = $2
+        "#,
+    )
+    .bind(expires_at)
+    .bind(domain_name)
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+    Ok(())
+}
+
+pub async fn update_ssl_failed(
+    pool: &PgPool,
+    domain_name: &str,
+    error: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE domains SET ssl_status = 'failed', ssl_error = $1 WHERE domain = $2",
+    )
+    .bind(error)
+    .bind(domain_name)
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+    Ok(())
+}
+
+pub async fn list_domains_needing_renewal(pool: &PgPool) -> Result<Vec<Domain>, AppError> {
+    sqlx::query_as::<_, Domain>(
+        r#"
+        SELECT
+            id, project_id, domain, is_primary,
+            ssl_status::text AS ssl_status, ssl_expires_at, ssl_error
+        FROM domains
+        WHERE ssl_status = 'active'
+          AND ssl_expires_at IS NOT NULL
+          AND ssl_expires_at < NOW() + INTERVAL '30 days'
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Db)
+}
+
+pub async fn list_active_ssl_domains(pool: &PgPool) -> Result<Vec<Domain>, AppError> {
+    sqlx::query_as::<_, Domain>(
+        r#"
+        SELECT
+            id, project_id, domain, is_primary,
+            ssl_status::text AS ssl_status, ssl_expires_at, ssl_error
+        FROM domains
+        WHERE ssl_status = 'active'
+          AND ssl_expires_at IS NOT NULL
+        "#,
+    )
+    .fetch_all(pool)
     .await
     .map_err(AppError::Db)
 }

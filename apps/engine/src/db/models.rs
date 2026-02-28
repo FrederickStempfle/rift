@@ -51,6 +51,8 @@ pub struct Domain {
     pub domain: String,
     pub is_primary: bool,
     pub ssl_status: String,
+    pub ssl_expires_at: Option<DateTime<Utc>>,
+    pub ssl_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]

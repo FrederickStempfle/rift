@@ -8,5 +8,6 @@ pub mod proxy;
 pub mod runtime;
 pub mod secrets;
 pub mod services;
+pub mod ssl;
 pub mod validation;
 pub mod ws;

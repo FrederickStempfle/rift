@@ -13,6 +13,7 @@ axum-extra = { version = "0.10", features = ["cookie"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
+instant-acme = "0.7"
 hex = "0.4"
 hickory-resolver = "0.25"
 ipnet = "2"
@@ -22,9 +23,13 @@ hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
 jsonwebtoken = "9"
 once_cell = "1"
+rcgen = "0.13"
 rand = "0.8"
 regex = "1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+rustls = "0.23"
+rustls-pemfile = "2"
+rustls-pki-types = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hmac = "0.12"
@@ -32,6 +37,7 @@ sha2 = "0.10"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "migrate"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "request-id", "limit"] }
 tracing = "0.1"

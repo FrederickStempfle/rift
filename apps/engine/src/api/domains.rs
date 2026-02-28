@@ -60,6 +60,8 @@ pub struct DomainResponse {
     pub domain: String,
     pub is_primary: bool,
     pub ssl_status: String,
+    pub ssl_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub ssl_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -69,6 +71,8 @@ pub struct DomainListResponse {
     pub domain: String,
     pub is_primary: bool,
     pub ssl_status: String,
+    pub ssl_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub ssl_error: Option<String>,
     pub project_name: Option<String>,
 }
 
@@ -323,6 +327,17 @@ pub async fn verify_domain(
         .await?
         .ok_or_else(|| AppError::NotFound("domain not found".into()))?;
 
+    // Trigger SSL certificate provisioning in the background
+    if state.config.acme_email.is_some() {
+        let ssl_manager = state.ssl_manager.clone();
+        let domain_name = updated.domain.clone();
+        tokio::spawn(async move {
+            if let Err(e) = ssl_manager.provision_cert(&domain_name).await {
+                tracing::error!(domain = %domain_name, error = %e, "SSL provisioning failed");
+            }
+        });
+    }
+
     Ok(Json(DomainResponse::from(updated)))
 }
 
@@ -341,6 +356,8 @@ impl From<crate::db::models::Domain> for DomainResponse {
             domain: value.domain,
             is_primary: value.is_primary,
             ssl_status: value.ssl_status,
+            ssl_expires_at: value.ssl_expires_at,
+            ssl_error: value.ssl_error,
         }
     }
 }
@@ -353,6 +370,8 @@ impl From<DomainWithProject> for DomainListResponse {
             domain: value.domain,
             is_primary: value.is_primary,
             ssl_status: value.ssl_status,
+            ssl_expires_at: value.ssl_expires_at,
+            ssl_error: value.ssl_error,
             project_name: value.project_name,
         }
     }

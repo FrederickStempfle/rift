@@ -66,6 +66,18 @@ pub struct Config {
     /// Optional override; if unset, auto-detected on startup via external service.
     #[arg(long, env = "RIFT_PUBLIC_IP")]
     pub public_ip: Option<String>,
+
+    #[arg(long, env = "RIFT_SSL_DIR", default_value = "/var/rift/ssl")]
+    pub ssl_dir: String,
+
+    #[arg(long, env = "RIFT_ACME_EMAIL")]
+    pub acme_email: Option<String>,
+
+    #[arg(long, env = "RIFT_ACME_STAGING", default_value_t = false)]
+    pub acme_staging: bool,
+
+    #[arg(long, env = "RIFT_HTTPS_PORT", default_value_t = 8443)]
+    pub https_port: u16,
 }
 
 impl Config {
@@ -79,6 +91,10 @@ impl Config {
 
     pub fn proxy_addr(&self) -> String {
         format!("{}:{}", self.proxy_bind, self.proxy_port)
+    }
+
+    pub fn https_addr(&self) -> String {
+        format!("{}:{}", self.proxy_bind, self.https_port)
     }
 
     pub fn public_url_for_subdomain(&self, subdomain: &str) -> String {

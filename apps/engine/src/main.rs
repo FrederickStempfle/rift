@@ -6,12 +6,16 @@ use rift_engine::{
     build::BuildManager,
     config::Config,
     db,
-    proxy::{self, analytics_collector::AnalyticsCollector, firewall_cache::FirewallCache},
+    proxy::{
+        self, acme::AcmeChallengeStore, analytics_collector::AnalyticsCollector,
+        firewall_cache::FirewallCache, tls::CertResolver,
+    },
     runtime::RuntimeManager,
     services::{
         audit::AuditLogger, auth::TokenService, password::PasswordService,
         rate_limit::AuthRateLimiters,
     },
+    ssl::SslManager,
     ws::LogBroadcaster,
 };
 
@@ -52,6 +56,20 @@ async fn main() -> anyhow::Result<()> {
         None => tracing::warn!("could not detect public IP — DNS verification will be unavailable"),
     }
 
+    let cert_resolver = CertResolver::new();
+    let challenge_store = AcmeChallengeStore::new();
+    let ssl_manager = SslManager::new(
+        pool.clone(),
+        Arc::clone(&config),
+        cert_resolver.clone(),
+        challenge_store.clone(),
+    );
+
+    // Load existing TLS certificates from disk
+    if let Err(e) = ssl_manager.load_existing_certs().await {
+        tracing::warn!(error = %e, "failed to load existing TLS certificates");
+    }
+
     let state = AppState {
         pool: pool.clone(),
         config: Arc::clone(&config),
@@ -65,7 +83,13 @@ async fn main() -> anyhow::Result<()> {
         firewall_cache: FirewallCache::new(),
         analytics_collector,
         log_broadcaster,
+        ssl_manager: ssl_manager.clone(),
+        challenge_store,
+        cert_resolver,
     };
+
+    // Spawn certificate renewal background task
+    ssl_manager.spawn_renewal_task();
 
     let api_state = state.clone();
     let proxy_state = state;

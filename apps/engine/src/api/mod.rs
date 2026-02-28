@@ -19,12 +19,16 @@ use crate::{
     build::BuildManager,
     config::Config,
     db::DbPool,
-    proxy::{analytics_collector::AnalyticsCollector, firewall_cache::FirewallCache},
+    proxy::{
+        acme::AcmeChallengeStore, analytics_collector::AnalyticsCollector,
+        firewall_cache::FirewallCache, tls::CertResolver,
+    },
     runtime::RuntimeManager,
     services::{
         audit::AuditLogger, auth::TokenService, password::PasswordService,
         rate_limit::AuthRateLimiters,
     },
+    ssl::SslManager,
     ws::LogBroadcaster,
 };
 
@@ -54,6 +58,9 @@ pub struct AppState {
     pub firewall_cache: FirewallCache,
     pub analytics_collector: AnalyticsCollector,
     pub log_broadcaster: LogBroadcaster,
+    pub ssl_manager: SslManager,
+    pub challenge_store: AcmeChallengeStore,
+    pub cert_resolver: CertResolver,
 }
 
 pub fn router(state: AppState) -> Router {
