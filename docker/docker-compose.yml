@@ -5,8 +5,6 @@ services:
       POSTGRES_DB: rift
       POSTGRES_USER: rift
       POSTGRES_PASSWORD: rift
-    ports:
-      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rift -d rift"]
       interval: 5s
@@ -25,7 +23,6 @@ services:
     env_file:
       - ../.env
     environment:
-      # Override DATABASE_URL to use the docker network hostname
       DATABASE_URL: postgres://rift:rift@db:5432/rift
     ports:
       - "3001:3001"
@@ -49,6 +46,19 @@ services:
       nofile:
         soft: 65536
         hard: 65536
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+    depends_on:
+      - engine
+    env_file:
+      - ../.env
+    environment:
+      RIFT_ENGINE_URL: http://engine:3001
+    ports:
+      - "3000:3000"
 
 volumes:
   postgres_data:
