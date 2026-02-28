@@ -6,7 +6,7 @@ use rift_engine::{
     build::BuildManager,
     config::Config,
     db,
-    proxy::{self, firewall_cache::FirewallCache},
+    proxy::{self, analytics_collector::AnalyticsCollector, firewall_cache::FirewallCache},
     runtime::RuntimeManager,
     services::{
         audit::AuditLogger, auth::TokenService, password::PasswordService,
@@ -47,6 +47,8 @@ async fn main() -> anyhow::Result<()> {
         None => tracing::warn!("could not detect public IP — DNS verification will be unavailable"),
     }
 
+    let analytics_collector = AnalyticsCollector::new(pool.clone());
+
     let state = AppState {
         pool: pool.clone(),
         config: Arc::clone(&config),
@@ -58,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
         build_manager,
         public_ip,
         firewall_cache: FirewallCache::new(),
+        analytics_collector,
     };
 
     let api_state = state.clone();

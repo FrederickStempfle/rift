@@ -19,7 +19,7 @@ use crate::{
     build::BuildManager,
     config::Config,
     db::DbPool,
-    proxy::firewall_cache::FirewallCache,
+    proxy::{analytics_collector::AnalyticsCollector, firewall_cache::FirewallCache},
     runtime::RuntimeManager,
     services::{
         audit::AuditLogger, auth::TokenService, password::PasswordService,
@@ -27,6 +27,7 @@ use crate::{
     },
 };
 
+pub mod analytics;
 pub mod auth;
 pub mod deployments;
 pub mod domains;
@@ -50,6 +51,7 @@ pub struct AppState {
     /// Auto-detected or overridden via RIFT_PUBLIC_IP. Resolved once at startup.
     pub public_ip: Option<String>,
     pub firewall_cache: FirewallCache,
+    pub analytics_collector: AnalyticsCollector,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -101,6 +103,7 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/domains", domains::routes())
         .nest("/api/firewall", firewall::routes())
         .nest("/api/webhooks", webhooks::routes())
+        .route("/api/analytics", get(analytics::get_analytics))
         .route("/api/logs", get(logs::list_logs))
         .layer(DefaultBodyLimit::max(1_048_576))
         .layer(

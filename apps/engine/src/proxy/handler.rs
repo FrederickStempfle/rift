@@ -14,6 +14,7 @@ use crate::{
     api::AppState,
     db::{deployments, domains, projects},
     error::AppError,
+    proxy::analytics_collector::RequestEvent,
 };
 
 const MAX_PROXY_BODY_BYTES: usize = 10 * 1024 * 1024;
@@ -34,12 +35,35 @@ pub async fn proxy_request(
     original_uri: OriginalUri,
     request: Request,
 ) -> Result<Response<Body>, StatusCode> {
+    let start = std::time::Instant::now();
     let host = extract_host(request.headers()).ok_or(StatusCode::BAD_REQUEST)?;
     let project_id = resolve_project_id(&state, &host)
         .await
         .map_err(map_proxy_error)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    let result = proxy_inner(&state, addr, &original_uri, request, project_id).await;
+
+    let status_code = match &result {
+        Ok(resp) => resp.status().as_u16(),
+        Err(sc) => sc.as_u16(),
+    };
+    state.analytics_collector.record(RequestEvent {
+        project_id,
+        status: status_code,
+        duration_ms: start.elapsed().as_millis() as u64,
+    });
+
+    result
+}
+
+async fn proxy_inner(
+    state: &AppState,
+    addr: SocketAddr,
+    original_uri: &OriginalUri,
+    request: Request,
+    project_id: Uuid,
+) -> Result<Response<Body>, StatusCode> {
     let allowed = state
         .firewall_cache
         .is_allowed(&state.pool, project_id, addr.ip())
@@ -54,8 +78,9 @@ pub async fn proxy_request(
         .map_err(map_proxy_error)?
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let target_base = deployment.url.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let target_url = format!("{}{}", target_base, path_and_query(&original_uri));
+    let target_url = format!("{}{}", target_base, path_and_query(original_uri));
 
+    let host = extract_host(request.headers()).unwrap_or_default();
     let (parts, body) = request.into_parts();
     let body = to_bytes(body, MAX_PROXY_BODY_BYTES)
         .await
