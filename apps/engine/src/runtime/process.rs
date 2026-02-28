@@ -5,9 +5,12 @@ use tokio::process::{Child, Command};
 
 use crate::error::AppError;
 
-/// Port range for deployed apps. Must match the range exposed in docker-compose.yml.
+/// External port range exposed to users. Must match docker-compose.yml.
 const PORT_RANGE_START: u16 = 10000;
 const PORT_RANGE_END: u16 = 10100;
+
+/// Internal port range where apps actually bind. Not exposed outside Docker.
+pub const INTERNAL_PORT_OFFSET: u16 = 20000;
 
 static NEXT_PORT: AtomicU16 = AtomicU16::new(PORT_RANGE_START);
 

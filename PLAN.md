@@ -283,19 +283,19 @@ shadcn/ui         SWR or TanStack Query
 
 ### Phase 1: Scaffolding + Database + API
 - [ ] Init monorepo (Cargo workspace, pnpm workspace)
-- [ ] Scaffold Rust engine with all deps
-- [ ] Write 6 SQL migrations
-- [ ] Implement db layer (pool, models, query modules)
-- [ ] Auth: argon2 password hashing, JWT issue/verify, middleware
-- [ ] Project CRUD API
+- [x] Scaffold Rust engine with all deps
+- [x] Write 6 SQL migrations
+- [x] Implement db layer (pool, models, query modules)
+- [x] Auth: argon2 password hashing, JWT issue/verify, middleware
+- [x] Project CRUD API
 - [ ] **Verify**: curl register -> login -> create/list projects
 
 ### Phase 2: Git + Webhooks + Build Pipeline
 - [ ] Git clone/fetch/checkout operations
-- [ ] GitHub webhook creation via API
-- [ ] Webhook receiver with HMAC verification
+- [x] GitHub webhook creation via API
+- [x] Webhook receiver with HMAC verification
 - [ ] Framework detection (Next.js, Vite, Remix, Astro, Svelte, static)
-- [ ] Full build pipeline: clone -> install -> build -> log capture
+- [x] Full build pipeline: clone -> install -> build -> log capture
 - [ ] Build queue (tokio mpsc, configurable concurrency)
 - [ ] Log broadcaster (tokio broadcast channels)
 - [ ] **Verify**: create project -> push to GitHub -> build runs with streamed logs
@@ -303,19 +303,19 @@ shadcn/ui         SWR or TanStack Query
 ### Phase 3: Deno Runtime + Reverse Proxy
 - [ ] Deno bundle creation (_entry.ts per framework type)
 - [ ] Deno process spawning with sandboxed permissions
-- [ ] Health check polling
+- [x] Health check polling
 - [ ] RuntimeManager: deploy, resolve, zero-downtime swap
 - [ ] hyper reverse proxy with Host-based routing
-- [ ] Wire build -> deploy -> proxy routing
+- [x] Wire build -> deploy -> proxy routing
 - [ ] **Verify**: push -> build -> deploy -> curl returns app
 
 ### Phase 4: Dashboard UI
-- [ ] Scaffold Next.js + Tailwind + shadcn/ui
+- [x] Scaffold Next.js + Tailwind + shadcn/ui
 - [ ] API client with JWT, WebSocket hook
-- [ ] Login page, sidebar layout
-- [ ] Project list, new project wizard
+- [x] Login page, sidebar layout
+- [x] Project list, new project wizard
 - [ ] Deployment list, real-time log viewer (terminal-style)
-- [ ] Manual redeploy button
+- [x] Manual redeploy button
 - [ ] Dark-mode-first, minimal design
 - [ ] **Verify**: full flow through the UI
 
@@ -323,7 +323,7 @@ shadcn/ui         SWR or TanStack Query
 - [ ] AES-256-GCM encryption for env var values
 - [ ] Env var CRUD API (masked in responses)
 - [ ] Inject decrypted env vars into Deno process
-- [ ] Domain CRUD, DNS verification
+- [x] Domain CRUD, DNS verification
 - [ ] Auto-SSL via Let's Encrypt (rustls-acme / instant_acme)
 - [ ] Dashboard pages for env vars and domains
 - [ ] **Verify**: set env var -> redeploy -> app reads it; custom domain with SSL works
@@ -332,9 +332,9 @@ shadcn/ui         SWR or TanStack Query
 - [ ] Idle detection loop, process suspend/wake
 - [ ] Wake-on-request in proxy
 - [ ] Multi-stage Dockerfile (engine + web + deno + node)
-- [ ] docker-compose.yml with PostgreSQL
-- [ ] entrypoint.sh (migrations + service start)
-- [ ] CORS, rate limiting, request logging
+- [x] docker-compose.yml with PostgreSQL
+- [x] entrypoint.sh (migrations + service start)
+- [x] CORS, rate limiting, request logging
 - [ ] Host firewall policy, kernel network hardening, basic anti-DDoS protections
 - [ ] **Verify**: `docker-compose up` -> full platform working
 
