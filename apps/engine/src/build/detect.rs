@@ -69,22 +69,10 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
             .install_command
             .clone()
             .unwrap_or_else(|| match package_manager {
-                PackageManager::Pnpm => {
-                    if workspace_dir.join("pnpm-lock.yaml").exists() {
-                        "pnpm install --frozen-lockfile".to_owned()
-                    } else {
-                        "pnpm install".to_owned()
-                    }
-                }
+                PackageManager::Pnpm => "pnpm install".to_owned(),
                 PackageManager::Yarn => "yarn install".to_owned(),
                 PackageManager::Bun => "bun install".to_owned(),
-                PackageManager::Npm => {
-                    if workspace_dir.join("package-lock.json").exists() {
-                        "npm ci".to_owned()
-                    } else {
-                        "npm install".to_owned()
-                    }
-                }
+                PackageManager::Npm => "npm install".to_owned(),
             });
 
     let build_command = project
