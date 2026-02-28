@@ -15,7 +15,7 @@ use crate::{
 };
 
 use self::{
-    detect::{detect_build_plan, BuildOutput, PackageManager},
+    detect::{detect_build_plan, detect_output_dir, BuildOutput, PackageManager},
     pipeline::{elapsed_ms, read_git_metadata, run_command_and_log},
 };
 
@@ -195,8 +195,17 @@ impl BuildManager {
             BuildOutput::Next => RuntimeKind::NextApp {
                 dir: workspace_dir.clone(),
             },
-            BuildOutput::Static { dir } => {
-                let output_dir = workspace_dir.join(dir);
+            BuildOutput::Static { .. } => {
+                let detected_dir = detect_output_dir(&project, &workspace_dir);
+                let output_dir = workspace_dir.join(&detected_dir);
+                deployments::insert_log(
+                    &self.pool,
+                    deployment_id,
+                    "info",
+                    &format!("Detected output directory: {detected_dir}"),
+                    "build",
+                )
+                .await?;
                 if !output_dir.exists() {
                     deployments::insert_log(
                         &self.pool,

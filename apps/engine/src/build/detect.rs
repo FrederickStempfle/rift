@@ -131,43 +131,46 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
         project.framework.clone()
     };
 
-    let static_dir = project
-        .output_dir
-        .clone()
-        .or_else(|| {
-            // Check root-level output dirs first
-            for dir in &["dist", "build", "out"] {
-                if workspace_dir.join(dir).exists() {
-                    return Some((*dir).to_owned());
-                }
-            }
-            // Check one level deep for monorepo structures (e.g. excalidraw-app/build)
-            if let Ok(entries) = fs::read_dir(workspace_dir) {
-                for entry in entries.flatten() {
-                    if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                        let name = entry.file_name();
-                        let name_str = name.to_string_lossy();
-                        if name_str == "node_modules" || name_str.starts_with('.') {
-                            continue;
-                        }
-                        for output in &["dist", "build", "out"] {
-                            let candidate = entry.path().join(output);
-                            if candidate.exists() {
-                                return Some(format!("{}/{}", name_str, output));
-                            }
-                        }
-                    }
-                }
-            }
-            None
-        })
-        .unwrap_or_else(|| "dist".to_owned());
-
     Ok(BuildPlan {
         framework,
         package_manager,
         install_command,
         build_command,
-        output: BuildOutput::Static { dir: static_dir },
+        output: BuildOutput::Static {
+            dir: String::new(),
+        },
     })
+}
+
+/// Detect the build output directory. Must be called AFTER the build completes
+/// so that output directories (dist/, build/, out/) actually exist on disk.
+pub fn detect_output_dir(project: &Project, workspace_dir: &Path) -> String {
+    if let Some(dir) = project.output_dir.clone() {
+        return dir;
+    }
+    // Check root-level output dirs first
+    for dir in &["dist", "build", "out"] {
+        if workspace_dir.join(dir).exists() {
+            return (*dir).to_owned();
+        }
+    }
+    // Check one level deep for monorepo structures (e.g. excalidraw-app/build)
+    if let Ok(entries) = fs::read_dir(workspace_dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str == "node_modules" || name_str.starts_with('.') {
+                    continue;
+                }
+                for output in &["dist", "build", "out"] {
+                    let candidate = entry.path().join(output);
+                    if candidate.exists() {
+                        return format!("{}/{}", name_str, output);
+                    }
+                }
+            }
+        }
+    }
+    "dist".to_owned()
 }
