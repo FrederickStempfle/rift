@@ -107,21 +107,26 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
 
     if is_monorepo {
         if let Some(app) = find_deployable_app(workspace_dir) {
+            // If the repo uses turbo, use `turbo run build --filter=pkg...`
+            // which builds the target AND its workspace dependencies (the `...`
+            // suffix). Without turbo, fall back to package manager filter commands.
+            let has_turbo = workspace_dir.join("turbo.json").exists();
+
             let build_command =
                 project
                     .build_command
                     .clone()
-                    .unwrap_or_else(|| match package_manager {
-                        PackageManager::Pnpm => format!("pnpm --filter {} build", app.name),
-                        PackageManager::Yarn => format!("yarn workspace {} build", app.name),
-                        PackageManager::Bun => format!("bun run --filter {} build", app.name),
-                        PackageManager::Npm => format!("npm run build --workspace={}", app.name),
+                    .unwrap_or_else(|| if has_turbo {
+                        // npx turbo works regardless of package manager
+                        format!("npx turbo run build --filter={}...", app.name)
+                    } else {
+                        match package_manager {
+                            PackageManager::Pnpm => format!("pnpm --filter {} build", app.name),
+                            PackageManager::Yarn => format!("yarn workspace {} build", app.name),
+                            PackageManager::Bun => format!("bun run --filter {} build", app.name),
+                            PackageManager::Npm => format!("npm run build --workspace={}", app.name),
+                        }
                     });
-
-            // Use the targeted filter build directly. Turbo/workspace tooling
-            // handles building dependencies automatically via the dependency
-            // graph, so running the root build is unnecessary and can fail on
-            // unrelated packages (e.g. typecheck in sibling packages).
 
             if app.is_next {
                 return Ok(BuildPlan {
