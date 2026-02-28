@@ -115,19 +115,51 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
         });
     }
 
+    let looks_like_vite = dependencies.iter().chain(dev_dependencies.iter()).any(|dep| *dep == "vite")
+        || workspace_dir.join("vite.config.ts").exists()
+        || workspace_dir.join("vite.config.js").exists()
+        || workspace_dir.join("vite.config.mts").exists();
+
+    let framework = if looks_like_vite {
+        "vite".to_owned()
+    } else {
+        project.framework.clone()
+    };
+
     let static_dir = project
         .output_dir
         .clone()
         .or_else(|| {
-            ["dist", "build", "out"]
-                .iter()
-                .find(|dir| workspace_dir.join(dir).exists())
-                .map(|dir| (*dir).to_owned())
+            // Check root-level output dirs first
+            for dir in &["dist", "build", "out", "public"] {
+                if workspace_dir.join(dir).exists() {
+                    return Some((*dir).to_owned());
+                }
+            }
+            // Check one level deep for monorepo structures (e.g. excalidraw-app/build)
+            if let Ok(entries) = fs::read_dir(workspace_dir) {
+                for entry in entries.flatten() {
+                    if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        if name_str == "node_modules" || name_str.starts_with('.') {
+                            continue;
+                        }
+                        for output in &["dist", "build", "out"] {
+                            let candidate = entry.path().join(output);
+                            if candidate.exists() {
+                                return Some(format!("{}/{}", name_str, output));
+                            }
+                        }
+                    }
+                }
+            }
+            None
         })
         .unwrap_or_else(|| "dist".to_owned());
 
     Ok(BuildPlan {
-        framework: project.framework.clone(),
+        framework,
         package_manager,
         install_command,
         build_command,
