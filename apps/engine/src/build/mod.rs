@@ -218,6 +218,22 @@ impl BuildManager {
         if matches!(plan.output, BuildOutput::Next) {
             self.inject_next_standalone_config(&workspace_dir, deployment_id)
                 .await?;
+            // Also inject in workspace packages for monorepos
+            for container in ["apps", "packages"] {
+                let container_dir = workspace_dir.join(container);
+                if container_dir.is_dir() {
+                    if let Ok(entries) = fs::read_dir(&container_dir).await {
+                        let mut entries = entries;
+                        while let Ok(Some(entry)) = entries.next_entry().await {
+                            if entry.file_type().await.map(|ft| ft.is_dir()).unwrap_or(false) {
+                                let _ = self
+                                    .inject_next_standalone_config(&entry.path(), deployment_id)
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if let Err(error) = run_command_and_log_with_env(
@@ -248,44 +264,49 @@ impl BuildManager {
         deployments::update_status(&self.pool, deployment_id, "deploying").await?;
         let runtime_kind = match plan.output {
             BuildOutput::Next => {
-                // Verify standalone output exists
-                let standalone_server = workspace_dir.join(".next/standalone/server.js");
-                if !standalone_server.exists() {
-                    insert_and_broadcast_log(
-                        &self.pool,
-                        &self.log_broadcaster,
-                        deployment_id,
-                        "error",
-                        "Next.js standalone output not found (.next/standalone/server.js). Ensure `output: \"standalone\"` is in next.config.",
-                        "build",
-                    )
-                    .await?;
-                    deployments::mark_failed(
-                        &self.pool,
-                        deployment_id,
-                        Some(elapsed_ms(started_at)),
-                    )
-                    .await?;
-                    return Err(AppError::Internal(
-                        "Next.js standalone output not found".into(),
-                    ));
-                }
+                // Find the directory containing .next/standalone/server.js
+                // Could be at root or inside a workspace package (monorepo)
+                let next_app_dir = find_next_standalone(&workspace_dir).await;
+
+                let next_app_dir = match next_app_dir {
+                    Some(dir) => dir,
+                    None => {
+                        insert_and_broadcast_log(
+                            &self.pool,
+                            &self.log_broadcaster,
+                            deployment_id,
+                            "error",
+                            "Next.js standalone output not found (.next/standalone/server.js). Ensure `output: \"standalone\"` is in next.config.",
+                            "build",
+                        )
+                        .await?;
+                        deployments::mark_failed(
+                            &self.pool,
+                            deployment_id,
+                            Some(elapsed_ms(started_at)),
+                        )
+                        .await?;
+                        return Err(AppError::Internal(
+                            "Next.js standalone output not found".into(),
+                        ));
+                    }
+                };
 
                 // Copy static assets into standalone dir (Next.js requires this)
-                let standalone_dir = workspace_dir.join(".next/standalone");
-                let static_src = workspace_dir.join(".next/static");
+                let standalone_dir = next_app_dir.join(".next/standalone");
+                let static_src = next_app_dir.join(".next/static");
                 let static_dst = standalone_dir.join(".next/static");
                 if static_src.exists() {
                     copy_dir_recursive(&static_src, &static_dst).await?;
                 }
-                let public_src = workspace_dir.join("public");
+                let public_src = next_app_dir.join("public");
                 let public_dst = standalone_dir.join("public");
                 if public_src.exists() {
                     copy_dir_recursive(&public_src, &public_dst).await?;
                 }
 
                 RuntimeKind::NextDeno {
-                    dir: workspace_dir.clone(),
+                    dir: next_app_dir,
                 }
             }
             BuildOutput::Static { .. } => {
@@ -454,6 +475,36 @@ impl BuildManager {
 
         Ok(())
     }
+}
+
+/// Find the directory containing `.next/standalone/server.js`.
+/// Checks the workspace root first, then scans workspace packages (apps/*, packages/*).
+async fn find_next_standalone(workspace_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    // Check root
+    if workspace_dir.join(".next/standalone/server.js").exists() {
+        return Some(workspace_dir.to_path_buf());
+    }
+
+    // Scan monorepo package directories
+    for container in ["apps", "packages"] {
+        let container_dir = workspace_dir.join(container);
+        if !container_dir.exists() {
+            continue;
+        }
+        let Ok(mut entries) = fs::read_dir(&container_dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry.file_type().await.map(|ft| ft.is_dir()).unwrap_or(false) {
+                let candidate = entry.path();
+                if candidate.join(".next/standalone/server.js").exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Recursively copy a directory tree.

@@ -96,7 +96,8 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
         .any(|dep| *dep == "next")
         || workspace_dir.join("next.config.js").exists()
         || workspace_dir.join("next.config.ts").exists()
-        || workspace_dir.join("next.config.mjs").exists();
+        || workspace_dir.join("next.config.mjs").exists()
+        || has_dep_in_workspace(workspace_dir, "next");
 
     if looks_like_next {
         return Ok(BuildPlan {
@@ -111,7 +112,8 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
     let looks_like_vite = dependencies.iter().chain(dev_dependencies.iter()).any(|dep| *dep == "vite")
         || workspace_dir.join("vite.config.ts").exists()
         || workspace_dir.join("vite.config.js").exists()
-        || workspace_dir.join("vite.config.mts").exists();
+        || workspace_dir.join("vite.config.mts").exists()
+        || has_dep_in_workspace(workspace_dir, "vite");
 
     let framework = if looks_like_vite {
         "vite".to_owned()
@@ -136,29 +138,91 @@ pub fn detect_output_dir(project: &Project, workspace_dir: &Path) -> String {
     if let Some(dir) = project.output_dir.clone() {
         return dir;
     }
+
+    const OUTPUT_DIRS: &[&str] = &["dist", "build", "out", ".output/public"];
+
     // Check root-level output dirs first
-    for dir in &["dist", "build", "out"] {
+    for dir in OUTPUT_DIRS {
         if workspace_dir.join(dir).exists() {
             return (*dir).to_owned();
         }
     }
-    // Check one level deep for monorepo structures (e.g. excalidraw-app/build)
-    if let Ok(entries) = fs::read_dir(workspace_dir) {
-        for entry in entries.flatten() {
-            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if name_str == "node_modules" || name_str.starts_with('.') {
-                    continue;
+
+    // Scan up to 2 levels deep for monorepo structures
+    // e.g. apps/web/dist, packages/app/build
+    for depth1 in list_subdirs(workspace_dir) {
+        let d1_name = depth1.file_name().unwrap_or_default().to_string_lossy().to_string();
+
+        // Check depth-1 output dirs (e.g. web/dist)
+        for output in OUTPUT_DIRS {
+            if depth1.join(output).exists() {
+                return format!("{d1_name}/{output}");
+            }
+        }
+
+        // Check depth-2 output dirs (e.g. apps/web/dist, packages/app/build)
+        for depth2 in list_subdirs(&depth1) {
+            let d2_name = depth2.file_name().unwrap_or_default().to_string_lossy().to_string();
+            for output in OUTPUT_DIRS {
+                if depth2.join(output).exists() {
+                    return format!("{d1_name}/{d2_name}/{output}");
                 }
-                for output in &["dist", "build", "out"] {
-                    let candidate = entry.path().join(output);
-                    if candidate.exists() {
-                        return format!("{}/{}", name_str, output);
+            }
+        }
+    }
+
+    "dist".to_owned()
+}
+
+/// List subdirectories, skipping node_modules and hidden dirs.
+fn list_subdirs(dir: &Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| {
+            e.file_type().map(|ft| ft.is_dir()).unwrap_or(false) && {
+                let name = e.file_name();
+                let name_str = name.to_string_lossy();
+                name_str != "node_modules" && !name_str.starts_with('.')
+            }
+        })
+        .map(|e| e.path())
+        .collect()
+}
+
+/// Check if any workspace package has a given dependency.
+/// Scans package.json files in common monorepo locations (apps/*, packages/*).
+fn has_dep_in_workspace(workspace_dir: &Path, dep_name: &str) -> bool {
+    for container in ["apps", "packages"] {
+        let container_dir = workspace_dir.join(container);
+        if !container_dir.is_dir() {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&container_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let pkg_json = entry.path().join("package.json");
+            if let Ok(content) = fs::read_to_string(&pkg_json) {
+                if let Ok(parsed) = serde_json::from_str::<Value>(&content) {
+                    for section in ["dependencies", "devDependencies"] {
+                        if parsed
+                            .get(section)
+                            .and_then(Value::as_object)
+                            .map(|deps| deps.contains_key(dep_name))
+                            .unwrap_or(false)
+                        {
+                            return true;
+                        }
                     }
                 }
             }
         }
     }
-    "dist".to_owned()
+    false
 }
