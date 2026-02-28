@@ -183,15 +183,12 @@ pub async fn list_projects(
 ) -> AppResult<Json<Vec<ProjectResponse>>> {
     let projects = projects::list_projects_for_user(&state.pool, auth_user.user_id).await?;
     let project_ids: Vec<_> = projects.iter().map(|project| project.id).collect();
-    let primary_domains = domains::list_primary_domains_for_projects(&state.pool, &project_ids)
-        .await?
-        .into_iter()
-        .filter_map(|domain| {
-            domain
-                .project_id
-                .map(|project_id| (project_id, domain.domain))
-        })
-        .collect::<HashMap<_, _>>();
+    let primary_domains =
+        domains::list_configured_primary_domains_for_projects(&state.pool, &project_ids)
+            .await?
+            .into_iter()
+            .filter_map(|domain| domain.project_id.map(|project_id| (project_id, domain)))
+            .collect::<HashMap<_, _>>();
     let latest_deployments = deployments::list_latest_for_projects(&state.pool, &project_ids)
         .await?
         .into_iter()
@@ -332,9 +329,8 @@ async fn build_project_response(
     state: &AppState,
     project: crate::db::models::Project,
 ) -> Result<ProjectResponse, AppError> {
-    let primary_domain = domains::get_primary_domain_for_project(&state.pool, project.id)
-        .await?
-        .map(|domain| domain.domain);
+    let primary_domain =
+        domains::get_configured_primary_domain_for_project(&state.pool, project.id).await?;
     let latest_deployment =
         deployments::latest_deployment_for_project(&state.pool, project.id).await?;
 
@@ -344,10 +340,15 @@ async fn build_project_response(
 async fn project_response_from_parts(
     state: &AppState,
     value: crate::db::models::Project,
-    primary_domain: Option<String>,
+    primary_domain: Option<crate::db::models::Domain>,
     latest_deployment: Option<crate::db::models::Deployment>,
 ) -> Result<ProjectResponse, AppError> {
-    let public_url = match primary_domain.as_deref() {
+    let configured_primary_domain = primary_domain.as_ref().map(|domain| domain.domain.clone());
+    let public_url = match primary_domain
+        .as_ref()
+        .filter(|domain| domain.ssl_status == "active")
+        .map(|domain| domain.domain.as_str())
+    {
         Some(domain) => state.config.public_url_for_host(domain),
         None => state.config.public_url_for_subdomain(&value.subdomain),
     };
@@ -365,7 +366,7 @@ async fn project_response_from_parts(
         install_command: value.install_command,
         subdomain: value.subdomain,
         public_url,
-        primary_domain,
+        primary_domain: configured_primary_domain,
         latest_deployment: latest_deployment.map(ProjectDeploymentSummary::from),
         runtime_status,
         webhook_id: value.webhook_id,

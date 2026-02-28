@@ -312,7 +312,7 @@ pub async fn latest_ready_deployment_for_project(
             created_at
         FROM deployments
         WHERE project_id = $1 AND status = 'ready'
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT 1
         "#,
     )
@@ -343,7 +343,7 @@ pub async fn latest_deployment_for_project(
             created_at
         FROM deployments
         WHERE project_id = $1
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT 1
         "#,
     )
@@ -384,7 +384,7 @@ pub async fn list_latest_ready_per_project(pool: &PgPool) -> Result<Vec<Deployme
             started_at, finished_at, created_at
         FROM deployments
         WHERE status = 'ready'
-        ORDER BY project_id, created_at DESC
+        ORDER BY project_id, created_at DESC, id DESC
         "#,
     )
     .fetch_all(pool)
@@ -417,7 +417,7 @@ pub async fn list_latest_for_projects(
             created_at
         FROM deployments
         WHERE project_id = ANY($1)
-        ORDER BY project_id, created_at DESC
+        ORDER BY project_id, created_at DESC, id DESC
         "#,
     )
     .bind(project_ids)

@@ -300,6 +300,165 @@ async fn list_projects_includes_latest_deployment_summary() -> anyhow::Result<()
     Ok(())
 }
 
+#[tokio::test]
+#[serial]
+async fn list_projects_exposes_pending_primary_domain() -> anyhow::Result<()> {
+    let Some(server) = TestServer::start().await? else {
+        return Ok(());
+    };
+
+    let client = reqwest::Client::builder().cookie_store(true).build()?;
+    let token = register_user(&client, &server.base_url).await?;
+    let subdomain = format!("sub-{}", uuid::Uuid::new_v4().simple());
+
+    let create_project_resp = client
+        .post(format!("{}/api/projects/", server.base_url))
+        .bearer_auth(&token)
+        .json(&json!({
+            "name": "pending-domain-app",
+            "repo_url": "https://github.com/example/repo",
+            "subdomain": subdomain,
+            "framework": "nextjs"
+        }))
+        .send()
+        .await?;
+
+    assert_eq!(create_project_resp.status(), StatusCode::CREATED);
+    let project_json: serde_json::Value = create_project_resp.json().await?;
+    let project_id = project_json["id"]
+        .as_str()
+        .expect("project id should be present");
+
+    let primary_domain = format!("pending-{}.example.com", uuid::Uuid::new_v4().simple());
+    let create_domain_resp = client
+        .post(format!("{}/api/domains/", server.base_url))
+        .bearer_auth(&token)
+        .json(&json!({
+            "domain": primary_domain,
+            "project_id": project_id
+        }))
+        .send()
+        .await?;
+    assert_eq!(create_domain_resp.status(), StatusCode::CREATED);
+
+    let list_projects_resp = client
+        .get(format!("{}/api/projects/", server.base_url))
+        .bearer_auth(&token)
+        .send()
+        .await?;
+    assert_eq!(list_projects_resp.status(), StatusCode::OK);
+
+    let projects: serde_json::Value = list_projects_resp.json().await?;
+    let first = projects
+        .as_array()
+        .and_then(|items| items.first())
+        .expect("project list should include one item");
+
+    assert_eq!(
+        first["primary_domain"].as_str().unwrap_or_default(),
+        primary_domain
+    );
+    assert_eq!(
+        first["public_url"].as_str().unwrap_or_default(),
+        format!("http://{}.localhost", subdomain)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn list_projects_uses_deterministic_latest_deployment_on_tied_timestamps(
+) -> anyhow::Result<()> {
+    let Some(server) = TestServer::start().await? else {
+        return Ok(());
+    };
+
+    let client = reqwest::Client::builder().cookie_store(true).build()?;
+    let token = register_user(&client, &server.base_url).await?;
+    let subdomain = format!("sub-{}", uuid::Uuid::new_v4().simple());
+
+    let create_project_resp = client
+        .post(format!("{}/api/projects/", server.base_url))
+        .bearer_auth(&token)
+        .json(&json!({
+            "name": "deterministic-summary-app",
+            "repo_url": "https://github.com/example/repo",
+            "subdomain": subdomain,
+            "framework": "nextjs"
+        }))
+        .send()
+        .await?;
+
+    assert_eq!(create_project_resp.status(), StatusCode::CREATED);
+    let project_json: serde_json::Value = create_project_resp.json().await?;
+    let project_id = uuid::Uuid::parse_str(
+        project_json["id"]
+            .as_str()
+            .expect("project id should be present"),
+    )?;
+
+    let database_url = std::env::var("TEST_DATABASE_URL")?;
+    let pool = db::connect_and_migrate(&database_url).await?;
+    let created_at = chrono::Utc::now();
+    let lower_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")?;
+    let higher_id = uuid::Uuid::parse_str("ffffffff-ffff-ffff-ffff-ffffffffffff")?;
+
+    for (deployment_id, commit_sha) in [(lower_id, "aaa111"), (higher_id, "bbb222")] {
+        sqlx::query(
+            r#"
+            INSERT INTO deployments (
+                id,
+                project_id,
+                commit_sha,
+                commit_message,
+                branch,
+                status,
+                created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6::deployment_status, $7)
+            "#,
+        )
+        .bind(deployment_id)
+        .bind(project_id)
+        .bind(commit_sha)
+        .bind(format!("commit {commit_sha}"))
+        .bind("main")
+        .bind("queued")
+        .bind(created_at)
+        .execute(&pool)
+        .await?;
+    }
+
+    let list_projects_resp = client
+        .get(format!("{}/api/projects/", server.base_url))
+        .bearer_auth(&token)
+        .send()
+        .await?;
+    assert_eq!(list_projects_resp.status(), StatusCode::OK);
+
+    let projects: serde_json::Value = list_projects_resp.json().await?;
+    let first = projects
+        .as_array()
+        .and_then(|items| items.first())
+        .expect("project list should include one item");
+
+    assert_eq!(
+        first["latest_deployment"]["id"]
+            .as_str()
+            .unwrap_or_default(),
+        higher_id.to_string()
+    );
+    assert_eq!(
+        first["latest_deployment"]["commit_sha"]
+            .as_str()
+            .unwrap_or_default(),
+        "bbb222"
+    );
+
+    Ok(())
+}
+
 async fn register_user(client: &reqwest::Client, base_url: &str) -> anyhow::Result<String> {
     let email = format!("user-{}@example.com", uuid::Uuid::new_v4());
     let response = client

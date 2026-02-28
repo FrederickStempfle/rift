@@ -258,6 +258,31 @@ pub async fn get_primary_domain_for_project(
     .map_err(AppError::Db)
 }
 
+pub async fn get_configured_primary_domain_for_project(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Option<Domain>, AppError> {
+    sqlx::query_as::<_, Domain>(
+        r#"
+        SELECT
+            id,
+            project_id,
+            domain,
+            is_primary,
+            ssl_status::text AS ssl_status,
+            ssl_expires_at,
+            ssl_error
+        FROM domains
+        WHERE project_id = $1 AND is_primary = true
+        LIMIT 1
+        "#,
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Db)
+}
+
 pub async fn list_primary_domains_for_projects(
     pool: &PgPool,
     project_ids: &[Uuid],
@@ -280,6 +305,35 @@ pub async fn list_primary_domains_for_projects(
         WHERE project_id = ANY($1)
           AND is_primary = true
           AND ssl_status = 'active'
+        "#,
+    )
+    .bind(project_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Db)
+}
+
+pub async fn list_configured_primary_domains_for_projects(
+    pool: &PgPool,
+    project_ids: &[Uuid],
+) -> Result<Vec<Domain>, AppError> {
+    if project_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, Domain>(
+        r#"
+        SELECT
+            id,
+            project_id,
+            domain,
+            is_primary,
+            ssl_status::text AS ssl_status,
+            ssl_expires_at,
+            ssl_error
+        FROM domains
+        WHERE project_id = ANY($1)
+          AND is_primary = true
         "#,
     )
     .bind(project_ids)
