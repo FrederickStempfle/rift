@@ -39,10 +39,7 @@ services:
     tmpfs:
       - /tmp:size=1G,exec
       - /var/rift/builds:size=5G,exec
-      - /root/.npm:size=512M
-      - /root/.bun:size=512M
-      - /root/.cache:size=1G
-      - /root/.local:size=512M
+      - /root:size=3G
     volumes:
       - deployments:/var/rift/deployments
       - ssl:/var/rift/ssl
