@@ -29,7 +29,7 @@ services:
       DATABASE_URL: postgres://rift:rift@db:5432/rift
     ports:
       - "3001:3001"
-      - "8080:8080"
+      - "80:8080"
     security_opt:
       - no-new-privileges:true
     cap_drop:
