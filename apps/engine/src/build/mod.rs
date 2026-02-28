@@ -562,11 +562,13 @@ impl BuildManager {
     }
 }
 
-/// Find the directory containing `.next/standalone/server.js`.
+/// Find the app directory that has a `.next/standalone/` output.
 /// Checks the workspace root first, then scans workspace packages (apps/*, packages/*).
+/// The actual `server.js` location inside standalone/ is resolved at spawn time
+/// by `process::find_server_js_recursive`.
 async fn find_next_standalone(workspace_dir: &std::path::Path) -> Option<std::path::PathBuf> {
     // Check root
-    if workspace_dir.join(".next/standalone/server.js").exists() {
+    if workspace_dir.join(".next/standalone").exists() {
         return Some(workspace_dir.to_path_buf());
     }
 
@@ -587,7 +589,7 @@ async fn find_next_standalone(workspace_dir: &std::path::Path) -> Option<std::pa
                 .unwrap_or(false)
             {
                 let candidate = entry.path();
-                if candidate.join(".next/standalone/server.js").exists() {
+                if candidate.join(".next/standalone").exists() {
                     return Some(candidate);
                 }
             }

@@ -280,7 +280,7 @@ impl RuntimeManager {
             }
 
             // Detect runtime kind from filesystem
-            let kind = if workspace_dir.join(".next/standalone/server.js").exists() {
+            let kind = if workspace_dir.join(".next/standalone").exists() {
                 RuntimeKind::NextDeno { dir: workspace_dir }
             } else if workspace_dir.join(".output/server/index.mjs").exists() {
                 RuntimeKind::NuxtNode { dir: workspace_dir }

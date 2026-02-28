@@ -75,7 +75,17 @@ pub fn spawn_deno_next(
     port: u16,
     envs: &[(String, String)],
 ) -> Result<Child, AppError> {
-    let server_js = dir.join(".next/standalone/server.js");
+    let standalone_dir = dir.join(".next/standalone");
+
+    // In monorepos, Next.js nests server.js inside the standalone dir
+    // preserving the workspace structure (e.g. .next/standalone/apps/web/server.js)
+    let server_js = if standalone_dir.join("server.js").exists() {
+        standalone_dir.join("server.js")
+    } else {
+        find_server_js_recursive(&standalone_dir).unwrap_or_else(|| standalone_dir.join("server.js"))
+    };
+    let server_dir = server_js.parent().unwrap_or(&standalone_dir);
+
     let mut cmd = Command::new("deno");
     cmd.arg("run")
         .arg("--allow-net")
@@ -86,7 +96,7 @@ pub fn spawn_deno_next(
         .arg("--unstable-detect-cjs")
         .arg("--no-prompt")
         .arg(&server_js)
-        .current_dir(dir.join(".next/standalone"))
+        .current_dir(server_dir)
         .env("PORT", port.to_string())
         .env("HOSTNAME", "0.0.0.0")
         .env("NODE_ENV", "production")
@@ -103,6 +113,35 @@ pub fn spawn_deno_next(
             dir.display()
         ))
     })
+}
+
+/// Search up to 3 levels deep for server.js inside a directory.
+fn find_server_js_recursive(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let d1 = entry.path();
+        if d1.join("server.js").exists() {
+            return Some(d1.join("server.js"));
+        }
+        let Ok(sub_entries) = std::fs::read_dir(&d1) else {
+            continue;
+        };
+        for sub_entry in sub_entries.flatten() {
+            if !sub_entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let d2 = sub_entry.path();
+            if d2.join("server.js").exists() {
+                return Some(d2.join("server.js"));
+            }
+        }
+    }
+    None
 }
 
 /// Spawn a Node.js process to run a Nuxt server (.output/server/index.mjs).
