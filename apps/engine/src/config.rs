@@ -31,6 +31,10 @@ pub struct Config {
     #[arg(long, env = "RIFT_PROXY_PORT", default_value_t = 8080)]
     pub proxy_port: u16,
 
+    /// The externally-visible port (after Docker port mapping). Defaults to proxy_port.
+    #[arg(long, env = "RIFT_PUBLIC_PORT")]
+    pub public_port: Option<u16>,
+
     #[arg(long, env = "RIFT_BASE_DOMAIN", default_value = "localhost")]
     pub base_domain: String,
 
@@ -82,14 +86,15 @@ impl Config {
     }
 
     pub fn public_url_for_host(&self, host: &str) -> String {
+        let port = self.public_port.unwrap_or(self.proxy_port);
         let include_port = match self.proxy_scheme.as_str() {
-            "http" => self.proxy_port != 80,
-            "https" => self.proxy_port != 443,
+            "http" => port != 80,
+            "https" => port != 443,
             _ => true,
         };
 
         if include_port {
-            format!("{}://{}:{}", self.proxy_scheme, host, self.proxy_port)
+            format!("{}://{}:{}", self.proxy_scheme, host, port)
         } else {
             format!("{}://{}", self.proxy_scheme, host)
         }
