@@ -697,7 +697,7 @@ Security is **not a phase** — it's woven into every implementation phase:
 - [ ] GitLab / Bitbucket support
 - [ ] Preview deployments (per-PR)
 - [ ] Rollback to previous deployment
-- [ ] Build caching (node_modules, .next/cache)
+- [x] Build caching (node_modules, .next/cache)
 - [ ] Multi-user / team support with RBAC
 - [ ] Deployment analytics (request count, latency, errors)
 - [ ] CLI tool (`rift deploy`, `rift logs`, `rift env set`)

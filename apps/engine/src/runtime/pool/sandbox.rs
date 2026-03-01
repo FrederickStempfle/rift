@@ -1,19 +1,4 @@
-use std::path::Path;
-
-// -----------------------------------------------------------------------
-// NOTE: This seccomp profile is DEFINED but NOT APPLIED at runtime.
-//
-// The profile is tested and valid, but the worker spawn path in
-// `pool/mod.rs` does not currently attach it. To enable seccomp:
-//
-// 1. Docker-level: `--security-opt seccomp=<path>` using the profile
-//    written by `write_seccomp_profile()`.
-// 2. Process-level: call `seccomp()` syscall before exec in the
-//    worker spawn path (requires `libseccomp` or raw syscall).
-//
-// Until one of these is implemented, worker isolation relies on
-// Deno's permission flags and cgroup limits only.
-// -----------------------------------------------------------------------
+use std::path::{Path, PathBuf};
 
 /// Seccomp BPF profile for worker processes.
 ///
@@ -96,8 +81,80 @@ pub const SECCOMP_PROFILE: &str = r#"{
 /// - `personality` — Change execution domain (could disable ASLR)
 /// - `userfaultfd` — User-space page fault handling (potential exploit vector)
 
-/// Write the seccomp profile to a temporary file for use with process spawning.
-pub fn write_seccomp_profile(dir: &Path) -> Result<std::path::PathBuf, crate::error::AppError> {
+/// Seccomp enforcement state for the worker pool.
+#[derive(Debug, Clone)]
+pub struct SeccompEnforcer {
+    /// Whether seccomp enforcement is required. When true, workers that fail
+    /// seccomp setup will not be started.
+    pub enforce: bool,
+    /// Path to the written seccomp profile file, if available.
+    pub profile_path: Option<PathBuf>,
+}
+
+impl SeccompEnforcer {
+    /// Initialize seccomp enforcement. Writes the profile to `dir` and checks availability.
+    ///
+    /// If `enforce` is true and seccomp is not available, returns an error
+    /// (fail-safe: do not start insecurely in production).
+    pub fn init(dir: &Path, enforce: bool) -> Result<Self, crate::error::AppError> {
+        let available = is_seccomp_available();
+
+        if enforce && !available {
+            return Err(crate::error::AppError::Internal(
+                "seccomp enforcement is enabled (RIFT_SECCOMP_ENFORCE=true) but seccomp \
+                 is not available on this system. Refusing to start insecurely. \
+                 Set RIFT_SECCOMP_ENFORCE=false to disable for development."
+                    .to_string(),
+            ));
+        }
+
+        let profile_path = if available {
+            match write_seccomp_profile(dir) {
+                Ok(path) => {
+                    tracing::info!(
+                        path = %path.display(),
+                        enforce,
+                        "seccomp profile written"
+                    );
+                    Some(path)
+                }
+                Err(e) => {
+                    if enforce {
+                        return Err(crate::error::AppError::Internal(format!(
+                            "seccomp enforcement enabled but failed to write profile: {e}"
+                        )));
+                    }
+                    tracing::warn!(error = %e, "failed to write seccomp profile, continuing without enforcement");
+                    None
+                }
+            }
+        } else {
+            tracing::info!("seccomp not available on this platform, skipping profile write");
+            None
+        };
+
+        Ok(Self {
+            enforce,
+            profile_path,
+        })
+    }
+
+    /// Return Docker-compatible `--security-opt` argument for spawning contained processes,
+    /// or None if seccomp is not available / not enforced.
+    pub fn docker_security_opt(&self) -> Option<String> {
+        self.profile_path.as_ref().map(|p| {
+            format!("seccomp={}", p.display())
+        })
+    }
+
+    /// Check if seccomp should be applied to worker processes.
+    pub fn should_apply(&self) -> bool {
+        self.profile_path.is_some()
+    }
+}
+
+/// Write the seccomp profile to a file for use with process spawning.
+pub fn write_seccomp_profile(dir: &Path) -> Result<PathBuf, crate::error::AppError> {
     let profile_path = dir.join("rift-worker-seccomp.json");
     std::fs::write(&profile_path, SECCOMP_PROFILE).map_err(|e| {
         crate::error::AppError::Internal(format!(

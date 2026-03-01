@@ -17,6 +17,7 @@ use crate::error::AppError;
 use crate::runtime::{RuntimeKind, RuntimeLaunchSpec};
 
 use self::ipc::wait_for_worker;
+use self::sandbox::SeccompEnforcer;
 use self::worker::Worker;
 
 /// Configuration for the worker pool.
@@ -34,6 +35,8 @@ pub struct PoolConfig {
     pub loader_script: PathBuf,
     /// Base directory for deployment bundles.
     pub deploy_root: PathBuf,
+    /// Whether to enforce seccomp on worker processes.
+    pub seccomp_enforce: bool,
 }
 
 /// Tracks a worker that has been specialized for a project.
@@ -65,6 +68,8 @@ pub struct WorkerPool {
     active: Mutex<HashMap<Uuid, ActiveAssignment>>,
     /// Deployments that were active but whose workers were reclaimed.
     suspended: Mutex<HashMap<Uuid, SuspendedInfo>>,
+    /// Seccomp enforcement state.
+    seccomp: SeccompEnforcer,
 }
 
 impl WorkerPool {
@@ -75,11 +80,15 @@ impl WorkerPool {
             tracing::warn!(error = %e, "cgroup setup failed, resource limits disabled");
         }
 
+        // Initialize seccomp enforcement
+        let seccomp = SeccompEnforcer::init(&config.deploy_root, config.seccomp_enforce)?;
+
         let pool = Arc::new(Self {
             config: config.clone(),
             warm: Mutex::new(Vec::new()),
             active: Mutex::new(HashMap::new()),
             suspended: Mutex::new(HashMap::new()),
+            seccomp,
         });
 
         // Pre-warm workers in background
@@ -95,9 +104,10 @@ impl WorkerPool {
     async fn replenish_warm_pool(&self) {
         let mut warm = self.warm.lock().await;
         let needed = self.config.warm_pool_size.saturating_sub(warm.len());
+        let seccomp_path = self.seccomp.profile_path.as_deref();
 
         for _ in 0..needed {
-            match Worker::spawn_warm(&self.config.loader_script).await {
+            match Worker::spawn_warm(&self.config.loader_script, seccomp_path).await {
                 Ok(mut worker) => {
                     // Wait for the worker to become ready
                     match wait_for_worker(worker.port, 30).await {
@@ -162,7 +172,8 @@ impl WorkerPool {
 
         // No warm workers — spawn a new one on demand
         tracing::warn!("no warm workers available, spawning on demand");
-        let mut worker = Worker::spawn_warm(&self.config.loader_script).await?;
+        let seccomp_path = self.seccomp.profile_path.as_deref();
+        let mut worker = Worker::spawn_warm(&self.config.loader_script, seccomp_path).await?;
         wait_for_worker(worker.port, 40).await.map_err(|e| {
             // Kill the failed worker
             let _ = worker.child.kill();

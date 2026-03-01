@@ -1,9 +1,12 @@
 use std::net::TcpListener;
+use std::path::Path;
 use std::sync::atomic::{AtomicU16, Ordering};
 
 use tokio::process::{Child, Command};
 
 use crate::error::AppError;
+
+use super::{namespace, seccomp};
 
 /// Port range for deployed apps. Must NOT be exposed outside Docker — all
 /// traffic arrives through the hyper reverse proxy on port 8080.
@@ -38,6 +41,7 @@ pub fn spawn_deno_static(
     dir: &std::path::Path,
     port: u16,
     envs: &[(String, String)],
+    seccomp_profile: Option<&Path>,
 ) -> Result<Child, AppError> {
     let entry = dir.join("_entry.ts");
     let mut cmd = Command::new("deno");
@@ -54,6 +58,12 @@ pub fn spawn_deno_static(
 
     for (key, value) in envs {
         cmd.env(key, value);
+    }
+
+    // Namespace isolation must be applied before seccomp (unshare would be blocked)
+    namespace::apply_namespace_isolation(&mut cmd)?;
+    if let Some(profile) = seccomp_profile {
+        seccomp::apply_seccomp_pre_exec(&mut cmd, profile)?;
     }
 
     cmd.spawn().map_err(|e| {
@@ -74,6 +84,7 @@ pub fn spawn_deno_next(
     dir: &std::path::Path,
     port: u16,
     envs: &[(String, String)],
+    seccomp_profile: Option<&Path>,
 ) -> Result<Child, AppError> {
     let standalone_dir = dir.join(".next/standalone");
 
@@ -105,6 +116,11 @@ pub fn spawn_deno_next(
 
     for (key, value) in envs {
         cmd.env(key, value);
+    }
+
+    namespace::apply_namespace_isolation(&mut cmd)?;
+    if let Some(profile) = seccomp_profile {
+        seccomp::apply_seccomp_pre_exec(&mut cmd, profile)?;
     }
 
     cmd.spawn().map_err(|e| {
@@ -154,6 +170,7 @@ pub fn spawn_deno_functions(
     dir: &std::path::Path,
     port: u16,
     envs: &[(String, String)],
+    seccomp_profile: Option<&Path>,
 ) -> Result<Child, AppError> {
     let entry = dir.join("_entry.ts");
     let mut cmd = Command::new("deno");
@@ -170,6 +187,11 @@ pub fn spawn_deno_functions(
 
     for (key, value) in envs {
         cmd.env(key, value);
+    }
+
+    namespace::apply_namespace_isolation(&mut cmd)?;
+    if let Some(profile) = seccomp_profile {
+        seccomp::apply_seccomp_pre_exec(&mut cmd, profile)?;
     }
 
     cmd.spawn().map_err(|e| {
@@ -189,6 +211,7 @@ pub fn spawn_deno_combined(
     functions_dir: &std::path::Path,
     port: u16,
     envs: &[(String, String)],
+    seccomp_profile: Option<&Path>,
 ) -> Result<Child, AppError> {
     let mut cmd = Command::new("deno");
     cmd.arg("run")
@@ -207,6 +230,11 @@ pub fn spawn_deno_combined(
 
     for (key, value) in envs {
         cmd.env(key, value);
+    }
+
+    namespace::apply_namespace_isolation(&mut cmd)?;
+    if let Some(profile) = seccomp_profile {
+        seccomp::apply_seccomp_pre_exec(&mut cmd, profile)?;
     }
 
     cmd.spawn().map_err(|e| {
@@ -250,6 +278,7 @@ pub fn spawn_node_server(
     entry: &std::path::Path,
     port: u16,
     envs: &[(String, String)],
+    seccomp_profile: Option<&Path>,
 ) -> Result<Child, AppError> {
     // Remix: entry exports handlers, needs remix-serve to wrap them
     let is_remix = dir.join("node_modules/.bin/remix-serve").exists()
@@ -278,6 +307,11 @@ pub fn spawn_node_server(
 
     for (key, value) in envs {
         cmd.env(key, value);
+    }
+
+    namespace::apply_namespace_isolation(&mut cmd)?;
+    if let Some(profile) = seccomp_profile {
+        seccomp::apply_seccomp_pre_exec(&mut cmd, profile)?;
     }
 
     cmd.spawn().map_err(|e| {

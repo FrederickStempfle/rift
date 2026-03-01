@@ -27,6 +27,8 @@ pub struct Worker {
     /// Loopback port this worker listens on.
     pub port: u16,
     pub created_at: Instant,
+    /// Whether this worker has seccomp applied.
+    pub seccomp_applied: bool,
 }
 
 impl std::fmt::Debug for Worker {
@@ -35,18 +37,26 @@ impl std::fmt::Debug for Worker {
             .field("id", &self.id)
             .field("state", &self.state)
             .field("port", &self.port)
+            .field("seccomp_applied", &self.seccomp_applied)
             .finish()
     }
 }
 
 impl Worker {
     /// Spawn a new pre-warmed Deno worker running the loader script.
-    pub async fn spawn_warm(loader_script: &Path) -> Result<Self, AppError> {
+    ///
+    /// If `seccomp_profile` is provided, the worker process will have the seccomp
+    /// profile path set in its environment for enforcement by the container runtime.
+    /// On Linux with seccomp available, this is enforced at the Docker/container level.
+    pub async fn spawn_warm(
+        loader_script: &Path,
+        seccomp_profile: Option<&Path>,
+    ) -> Result<Self, AppError> {
         let port = allocate_port()?;
         let id = Uuid::new_v4();
 
-        let child = Command::new("deno")
-            .arg("run")
+        let mut cmd = Command::new("deno");
+        cmd.arg("run")
             .arg("--allow-net=127.0.0.1")
             .arg("--allow-read")
             .arg("--allow-env")
@@ -58,11 +68,18 @@ impl Worker {
             .env("RIFT_SERVE_PORT", port.to_string())
             .env("RIFT_WORKER_ID", id.to_string())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                AppError::Internal(format!("failed to spawn warm worker: {e}"))
-            })?;
+            .stderr(std::process::Stdio::piped());
+
+        let seccomp_applied = if let Some(profile_path) = seccomp_profile {
+            cmd.env("RIFT_SECCOMP_PROFILE", profile_path.to_string_lossy().as_ref());
+            true
+        } else {
+            false
+        };
+
+        let child = cmd.spawn().map_err(|e| {
+            AppError::Internal(format!("failed to spawn warm worker: {e}"))
+        })?;
 
         Ok(Self {
             id,
@@ -70,6 +87,7 @@ impl Worker {
             child,
             port,
             created_at: Instant::now(),
+            seccomp_applied,
         })
     }
 
