@@ -134,6 +134,12 @@ pub struct Config {
     #[arg(long, env = "RIFT_SECCOMP_ENFORCE", default_value_t = true)]
     pub seccomp_enforce: bool,
 
+    /// Apply PID/mount namespace isolation to worker processes via unshare(2).
+    /// Default: false. Enable only when NOT running inside Docker (Docker already
+    /// provides namespace isolation, and the /proc remount conflicts with it).
+    #[arg(long, env = "RIFT_NAMESPACE_ISOLATE", default_value_t = false)]
+    pub namespace_isolate: bool,
+
     // --- Build Configuration ---
 
     /// Maximum number of concurrent builds. Set to 1 for serial builds.

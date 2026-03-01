@@ -56,6 +56,9 @@ async fn main() -> anyhow::Result<()> {
         config.healthcheck_attempts,
     );
 
+    // Configure namespace isolation (disabled by default inside Docker)
+    runtime_manager.set_namespace_isolate(config.namespace_isolate);
+
     // Start the global function dispatcher
     let template_dir = std::path::Path::new("/opt/rift/templates");
     let function_registry = match rift_engine::runtime::function_registry::FunctionRegistry::start(

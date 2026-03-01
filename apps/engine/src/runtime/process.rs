@@ -42,6 +42,7 @@ pub fn spawn_deno_static(
     port: u16,
     envs: &[(String, String)],
     seccomp_profile: Option<&Path>,
+    namespace_isolate: bool,
 ) -> Result<Child, AppError> {
     let entry = dir.join("_entry.ts");
     let mut cmd = Command::new("deno");
@@ -61,7 +62,9 @@ pub fn spawn_deno_static(
     }
 
     // Namespace isolation must be applied before seccomp (unshare would be blocked)
-    namespace::apply_namespace_isolation(&mut cmd)?;
+    if namespace_isolate {
+        namespace::apply_namespace_isolation(&mut cmd)?;
+    }
     if let Some(profile) = seccomp_profile {
         seccomp::apply_seccomp_pre_exec(&mut cmd, profile)?;
     }
@@ -85,6 +88,7 @@ pub fn spawn_deno_next(
     port: u16,
     envs: &[(String, String)],
     seccomp_profile: Option<&Path>,
+    namespace_isolate: bool,
 ) -> Result<Child, AppError> {
     let standalone_dir = dir.join(".next/standalone");
 
@@ -118,7 +122,9 @@ pub fn spawn_deno_next(
         cmd.env(key, value);
     }
 
-    namespace::apply_namespace_isolation(&mut cmd)?;
+    if namespace_isolate {
+        namespace::apply_namespace_isolation(&mut cmd)?;
+    }
     if let Some(profile) = seccomp_profile {
         seccomp::apply_seccomp_pre_exec(&mut cmd, profile)?;
     }
@@ -171,6 +177,7 @@ pub fn spawn_deno_functions(
     port: u16,
     envs: &[(String, String)],
     seccomp_profile: Option<&Path>,
+    namespace_isolate: bool,
 ) -> Result<Child, AppError> {
     let entry = dir.join("_entry.ts");
     let mut cmd = Command::new("deno");
@@ -189,7 +196,9 @@ pub fn spawn_deno_functions(
         cmd.env(key, value);
     }
 
-    namespace::apply_namespace_isolation(&mut cmd)?;
+    if namespace_isolate {
+        namespace::apply_namespace_isolation(&mut cmd)?;
+    }
     if let Some(profile) = seccomp_profile {
         seccomp::apply_seccomp_pre_exec(&mut cmd, profile)?;
     }
@@ -212,6 +221,7 @@ pub fn spawn_deno_combined(
     port: u16,
     envs: &[(String, String)],
     seccomp_profile: Option<&Path>,
+    namespace_isolate: bool,
 ) -> Result<Child, AppError> {
     let mut cmd = Command::new("deno");
     cmd.arg("run")
@@ -232,7 +242,9 @@ pub fn spawn_deno_combined(
         cmd.env(key, value);
     }
 
-    namespace::apply_namespace_isolation(&mut cmd)?;
+    if namespace_isolate {
+        namespace::apply_namespace_isolation(&mut cmd)?;
+    }
     if let Some(profile) = seccomp_profile {
         seccomp::apply_seccomp_pre_exec(&mut cmd, profile)?;
     }
@@ -279,6 +291,7 @@ pub fn spawn_node_server(
     port: u16,
     envs: &[(String, String)],
     seccomp_profile: Option<&Path>,
+    namespace_isolate: bool,
 ) -> Result<Child, AppError> {
     // Remix: entry exports handlers, needs remix-serve to wrap them
     let is_remix = dir.join("node_modules/.bin/remix-serve").exists()
@@ -309,7 +322,9 @@ pub fn spawn_node_server(
         cmd.env(key, value);
     }
 
-    namespace::apply_namespace_isolation(&mut cmd)?;
+    if namespace_isolate {
+        namespace::apply_namespace_isolation(&mut cmd)?;
+    }
     if let Some(profile) = seccomp_profile {
         seccomp::apply_seccomp_pre_exec(&mut cmd, profile)?;
     }

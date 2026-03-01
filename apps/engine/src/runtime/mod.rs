@@ -34,6 +34,8 @@ pub struct RuntimeManager {
     function_registry: Option<function_registry::FunctionRegistry>,
     /// Seccomp enforcer for process-level BPF filtering.
     seccomp: Option<SeccompEnforcer>,
+    /// Whether to apply PID/mount namespace isolation to worker processes.
+    namespace_isolate: bool,
     /// Milliseconds between health-check TCP probes.
     healthcheck_interval_ms: u64,
     /// Maximum number of health-check attempts.
@@ -102,9 +104,15 @@ impl RuntimeManager {
             })),
             function_registry: None,
             seccomp: None,
+            namespace_isolate: false,
             healthcheck_interval_ms: 200,
             healthcheck_attempts: 50,
         }
+    }
+
+    /// Configure namespace isolation for spawned worker processes.
+    pub fn set_namespace_isolate(&mut self, enabled: bool) {
+        self.namespace_isolate = enabled;
     }
 
     /// Configure health-check parameters from engine config.
@@ -211,16 +219,17 @@ impl RuntimeManager {
 
         let port = allocate_port()?;
         let seccomp_path = self.seccomp_profile_path();
+        let ns = self.namespace_isolate;
 
         let child = match &spec.kind {
-            RuntimeKind::StaticDeno { dir } => spawn_deno_static(dir, port, &spec.env_vars, seccomp_path)?,
-            RuntimeKind::NextDeno { dir } => spawn_deno_next(dir, port, &spec.env_vars, seccomp_path)?,
+            RuntimeKind::StaticDeno { dir } => spawn_deno_static(dir, port, &spec.env_vars, seccomp_path, ns)?,
+            RuntimeKind::NextDeno { dir } => spawn_deno_next(dir, port, &spec.env_vars, seccomp_path, ns)?,
             RuntimeKind::NodeServer { dir, entry } => {
-                spawn_node_server(dir, entry, port, &spec.env_vars, seccomp_path)?
+                spawn_node_server(dir, entry, port, &spec.env_vars, seccomp_path, ns)?
             }
-            RuntimeKind::Functions { dir } => spawn_deno_functions(dir, port, &spec.env_vars, seccomp_path)?,
+            RuntimeKind::Functions { dir } => spawn_deno_functions(dir, port, &spec.env_vars, seccomp_path, ns)?,
             RuntimeKind::Combined { entry, functions_dir } => {
-                process::spawn_deno_combined(entry, functions_dir, port, &spec.env_vars, seccomp_path)?
+                process::spawn_deno_combined(entry, functions_dir, port, &spec.env_vars, seccomp_path, ns)?
             }
         };
 

@@ -83,6 +83,7 @@ impl TestServer {
             isolate_timeout_secs: 30,
             isolate_heap_limit_mb: 128,
             seccomp_enforce: false,
+            namespace_isolate: false,
             build_concurrency: 4,
             build_cache_dir: "/tmp/rift-test-cache".into(),
             build_clean_cache: false,
