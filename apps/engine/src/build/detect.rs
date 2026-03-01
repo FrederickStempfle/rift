@@ -43,6 +43,19 @@ const WEB_FRAMEWORKS: &[&str] = &[
     "vite",
 ];
 
+/// Platform-specific adapters that produce output formats we cannot run.
+const UNSUPPORTED_ASTRO_ADAPTERS: &[(&str, &str)] = &[
+    ("@astrojs/vercel", "Vercel"),
+    ("@astrojs/cloudflare", "Cloudflare"),
+    ("@astrojs/netlify", "Netlify"),
+];
+
+const UNSUPPORTED_SVELTEKIT_ADAPTERS: &[(&str, &str)] = &[
+    ("@sveltejs/adapter-vercel", "Vercel"),
+    ("@sveltejs/adapter-cloudflare", "Cloudflare"),
+    ("@sveltejs/adapter-netlify", "Netlify"),
+];
+
 /// A workspace package that looks like a deployable web app.
 #[derive(Debug)]
 struct WorkspaceApp {
@@ -62,6 +75,8 @@ struct WorkspaceApp {
     is_sveltekit_ssr: bool,
     /// Whether the package has Remix.
     is_remix: bool,
+    /// If set, the app uses a platform-specific adapter we cannot deploy.
+    unsupported_platform: Option<String>,
 }
 
 pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<BuildPlan, AppError> {
@@ -183,6 +198,14 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
                 });
             }
 
+            // Reject apps that use platform-specific adapters we can't run
+            if let Some(platform) = &app.unsupported_platform {
+                return Err(AppError::BadRequest(format!(
+                    "This project uses a {platform}-specific adapter which produces output that cannot be deployed here. \
+                     For Astro, switch to @astrojs/node. For SvelteKit, switch to @sveltejs/adapter-node or @sveltejs/adapter-static."
+                )));
+            }
+
             return Ok(BuildPlan {
                 framework: app.framework.clone(),
                 package_manager,
@@ -254,6 +277,17 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
         });
     }
 
+    // Astro with platform-specific adapter → reject early
+    if has_astro {
+        if let Some(platform) = check_unsupported_adapter(&all_deps, UNSUPPORTED_ASTRO_ADAPTERS) {
+            return Err(AppError::BadRequest(format!(
+                "This project uses @astrojs/{} which produces output that cannot be deployed here. \
+                 Switch to @astrojs/node for SSR or remove the adapter for static output.",
+                platform.to_lowercase()
+            )));
+        }
+    }
+
     // SvelteKit with adapter-node → SSR
     let has_sveltekit = all_deps.iter().any(|dep| *dep == "@sveltejs/kit");
     let has_adapter_node = all_deps.iter().any(|dep| *dep == "@sveltejs/adapter-node");
@@ -265,6 +299,17 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
             build_command,
             output: BuildOutput::SvelteKitSSR,
         });
+    }
+
+    // SvelteKit with platform-specific adapter → reject early
+    if has_sveltekit {
+        if let Some(platform) = check_unsupported_adapter(&all_deps, UNSUPPORTED_SVELTEKIT_ADAPTERS) {
+            return Err(AppError::BadRequest(format!(
+                "This project uses @sveltejs/adapter-{} which produces output that cannot be deployed here. \
+                 Switch to @sveltejs/adapter-node for SSR or @sveltejs/adapter-static for static output.",
+                platform.to_lowercase()
+            )));
+        }
     }
 
     // Remix → always SSR
@@ -387,6 +432,14 @@ fn list_subdirs(dir: &Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
+/// Check if any unsupported platform-specific adapter is present in dependencies.
+fn check_unsupported_adapter(all_deps: &[&str], adapters: &[(&str, &str)]) -> Option<String> {
+    adapters
+        .iter()
+        .find(|(pkg, _)| all_deps.iter().any(|dep| dep == pkg))
+        .map(|(_, platform)| (*platform).to_owned())
+}
+
 /// Scan workspace packages to find a deployable web app.
 ///
 /// Looks in `apps/` (preferred) then `packages/` for a package that:
@@ -465,6 +518,14 @@ fn find_deployable_app(workspace_dir: &Path) -> Option<WorkspaceApp> {
                         *dep == "@remix-run/react" || *dep == "@react-router/dev"
                     });
 
+                let unsupported_platform = if fw == "astro" && !is_astro_ssr {
+                    check_unsupported_adapter(&all_deps, UNSUPPORTED_ASTRO_ADAPTERS)
+                } else if fw == "@sveltejs/kit" && !is_sveltekit_ssr {
+                    check_unsupported_adapter(&all_deps, UNSUPPORTED_SVELTEKIT_ADAPTERS)
+                } else {
+                    None
+                };
+
                 candidates.push((
                     WorkspaceApp {
                         name: pkg_name,
@@ -484,6 +545,7 @@ fn find_deployable_app(workspace_dir: &Path) -> Option<WorkspaceApp> {
                         is_astro_ssr,
                         is_sveltekit_ssr,
                         is_remix,
+                        unsupported_platform,
                     },
                     container == "apps",
                     has_index_html,

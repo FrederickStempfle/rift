@@ -148,7 +148,23 @@ impl BuildManager {
         deployments::update_source_metadata(&self.pool, deployment_id, &sha, message.as_deref())
             .await?;
 
-        let plan = detect_build_plan(&project, &workspace_dir)?;
+        let plan = match detect_build_plan(&project, &workspace_dir) {
+            Ok(plan) => plan,
+            Err(error) => {
+                insert_and_broadcast_log(
+                    &self.pool,
+                    &self.log_broadcaster,
+                    deployment_id,
+                    "error",
+                    &error.to_string(),
+                    "build",
+                )
+                .await?;
+                deployments::mark_failed(&self.pool, deployment_id, Some(elapsed_ms(started_at)))
+                    .await?;
+                return Err(error);
+            }
+        };
         insert_and_broadcast_log(
             &self.pool,
             &self.log_broadcaster,
