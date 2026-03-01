@@ -1,6 +1,8 @@
 pub mod backend;
 pub mod function_registry;
 pub mod health;
+#[cfg(feature = "v8-isolate")]
+pub mod isolate;
 pub mod pool;
 pub mod process;
 pub mod scaler;

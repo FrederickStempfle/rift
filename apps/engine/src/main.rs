@@ -94,6 +94,30 @@ async fn main() -> anyhow::Result<()> {
                 Arc::new(ProcessBackend::new(runtime_manager.clone()))
             }
         };
+    // Initialize V8 isolate pool for serverless functions (if enabled)
+    #[cfg(feature = "v8-isolate")]
+    let isolate_pool = if config.function_mode == "isolate" {
+        use rift_engine::runtime::isolate::{IsolatePool, IsolatePoolConfig};
+        let isolate_config = IsolatePoolConfig {
+            max_concurrent: config.isolate_max_concurrent,
+            execution_timeout: std::time::Duration::from_secs(config.isolate_timeout_secs),
+            heap_limit_bytes: config.isolate_heap_limit_mb * 1024 * 1024,
+        };
+        match IsolatePool::new(isolate_config).await {
+            Ok(pool) => {
+                tracing::info!("V8 isolate pool initialized");
+                Some(pool)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "V8 isolate pool failed to initialize — falling back to Deno subprocess");
+                None
+            }
+        }
+    } else {
+        tracing::info!(mode = %config.function_mode, "V8 isolate pool disabled — using Deno subprocess dispatcher");
+        None
+    };
+
     let analytics_collector = AnalyticsCollector::new(pool.clone());
     let log_broadcaster = LogBroadcaster::new();
     let build_manager = BuildManager::new(
@@ -103,6 +127,8 @@ async fn main() -> anyhow::Result<()> {
         config.build_root.clone().into(),
         config.deploy_root.clone().into(),
         log_broadcaster.clone(),
+        #[cfg(feature = "v8-isolate")]
+        isolate_pool.clone(),
     );
 
     let public_ip = config.resolve_public_ip().await;
@@ -141,6 +167,8 @@ async fn main() -> anyhow::Result<()> {
         ssl_manager: ssl_manager.clone(),
         challenge_store,
         cert_resolver,
+        #[cfg(feature = "v8-isolate")]
+        isolate_pool,
     };
 
     // Restore deployments that were running before the engine restarted
@@ -150,6 +178,66 @@ async fn main() -> anyhow::Result<()> {
         .await;
     if restored > 0 {
         tracing::info!(count = restored, "restored deployments from previous run");
+    }
+
+    // Restore function projects into the V8 isolate pool
+    #[cfg(feature = "v8-isolate")]
+    if let Some(ref isolate_pool) = state.isolate_pool {
+        use rift_engine::db::{deployments, env_vars};
+
+        if let Ok(ready) = deployments::list_latest_ready_per_project(&state.pool).await {
+            let mut isolate_restored = 0u32;
+            for deployment in &ready {
+                let workspace_dir =
+                    std::path::PathBuf::from(&config.deploy_root).join(deployment.id.to_string());
+                let fn_dir = workspace_dir.join("_rift_functions_output");
+                if !fn_dir.join("bundles").is_dir() {
+                    continue; // Not a function project
+                }
+
+                let manifest_path = fn_dir.join("_routes.json");
+                let routes: Vec<rift_engine::build::functions::FunctionRoute> =
+                    if manifest_path.exists() {
+                        tokio::fs::read_to_string(&manifest_path)
+                            .await
+                            .ok()
+                            .and_then(|c| serde_json::from_str(&c).ok())
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+
+                let env = env_vars::get_decrypted_env_vars(
+                    &state.pool,
+                    deployment.project_id,
+                    &config.master_key,
+                )
+                .await
+                .unwrap_or_default();
+
+                if let Err(e) = isolate_pool
+                    .register(
+                        deployment.project_id,
+                        deployment.id,
+                        &routes,
+                        &env,
+                        &fn_dir.to_string_lossy(),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        project_id = %deployment.project_id,
+                        "failed to restore function project into isolate pool"
+                    );
+                } else {
+                    isolate_restored += 1;
+                }
+            }
+            if isolate_restored > 0 {
+                tracing::info!(count = isolate_restored, "restored function projects into V8 isolate pool");
+            }
+        }
     }
 
     // Spawn certificate renewal background task

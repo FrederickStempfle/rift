@@ -78,6 +78,10 @@ impl TestServer {
             worker_memory_limit_mb: 512,
             worker_loader: "/opt/rift/templates/worker_loader.ts".into(),
             global_dispatcher_port: 9999,
+            function_mode: "isolate".into(),
+            isolate_max_concurrent: 50,
+            isolate_timeout_secs: 30,
+            isolate_heap_limit_mb: 128,
         });
         let runtime_manager = RuntimeManager::new();
         let log_broadcaster = LogBroadcaster::new();
@@ -92,6 +96,8 @@ impl TestServer {
             config.build_root.clone().into(),
             config.deploy_root.clone().into(),
             log_broadcaster.clone(),
+            #[cfg(feature = "v8-isolate")]
+            None,
         );
         let analytics_collector = AnalyticsCollector::new(pool.clone());
         let cert_resolver = CertResolver::new();
@@ -124,6 +130,8 @@ impl TestServer {
             ssl_manager,
             challenge_store,
             cert_resolver,
+            #[cfg(feature = "v8-isolate")]
+            isolate_pool: None,
         };
 
         let app = api::router(state);

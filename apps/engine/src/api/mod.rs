@@ -63,6 +63,8 @@ pub struct AppState {
     pub ssl_manager: SslManager,
     pub challenge_store: AcmeChallengeStore,
     pub cert_resolver: CertResolver,
+    #[cfg(feature = "v8-isolate")]
+    pub isolate_pool: Option<crate::runtime::isolate::IsolatePool>,
 }
 
 pub fn router(state: AppState) -> Router {

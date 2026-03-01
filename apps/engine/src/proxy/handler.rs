@@ -82,6 +82,15 @@ async fn route_and_forward(
         return Err((StatusCode::FORBIDDEN, pid));
     }
 
+    // V8 isolate pool: handle function-only projects directly (no HTTP hop)
+    #[cfg(feature = "v8-isolate")]
+    if let Some(ref isolate_pool) = state.isolate_pool {
+        if isolate_pool.is_registered(project_id).await {
+            return handle_isolate_invoke(req, remote_addr, isolate_pool, project_id, &host, state)
+                .await;
+        }
+    }
+
     // Look up active runtime URL (in-memory, no DB hit)
     let (target_base, cold_start) = match state.runtime_backend.active_url(project_id).await {
         Some(url) => {
@@ -211,6 +220,93 @@ fn error_response(status: StatusCode) -> Response<Full<Bytes>> {
             status.canonical_reason().unwrap_or("Error"),
         )))
         .unwrap()
+}
+
+/// Handle a function request via the V8 isolate pool — no HTTP hop.
+#[cfg(feature = "v8-isolate")]
+async fn handle_isolate_invoke(
+    req: Request<Incoming>,
+    remote_addr: SocketAddr,
+    isolate_pool: &crate::runtime::isolate::IsolatePool,
+    project_id: Uuid,
+    host: &str,
+    state: &AppState,
+) -> Result<(Response<Full<Bytes>>, Option<Uuid>, bool), (StatusCode, Option<Uuid>)> {
+    let pid = Some(project_id);
+
+    // Decompose request
+    let (parts, body) = req.into_parts();
+
+    // Read body
+    let body_bytes = body
+        .collect()
+        .await
+        .map_err(|_| (StatusCode::BAD_REQUEST, pid))?
+        .to_bytes();
+
+    // Build the full URL the handler expects
+    let path_and_query = parts
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+    let url = format!("{}://{}{}", state.config.proxy_scheme, host, path_and_query);
+
+    // Collect headers as (String, String) pairs
+    let mut headers: Vec<(String, String)> = Vec::new();
+    for (name, value) in &parts.headers {
+        let lower = name.as_str().to_ascii_lowercase();
+        if lower == "host"
+            || lower.starts_with("x-forwarded-")
+            || lower == "forwarded"
+            || HOP_BY_HOP.contains(&lower.as_str())
+        {
+            continue;
+        }
+        if let Ok(v) = value.to_str() {
+            headers.push((name.to_string(), v.to_string()));
+        }
+    }
+    headers.push(("x-forwarded-for".to_string(), remote_addr.ip().to_string()));
+    headers.push(("x-forwarded-host".to_string(), host.to_string()));
+    headers.push((
+        "x-forwarded-proto".to_string(),
+        state.config.proxy_scheme.clone(),
+    ));
+    headers.push(("host".to_string(), host.to_string()));
+
+    let method = parts.method.as_str();
+    let body_opt = if body_bytes.is_empty() {
+        None
+    } else {
+        Some(body_bytes)
+    };
+
+    // Invoke directly in V8 — no HTTP hop
+    let isolate_resp = isolate_pool
+        .invoke(project_id, method, &url, &headers, body_opt)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, project_id = %project_id, "isolate invoke failed");
+            (map_app_error(e), pid)
+        })?;
+
+    // Build hyper Response from IsolateResponse
+    let mut response = Response::builder().status(StatusCode::from_u16(isolate_resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
+    for (k, v) in &isolate_resp.headers {
+        if let (Ok(name), Ok(val)) = (
+            hyper::header::HeaderName::from_bytes(k.as_bytes()),
+            hyper::header::HeaderValue::from_str(v),
+        ) {
+            response = response.header(name, val);
+        }
+    }
+
+    let resp = response
+        .body(Full::new(isolate_resp.body))
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, pid))?;
+
+    Ok((resp, pid, false))
 }
 
 fn map_app_error(error: AppError) -> StatusCode {

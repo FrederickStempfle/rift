@@ -108,6 +108,24 @@ pub struct Config {
     /// Fixed port for the global function dispatcher (not allocated from the deployment range).
     #[arg(long, env = "RIFT_GLOBAL_DISPATCHER_PORT", default_value_t = 9999)]
     pub global_dispatcher_port: u16,
+
+    // --- V8 Isolate Pool Configuration ---
+
+    /// Function execution mode: "isolate" (in-process V8) or "deno" (subprocess dispatcher).
+    #[arg(long, env = "RIFT_FUNCTION_MODE", default_value = "isolate")]
+    pub function_mode: String,
+
+    /// Maximum concurrent V8 isolate executions.
+    #[arg(long, env = "RIFT_ISOLATE_MAX_CONCURRENT", default_value_t = 50)]
+    pub isolate_max_concurrent: usize,
+
+    /// Per-isolate execution timeout in seconds.
+    #[arg(long, env = "RIFT_ISOLATE_TIMEOUT_SECS", default_value_t = 30)]
+    pub isolate_timeout_secs: u64,
+
+    /// Per-isolate V8 heap size limit in MB.
+    #[arg(long, env = "RIFT_ISOLATE_HEAP_LIMIT_MB", default_value_t = 128)]
+    pub isolate_heap_limit_mb: usize,
 }
 
 impl Config {

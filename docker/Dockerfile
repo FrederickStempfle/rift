@@ -1,6 +1,11 @@
 FROM rust:1.82-bookworm AS builder
 WORKDIR /app
 
+# clang is needed for linking V8 (deno_core dependency)
+RUN apt-get update && apt-get install -y --no-install-recommends clang libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+ENV CC=clang CXX=clang++
+
 COPY Cargo.toml rust-toolchain.toml ./
 COPY apps/engine/Cargo.toml apps/engine/Cargo.toml
 COPY apps/engine/src apps/engine/src

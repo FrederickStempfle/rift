@@ -15,7 +15,7 @@ Rift is not serverless as a platform. The platform itself is stateful and always
 What is serverless-like is the execution model for user deployments:
 
 - Static and SSR deployments can scale to zero and wake on the next request.
-- Function-only deployments are routed through a single global dispatcher that creates a fresh Deno `Worker` per invocation.
+- Function-only deployments are executed in-process via fresh V8 isolates (default) or routed through a Deno subprocess dispatcher (fallback).
 - Users do not manage their own public app server or reverse proxy.
 
 In practice, the current implementation is closer to "self-hosted scale-to-zero hosting" than Cloudflare Workers style edge serverless.
@@ -44,7 +44,8 @@ The Rust engine starts:
 - an HTTPS reverse proxy on `8443` when TLS is configured
 - a background TLS renewal task
 - a background scale-to-zero task
-- a global function dispatcher when available
+- a V8 isolate pool for in-process function execution (when `RIFT_FUNCTION_MODE=isolate`, the default)
+- a global Deno function dispatcher as fallback (when `RIFT_FUNCTION_MODE=deno`)
 
 The engine also runs DB migrations on startup.
 
@@ -139,13 +140,22 @@ These run as Node-style SSR servers. Remix may be wrapped with `remix-serve`; th
 
 #### Function-only projects
 
-If the global function dispatcher is running, the project is not given its own runtime port. Instead:
+Function-only projects have two execution paths depending on `RIFT_FUNCTION_MODE`:
+
+**Isolate mode (default, `RIFT_FUNCTION_MODE=isolate`):**
+
+- the generated route manifest and pre-bundled JS are loaded into the V8 isolate pool
+- the proxy invokes functions directly in-process — no HTTP forwarding, no subprocess
+- each invocation gets a fresh `deno_core::JsRuntime` with a Web Standards shim
+- the Deno subprocess dispatcher is still started as fallback
+
+**Deno mode (`RIFT_FUNCTION_MODE=deno`):**
 
 - the generated route manifest is loaded
-- routes are registered into the global dispatcher over HTTP
+- routes are registered into the global Deno dispatcher over HTTP
 - the deployment URL becomes the dispatcher's loopback URL
 
-If the global dispatcher is unavailable, the code falls back to spawning a per-project Deno function dispatcher process.
+If neither the isolate pool nor the global dispatcher is available, the code falls back to spawning a per-project Deno function dispatcher process.
 
 ### 8. Deployment is marked ready
 
@@ -172,7 +182,18 @@ The proxy resolves the target project from:
 
 The proxy checks the project firewall rules before routing to runtime.
 
-### 3. Runtime lookup
+### 3. V8 isolate pool check
+
+If the V8 isolate pool is active and the project is registered:
+
+- the proxy decomposes the request into method, URL, headers, and body
+- it calls `isolate_pool.invoke()` directly — no HTTP hop
+- a fresh V8 isolate executes the function handler
+- the response is returned immediately
+
+This path completely bypasses HTTP forwarding for function-only projects.
+
+### 4. Runtime lookup (for non-isolate projects)
 
 The proxy asks the configured runtime backend for an active URL.
 
@@ -180,19 +201,19 @@ The proxy asks the configured runtime backend for an active URL.
 - If not, it tries to wake a suspended deployment.
 - If wake fails, the proxy returns `503`.
 
-### 4. Function-only project header injection
+### 5. Function-only project header injection
 
-If the runtime backend identifies the project as function-only, the proxy adds:
+If the runtime backend identifies the project as function-only (Deno mode fallback), the proxy adds:
 
 `x-rift-project-id: <project_id>`
 
 The global dispatcher uses that header to select the correct registered route table.
 
-### 5. Forwarding
+### 6. Forwarding
 
 The proxy forwards the request to the internal loopback runtime URL, strips hop-by-hop headers, and adds forwarding headers.
 
-### 6. Analytics
+### 7. Analytics
 
 Each request emits a non-blocking analytics event containing:
 
@@ -299,10 +320,33 @@ Examples:
 Each function file is:
 
 - bundled with `esbuild`
-- wrapped in its own Deno `Worker` entry file
+- wrapped in its own Deno `Worker` entry file (for Deno mode fallback)
 - registered into a route table
 
-### Runtime shape
+### Runtime shape: V8 isolate mode (default)
+
+The engine embeds `deno_core` and executes function handlers directly in-process via fresh V8 isolates.
+
+For each incoming function request:
+
+- the proxy checks the `IsolatePool` for a registered project
+- the URL is matched against routes in Rust (no JS `URLPattern`)
+- route params are injected as `x-rift-param-<name>` headers
+- a semaphore limits concurrent V8 executions (`RIFT_ISOLATE_MAX_CONCURRENT`, default 50)
+- a fresh `deno_core::JsRuntime` is created inside a `spawn_blocking` task
+- a Web Standards JS shim provides `Request`, `Response`, `Headers`, `fetch()`, `console`, `Deno.env`, `process.env`, and `crypto.randomUUID()`
+- the pre-loaded ESM bundle is imported via a `data:` URL
+- the handler is resolved and invoked with a `Request` object
+- the response is deserialized from V8 and returned directly to the proxy — no HTTP hop
+
+This gives:
+
+- near-zero cold start (<10ms vs 50-200ms for Deno Worker creation)
+- ~5-10MB per isolate vs ~30-50MB per Deno Worker
+- zero network overhead (no loopback HTTP forwarding)
+- true per-request isolation (fresh V8 heap per invocation)
+
+### Runtime shape: Deno mode (fallback)
 
 A single always-running Deno process acts as the global function dispatcher.
 
@@ -319,7 +363,7 @@ For each incoming function request:
 
 ### Handler conventions
 
-Function workers support these exports:
+Function handlers support these exports:
 
 - `export default { fetch(req) {} }`
 - `export default function handler(req) {}`
@@ -328,7 +372,15 @@ Function workers support these exports:
 
 ### Timeout and concurrency
 
-Current behavior:
+V8 isolate mode:
+
+- per-invocation timeout: `RIFT_ISOLATE_TIMEOUT_SECS`, default 30 seconds
+- max concurrent isolates: `RIFT_ISOLATE_MAX_CONCURRENT`, default 50
+- per-isolate heap limit: `RIFT_ISOLATE_HEAP_LIMIT_MB`, default 128MB
+- excess requests get `429`
+- timeout enforced via `v8::Isolate::terminate_execution()`
+
+Deno mode:
 
 - timeout is 30 seconds per invocation
 - concurrency is bounded per route by `RIFT_MAX_CONCURRENT`, default `50`
@@ -336,15 +388,20 @@ Current behavior:
 
 ### Isolation properties
 
-Good:
+V8 isolate mode:
+
+- each invocation gets a fresh `JsRuntime` — completely new V8 heap
+- no JS state is shared across requests
+- environment variables are injected per-request via `OpState`, not via `std::env`
+- outbound HTTP (`fetch`) is bridged to `reqwest` via a Rust op, not via Deno's network stack
+- the shim provides a minimal Web Standards surface (not spec-complete, but sufficient for real handlers)
+
+Deno mode:
 
 - each invocation gets a fresh `Worker`
 - no JS heap is shared across requests
 - route-level concurrency is tracked
-
-Important caveat:
-
-- worker permissions are `inherit`, so the isolate inherits the dispatcher's Deno permissions instead of getting a tighter per-function permission set
+- worker permissions are restricted (net, read, env allowed; write, run, ffi, sys denied)
 
 ## Static and SSR serverless model
 
@@ -383,7 +440,7 @@ On engine startup:
 - it decrypts env vars
 - it eagerly relaunches the runtime
 
-Function-only projects are restored by re-registering routes into the global dispatcher.
+Function-only projects are restored by re-registering routes into both the V8 isolate pool and the global dispatcher.
 
 ### Pool backend
 
@@ -431,11 +488,12 @@ Runtime state is split between memory, disk, and Postgres.
 
 - active runtime maps
 - suspended runtime maps
-- function registry contents
+- function registry contents (Deno dispatcher)
+- V8 isolate pool registered projects and pre-loaded bundles
 - warm worker pool contents
 - analytics aggregation buffer
 
-This state is lost when the engine restarts.
+This state is lost when the engine restarts. Function projects registered in the isolate pool are restored from the database on startup.
 
 ### On disk
 
@@ -495,11 +553,15 @@ To enable it:
 
 Until one of these is implemented, worker isolation relies on Deno permission flags, cgroup limits, and the restricted Worker permission set.
 
-### 2. Function dispatcher "cold starts" count every invocation
+### 2. V8 isolate pool shim is not spec-complete
+
+The Web Standards JS shim loaded into V8 isolates provides `Request`, `Response`, `Headers`, `fetch()`, `console`, `setTimeout`, `Deno.env`, `process.env`, and `crypto.randomUUID()`. It does not provide `ReadableStream`, `WritableStream`, `Blob`, `FormData`, `WebSocket`, `AbortController`, or complete `URL` behavior. Handlers needing these APIs should use Deno mode (`RIFT_FUNCTION_MODE=deno`).
+
+### 3. Function dispatcher "cold starts" count every invocation
 
 The global function dispatcher increments its `totalColdStarts` counter every time it creates a new `Worker`. That is consistent with "fresh isolate per request", but it does not distinguish between platform cold starts and normal invocation startup.
 
-### 3. Deployment workspaces are still mutable
+### 4. Deployment workspaces are still mutable
 
 Deployments execute from the cloned workspace directory (`/var/rift/deployments/<id>/`), which contains source code, `node_modules`, build caches, and generated artifacts. This is not immutable.
 
@@ -535,7 +597,8 @@ Previously, Workers used `permissions: "inherit"`, which gave function isolates 
 
 Rift now implements four distinct execution patterns:
 
-- Function-only projects: closest to serverless, using a persistent global dispatcher and a fresh Deno `Worker` per request with restricted permissions.
+- Function-only projects (isolate mode): true per-request serverless using in-process V8 isolates via `deno_core`. Fresh V8 heap per invocation, no HTTP hop, <10ms cold start.
+- Function-only projects (Deno mode): fallback using a persistent global dispatcher and a fresh Deno `Worker` per request with restricted permissions.
 - Hybrid framework + functions projects: a single Deno entry dispatches function requests to per-request Workers and falls through to the framework handler for everything else.
 - Static and SSR projects in process mode: one active runtime per project, suspended after inactivity, re-spawned on the next request.
 - Static and SSR projects in pool mode: one specialized warm worker per active project, suspended after inactivity, re-specialized on the next request. Pool capacity is enforced.
@@ -544,6 +607,6 @@ The platform is:
 
 - serverful at the control-plane level
 - scale-to-zero for user app runtimes
-- per-request isolated for function routes (both standalone and hybrid)
+- per-request isolated for function routes via in-process V8 isolates (default) or Deno Workers (fallback)
 - unified runtime control: build, proxy, scaler, and restore all use `RuntimeBackend`
 - moving toward immutable artifacts (manifest written, execution not yet decoupled)

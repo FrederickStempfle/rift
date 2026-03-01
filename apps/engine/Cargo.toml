@@ -3,7 +3,12 @@ name = "rift-engine"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["v8-isolate"]
+v8-isolate = ["deno_core"]
+
 [dependencies]
+deno_core = { version = "0.311", optional = true }
 aes-gcm = "0.10"
 anyhow = "1"
 async-trait = "0.1"

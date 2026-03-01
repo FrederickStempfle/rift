@@ -36,6 +36,8 @@ pub struct BuildManager {
     deploy_root: PathBuf,
     concurrency: Arc<Semaphore>,
     log_broadcaster: LogBroadcaster,
+    #[cfg(feature = "v8-isolate")]
+    isolate_pool: Option<crate::runtime::isolate::IsolatePool>,
 }
 
 impl std::fmt::Debug for BuildManager {
@@ -55,6 +57,7 @@ impl BuildManager {
         build_root: PathBuf,
         deploy_root: PathBuf,
         log_broadcaster: LogBroadcaster,
+        #[cfg(feature = "v8-isolate")] isolate_pool: Option<crate::runtime::isolate::IsolatePool>,
     ) -> Self {
         Self {
             pool,
@@ -64,6 +67,8 @@ impl BuildManager {
             deploy_root,
             concurrency: Arc::new(Semaphore::new(1)),
             log_broadcaster,
+            #[cfg(feature = "v8-isolate")]
+            isolate_pool,
         }
     }
 
@@ -753,6 +758,14 @@ impl BuildManager {
             tracing::warn!(error = %e, "failed to write artifact manifest");
         }
 
+        // Capture function info for V8 isolate pool registration (before runtime_kind is moved)
+        #[cfg(feature = "v8-isolate")]
+        let isolate_fn_info = if let RuntimeKind::Functions { ref dir } = runtime_kind {
+            Some((dir.clone(), user_env_vars.clone()))
+        } else {
+            None
+        };
+
         let (url, port) = match self
             .runtime_backend
             .deploy(RuntimeLaunchSpec {
@@ -779,6 +792,41 @@ impl BuildManager {
                 return Err(error);
             }
         };
+
+        // Register with V8 isolate pool for direct invocation (no HTTP hop)
+        #[cfg(feature = "v8-isolate")]
+        if let (Some(ref isolate_pool), Some((ref fn_dir, ref env_vars))) =
+            (&self.isolate_pool, &isolate_fn_info)
+        {
+            let manifest_path = fn_dir.join("_routes.json");
+            let routes: Vec<crate::build::functions::FunctionRoute> = if manifest_path.exists() {
+                match tokio::fs::read_to_string(&manifest_path).await {
+                    Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+
+            if let Err(e) = isolate_pool
+                .register(
+                    project.id,
+                    deployment_id,
+                    &routes,
+                    env_vars,
+                    &fn_dir.to_string_lossy(),
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "failed to register with V8 isolate pool — falling back to Deno dispatcher");
+            } else {
+                tracing::info!(
+                    project_id = %project.id,
+                    routes = routes.len(),
+                    "registered with V8 isolate pool"
+                );
+            }
+        }
 
         deployments::mark_ready(
             &self.pool,
