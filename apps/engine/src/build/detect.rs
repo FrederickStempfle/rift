@@ -32,13 +32,15 @@ pub struct BuildPlan {
 }
 
 /// Known web frameworks that produce deployable output.
+/// Order matters: more specific frameworks (that also depend on vite) must come
+/// before "vite" so they match first via `find`.
 const WEB_FRAMEWORKS: &[&str] = &[
     "next",
-    "vite",
     "nuxt",
     "@remix-run/dev",
     "astro",
     "@sveltejs/kit",
+    "vite",
 ];
 
 /// A workspace package that looks like a deployable web app.
