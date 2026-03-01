@@ -276,8 +276,19 @@ impl BuildManager {
             false
         };
 
-        // Decide whether to run install
+        // Decide whether to run install — only skip if the restored cache
+        // actually contains binaries (node_modules/.bin must exist and be non-empty).
+        let cache_has_binaries = if cache_restored {
+            let bin_dir = workspace_dir.join("node_modules").join(".bin");
+            match tokio::fs::read_dir(&bin_dir).await {
+                Ok(mut rd) => rd.next_entry().await.ok().flatten().is_some(),
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
         let skip_install = cache_restored
+            && cache_has_binaries
             && self.config.install_skip_on_cache_hit
             && cache_key.is_some();
 
