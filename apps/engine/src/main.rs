@@ -27,6 +27,11 @@ use rift_engine::{
 async fn main() -> anyhow::Result<()> {
     init_tracing();
 
+    // Install the rustls crypto provider before any TLS operations
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     let config = Arc::new(Config::from_env());
     let pool = db::connect_and_migrate(&config.database_url)
         .await
