@@ -153,9 +153,11 @@ impl RuntimeManager {
     }
 
     /// Get the seccomp profile path for process spawning.
+    /// Returns None when enforcement is disabled (RIFT_SECCOMP_ENFORCE=false).
     fn seccomp_profile_path(&self) -> Option<&std::path::Path> {
         self.seccomp
             .as_ref()
+            .filter(|s| s.enforce)
             .and_then(|s| s.profile_path.as_deref())
     }
 
