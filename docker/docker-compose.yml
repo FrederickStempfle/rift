@@ -30,7 +30,6 @@ services:
       - "443:8443"
     security_opt:
       - no-new-privileges:true
-      - seccomp=/var/rift/deployments/rift-worker-seccomp.json
     cap_drop:
       - ALL
     cap_add:
