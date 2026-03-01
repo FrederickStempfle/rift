@@ -615,7 +615,7 @@ mod deploy_speed {
     fn optimized_install_yarn_default() {
         use rift_engine::build::{optimized_install_command, detect::PackageManager};
         let cmd = optimized_install_command(&PackageManager::Yarn, "yarn install");
-        assert_eq!(cmd, "yarn install --frozen-lockfile --prefer-offline");
+        assert_eq!(cmd, "yarn install --frozen-lockfile");
     }
 
     // --- Health check config ---

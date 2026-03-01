@@ -1690,7 +1690,7 @@ pub fn optimized_install_command(pm: &PackageManager, original: &str) -> String 
         }
         PackageManager::Yarn => {
             if original == "yarn install" {
-                "yarn install --frozen-lockfile --prefer-offline".to_owned()
+                "yarn install --frozen-lockfile".to_owned()
             } else {
                 original.to_owned()
             }
