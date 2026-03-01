@@ -16,5 +16,6 @@ out/
 # Rust
 target/
 
-# Templates
-templates/
+# Templates — runtime .ts files tracked here, template-app is a separate repo
+templates/template-app/
+templates/node_modules
