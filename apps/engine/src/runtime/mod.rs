@@ -63,6 +63,14 @@ pub enum RuntimeKind {
     NodeServer { dir: PathBuf, entry: PathBuf },
     /// Serverless functions: Deno dispatcher with per-function Web Worker isolates.
     Functions { dir: PathBuf },
+    /// Hybrid framework + functions: combined Deno entry dispatches function
+    /// requests to per-request Workers and falls through to the framework handler.
+    Combined {
+        /// Path to the generated `_rift_combined_entry.ts`.
+        entry: PathBuf,
+        /// Functions output directory (contains bundles, worker wrappers, routes).
+        functions_dir: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -152,6 +160,9 @@ impl RuntimeManager {
                 spawn_node_server(dir, entry, port, &spec.env_vars)?
             }
             RuntimeKind::Functions { dir } => spawn_deno_functions(dir, port, &spec.env_vars)?,
+            RuntimeKind::Combined { entry, functions_dir } => {
+                process::spawn_deno_combined(entry, functions_dir, port, &spec.env_vars)?
+            }
         };
 
         if !wait_for_port("127.0.0.1", port, 40).await {
@@ -364,7 +375,13 @@ impl RuntimeManager {
             }
 
             // Detect runtime kind from filesystem
-            let kind = if workspace_dir.join(".next/standalone").exists() {
+            let kind = if workspace_dir.join("_rift_functions_output/_rift_combined_entry.ts").exists() {
+                let fn_dir = workspace_dir.join("_rift_functions_output");
+                RuntimeKind::Combined {
+                    entry: fn_dir.join("_rift_combined_entry.ts"),
+                    functions_dir: fn_dir,
+                }
+            } else if workspace_dir.join(".next/standalone").exists() {
                 RuntimeKind::NextDeno {
                     dir: workspace_dir.clone(),
                 }

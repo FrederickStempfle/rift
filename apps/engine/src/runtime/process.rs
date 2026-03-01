@@ -180,6 +180,43 @@ pub fn spawn_deno_functions(
     })
 }
 
+/// Spawn a Deno process for a combined framework + functions entry.
+///
+/// The combined entry is a Deno.serve() script that dispatches function requests
+/// to per-request Workers and falls through to the framework handler.
+pub fn spawn_deno_combined(
+    entry: &std::path::Path,
+    functions_dir: &std::path::Path,
+    port: u16,
+    envs: &[(String, String)],
+) -> Result<Child, AppError> {
+    let mut cmd = Command::new("deno");
+    cmd.arg("run")
+        .arg("--allow-net")
+        .arg("--allow-read")
+        .arg("--allow-env")
+        .arg("--allow-sys")
+        .arg("--allow-write")
+        .arg("--unstable-detect-cjs")
+        .arg("--no-prompt")
+        .arg(entry)
+        .current_dir(functions_dir)
+        .env("PORT", port.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+
+    cmd.spawn().map_err(|e| {
+        AppError::Internal(format!(
+            "failed to spawn combined entry {}: {e}",
+            entry.display()
+        ))
+    })
+}
+
 /// Spawn the global function dispatcher — a single always-running Deno process
 /// that handles ALL projects' function invocations via dynamic route registration.
 pub fn spawn_global_dispatcher(

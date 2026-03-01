@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Start the global function dispatcher
     let template_dir = std::path::Path::new("/opt/rift/templates");
-    match rift_engine::runtime::function_registry::FunctionRegistry::start(
+    let function_registry = match rift_engine::runtime::function_registry::FunctionRegistry::start(
         template_dir,
         config.global_dispatcher_port,
     )
@@ -54,16 +54,23 @@ async fn main() -> anyhow::Result<()> {
     {
         Ok(registry) => {
             registry.spawn_health_monitor();
-            runtime_manager.set_function_registry(registry);
             tracing::info!("global function dispatcher ready");
+            Some(registry)
         }
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 "failed to start global function dispatcher — functions will use per-project processes"
             );
+            None
         }
+    };
+
+    // Wire registry into RuntimeManager for ProcessBackend
+    if let Some(ref registry) = function_registry {
+        runtime_manager.set_function_registry(registry.clone());
     }
+
     let runtime_backend: Arc<dyn rift_engine::runtime::backend::RuntimeBackend> =
         match config.runtime_mode.as_str() {
             "pool" => {
@@ -78,10 +85,9 @@ async fn main() -> anyhow::Result<()> {
                 let worker_pool = WorkerPool::new(pool_config)
                     .await
                     .context("failed to initialize worker pool")?;
-                // Spawn health monitor for crash recovery
                 worker_pool.spawn_health_monitor();
                 tracing::info!("runtime mode: pool (pre-warmed workers)");
-                Arc::new(PoolBackend::new(worker_pool))
+                Arc::new(PoolBackend::new(worker_pool, function_registry))
             }
             _ => {
                 tracing::info!("runtime mode: process (legacy subprocesses)");
@@ -93,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
     let build_manager = BuildManager::new(
         pool.clone(),
         Arc::clone(&config),
-        runtime_manager.clone(),
+        runtime_backend.clone(),
         config.build_root.clone().into(),
         config.deploy_root.clone().into(),
         log_broadcaster.clone(),
@@ -127,7 +133,6 @@ async fn main() -> anyhow::Result<()> {
         auth_rate_limiters: AuthRateLimiters::new(),
         audit_logger: AuditLogger::new(pool),
         runtime_backend: runtime_backend.clone(),
-        runtime_manager,
         build_manager,
         public_ip,
         firewall_cache: FirewallCache::new(),

@@ -177,6 +177,7 @@ impl WorkerPool {
         match kind {
             RuntimeKind::StaticDeno { dir } => dir.join("_entry.ts"),
             RuntimeKind::Functions { dir } => dir.join("_entry.ts"),
+            RuntimeKind::Combined { entry, .. } => entry.clone(),
             RuntimeKind::NextDeno { .. } => {
                 // For pool mode, we use a wrapper entry that starts Next.js internally
                 deploy_dir.join("_rift_pool_entry.ts")
@@ -190,6 +191,22 @@ impl WorkerPool {
 
     /// Deploy a new runtime: specialize a warm worker with the deployment's code.
     pub async fn deploy(self: &Arc<Self>, spec: RuntimeLaunchSpec) -> Result<(String, u16), AppError> {
+        // Enforce max_active_workers capacity limit.
+        // An existing deployment for the same project is being replaced (not additive),
+        // so only reject if the project is genuinely new and we're at capacity.
+        {
+            let active = self.active.lock().await;
+            if !active.contains_key(&spec.project_id)
+                && active.len() >= self.config.max_active_workers
+            {
+                return Err(AppError::Internal(format!(
+                    "pool at capacity ({}/{} active workers)",
+                    active.len(),
+                    self.config.max_active_workers
+                )));
+            }
+        }
+
         let bundle_path = self.resolve_bundle_path(spec.deployment_id, &spec.kind);
 
         // For static sites, the bundle is the existing _entry.ts
@@ -212,6 +229,7 @@ impl WorkerPool {
                 }
                 RuntimeKind::NodeServer { entry, .. } => entry.clone(),
                 RuntimeKind::Functions { dir } => dir.join("_entry.ts"),
+                RuntimeKind::Combined { entry, .. } => entry.clone(),
             }
         };
 
@@ -572,6 +590,15 @@ pub struct PoolStats {
 
 /// Detect runtime kind from the filesystem (same logic as RuntimeManager).
 fn detect_runtime_kind(workspace_dir: &std::path::Path) -> Option<RuntimeKind> {
+    // Combined entry takes priority — it means functions + framework are wired together
+    if workspace_dir.join("_rift_functions_output/_rift_combined_entry.ts").exists() {
+        let fn_dir = workspace_dir.join("_rift_functions_output");
+        return Some(RuntimeKind::Combined {
+            entry: fn_dir.join("_rift_combined_entry.ts"),
+            functions_dir: fn_dir,
+        });
+    }
+
     if workspace_dir.join(".next/standalone").exists() {
         Some(RuntimeKind::NextDeno {
             dir: workspace_dir.to_path_buf(),

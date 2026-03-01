@@ -78,6 +78,10 @@ pub async fn generate_pool_entry(
             // Functions use the dispatcher _entry.ts directly — no wrapper needed.
             Ok(dir.join("_entry.ts"))
         }
+        RuntimeKind::Combined { entry, .. } => {
+            // Combined entries are already self-contained Deno.serve() scripts.
+            Ok(entry.clone())
+        }
         RuntimeKind::NextDeno { dir } => {
             let standalone_dir = dir.join(".next/standalone");
             let (server_js, server_dir) = if standalone_dir.join("server.js").exists() {

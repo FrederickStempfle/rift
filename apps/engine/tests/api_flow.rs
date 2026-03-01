@@ -77,13 +77,18 @@ impl TestServer {
             pool_max_active: 50,
             worker_memory_limit_mb: 512,
             worker_loader: "/opt/rift/templates/worker_loader.ts".into(),
+            global_dispatcher_port: 9999,
         });
         let runtime_manager = RuntimeManager::new();
         let log_broadcaster = LogBroadcaster::new();
+
+        let runtime_backend: Arc<dyn rift_engine::runtime::backend::RuntimeBackend> =
+            Arc::new(ProcessBackend::new(runtime_manager.clone()));
+
         let build_manager = BuildManager::new(
             pool.clone(),
             Arc::clone(&config),
-            runtime_manager.clone(),
+            runtime_backend.clone(),
             config.build_root.clone().into(),
             config.deploy_root.clone().into(),
             log_broadcaster.clone(),
@@ -98,9 +103,6 @@ impl TestServer {
             challenge_store.clone(),
         );
 
-        let runtime_backend: Arc<dyn rift_engine::runtime::backend::RuntimeBackend> =
-            Arc::new(ProcessBackend::new(runtime_manager.clone()));
-
         let state = AppState {
             pool: pool.clone(),
             config: Arc::clone(&config),
@@ -114,7 +116,6 @@ impl TestServer {
             auth_rate_limiters: AuthRateLimiters::new(),
             audit_logger: AuditLogger::new(pool),
             runtime_backend,
-            runtime_manager,
             build_manager,
             public_ip: config.public_ip.clone(),
             firewall_cache: FirewallCache::new(),

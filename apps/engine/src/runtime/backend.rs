@@ -8,8 +8,9 @@ use uuid::Uuid;
 use crate::{config::Config, error::AppError};
 
 use super::{
+    function_registry::FunctionRegistry,
     pool::{PoolStats, WorkerPool},
-    RuntimeLaunchSpec, RuntimeManager,
+    RuntimeKind, RuntimeLaunchSpec, RuntimeManager,
 };
 
 /// Result of deploying a runtime.
@@ -127,30 +128,92 @@ impl RuntimeBackend for ProcessBackend {
 /// Pool-based backend using pre-warmed Deno workers with specialization.
 pub struct PoolBackend {
     pool: Arc<WorkerPool>,
+    /// Global function dispatcher registry (None if not initialized).
+    function_registry: Option<FunctionRegistry>,
 }
 
 impl PoolBackend {
-    pub fn new(pool: Arc<WorkerPool>) -> Self {
-        Self { pool }
+    pub fn new(pool: Arc<WorkerPool>, function_registry: Option<FunctionRegistry>) -> Self {
+        Self {
+            pool,
+            function_registry,
+        }
     }
 }
 
 #[async_trait]
 impl RuntimeBackend for PoolBackend {
     async fn deploy(&self, spec: RuntimeLaunchSpec) -> Result<DeployResult, AppError> {
+        // Function-only projects: register with the global dispatcher instead
+        // of specializing a pool worker.
+        if let RuntimeKind::Functions { ref dir } = spec.kind {
+            if let Some(registry) = &self.function_registry {
+                let manifest_path = dir.join("_routes.json");
+                let routes: Vec<crate::build::functions::FunctionRoute> =
+                    if manifest_path.exists() {
+                        let content = tokio::fs::read_to_string(&manifest_path)
+                            .await
+                            .map_err(|e| {
+                                AppError::Internal(format!("failed to read _routes.json: {e}"))
+                            })?;
+                        serde_json::from_str(&content).map_err(|e| {
+                            AppError::Internal(format!("failed to parse _routes.json: {e}"))
+                        })?
+                    } else {
+                        Vec::new()
+                    };
+
+                let output_dir = dir.to_string_lossy().to_string();
+                let _ = registry.unregister(spec.project_id).await;
+                registry
+                    .register(
+                        spec.project_id,
+                        spec.deployment_id,
+                        &routes,
+                        &spec.env_vars,
+                        &output_dir,
+                    )
+                    .await?;
+
+                let url = registry.dispatcher_url();
+                return Ok(DeployResult { url, port: 0 });
+            }
+        }
+
         let (url, port) = self.pool.deploy(spec).await?;
         Ok(DeployResult { url, port })
     }
 
     async fn stop(&self, project_id: Uuid) -> Result<(), AppError> {
+        // Unregister from global dispatcher if function-only
+        if let Some(registry) = &self.function_registry {
+            if registry.is_function_project(project_id).await {
+                return registry.unregister(project_id).await;
+            }
+        }
+
         self.pool.stop_project(project_id).await
     }
 
     async fn active_url(&self, project_id: Uuid) -> Option<String> {
+        // Function-only projects are always active via the global dispatcher
+        if let Some(registry) = &self.function_registry {
+            if registry.is_function_project(project_id).await {
+                return Some(registry.dispatcher_url());
+            }
+        }
+
         self.pool.active_url(project_id).await
     }
 
     async fn active_deployment_id(&self, project_id: Uuid) -> Option<Uuid> {
+        // Check function registry first
+        if let Some(registry) = &self.function_registry {
+            if let Some(dep_id) = registry.deployment_id(project_id).await {
+                return Some(dep_id);
+            }
+        }
+
         self.pool.active_deployment_id(project_id).await
     }
 
@@ -172,6 +235,13 @@ impl RuntimeBackend for PoolBackend {
 
     async fn restore(&self, db_pool: &PgPool, config: &Config) -> usize {
         self.pool.restore_deployments(db_pool, config).await
+    }
+
+    async fn is_function_only(&self, project_id: Uuid) -> bool {
+        if let Some(registry) = &self.function_registry {
+            return registry.is_function_project(project_id).await;
+        }
+        false
     }
 
     async fn pool_stats(&self) -> Option<PoolStats> {

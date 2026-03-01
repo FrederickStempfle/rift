@@ -13,7 +13,7 @@ use crate::{
     config::Config,
     db::{deployments, env_vars, models::Project, users},
     error::AppError,
-    runtime::{RuntimeKind, RuntimeLaunchSpec, RuntimeManager},
+    runtime::{backend::RuntimeBackend, RuntimeKind, RuntimeLaunchSpec},
     ws::LogBroadcaster,
 };
 
@@ -27,22 +27,31 @@ use self::{
     },
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct BuildManager {
     pool: sqlx::PgPool,
     config: Arc<Config>,
-    runtime_manager: RuntimeManager,
+    runtime_backend: Arc<dyn RuntimeBackend>,
     build_root: PathBuf,
     deploy_root: PathBuf,
     concurrency: Arc<Semaphore>,
     log_broadcaster: LogBroadcaster,
 }
 
+impl std::fmt::Debug for BuildManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BuildManager")
+            .field("build_root", &self.build_root)
+            .field("deploy_root", &self.deploy_root)
+            .finish()
+    }
+}
+
 impl BuildManager {
     pub fn new(
         pool: sqlx::PgPool,
         config: Arc<Config>,
-        runtime_manager: RuntimeManager,
+        runtime_backend: Arc<dyn RuntimeBackend>,
         build_root: PathBuf,
         deploy_root: PathBuf,
         log_broadcaster: LogBroadcaster,
@@ -50,7 +59,7 @@ impl BuildManager {
         Self {
             pool,
             config,
-            runtime_manager,
+            runtime_backend,
             build_root,
             deploy_root,
             concurrency: Arc::new(Semaphore::new(1)),
@@ -293,7 +302,7 @@ impl BuildManager {
         }
 
         deployments::update_status(&self.pool, deployment_id, "deploying").await?;
-        let runtime_kind = match plan.output {
+        let mut runtime_kind = match plan.output {
             BuildOutput::Nuxt => {
                 // Find the Nuxt output directory (.output/server/index.mjs)
                 let nuxt_app_dir = find_nuxt_output(&workspace_dir).await;
@@ -638,6 +647,7 @@ impl BuildManager {
                     let framework_entry = match &runtime_kind {
                         RuntimeKind::StaticDeno { dir } => Some(dir.join("_entry.ts")),
                         RuntimeKind::Functions { dir } => Some(dir.join("_entry.ts")),
+                        RuntimeKind::Combined { entry, .. } => Some(entry.clone()),
                         RuntimeKind::NextDeno { .. } | RuntimeKind::NodeServer { .. } => {
                             let pool_entry = workspace_dir.join("_rift_pool_entry.ts");
                             if pool_entry.exists() {
@@ -668,6 +678,14 @@ impl BuildManager {
                                         "failed to write combined entry"
                                     );
                                 } else {
+                                    // Swap runtime kind to Combined so the runtime
+                                    // launches the combined entry instead of the
+                                    // framework-only entry.
+                                    runtime_kind = RuntimeKind::Combined {
+                                        entry: combined_path,
+                                        functions_dir: fn_output_dir.clone(),
+                                    };
+
                                     insert_and_broadcast_log(
                                         &self.pool,
                                         &self.log_broadcaster,
@@ -729,8 +747,14 @@ impl BuildManager {
             }
         }
 
+        // Write artifact manifest — records which files are essential for runtime.
+        // This is the first step toward immutable artifact-based execution.
+        if let Err(e) = write_artifact_manifest(&workspace_dir, &runtime_kind).await {
+            tracing::warn!(error = %e, "failed to write artifact manifest");
+        }
+
         let (url, port) = match self
-            .runtime_manager
+            .runtime_backend
             .deploy(RuntimeLaunchSpec {
                 project_id: project.id,
                 deployment_id,
@@ -739,7 +763,7 @@ impl BuildManager {
             })
             .await
         {
-            Ok(result) => result,
+            Ok(result) => (result.url, result.port),
             Err(error) => {
                 insert_and_broadcast_log(
                     &self.pool,
@@ -999,6 +1023,54 @@ async fn find_ssr_entry(
 /// Find the directory containing `.output/server/index.mjs` (Nuxt output).
 async fn find_nuxt_output(workspace_dir: &std::path::Path) -> Option<std::path::PathBuf> {
     find_ssr_entry(workspace_dir, ".output/server/index.mjs").await
+}
+
+/// Write `_rift_manifest.json` recording which files are essential for runtime.
+///
+/// This manifest makes the boundary between "build workspace" and "runtime artifact"
+/// explicit. A future step can use it to copy only the listed files to an immutable
+/// artifact directory.
+async fn write_artifact_manifest(
+    workspace_dir: &std::path::Path,
+    kind: &crate::runtime::RuntimeKind,
+) -> Result<(), AppError> {
+    use crate::runtime::RuntimeKind;
+
+    let (runtime_type, entry_point, functions_dir) = match kind {
+        RuntimeKind::StaticDeno { dir } => {
+            ("static", dir.join("_entry.ts").to_string_lossy().to_string(), None)
+        }
+        RuntimeKind::NextDeno { dir } => {
+            let standalone = dir.join(".next/standalone");
+            ("next", standalone.to_string_lossy().to_string(), None)
+        }
+        RuntimeKind::NodeServer { entry, .. } => {
+            ("node_ssr", entry.to_string_lossy().to_string(), None)
+        }
+        RuntimeKind::Functions { dir } => {
+            ("functions", dir.join("_entry.ts").to_string_lossy().to_string(), Some(dir.to_string_lossy().to_string()))
+        }
+        RuntimeKind::Combined { entry, functions_dir } => {
+            ("combined", entry.to_string_lossy().to_string(), Some(functions_dir.to_string_lossy().to_string()))
+        }
+    };
+
+    let manifest = serde_json::json!({
+        "version": 1,
+        "runtime_type": runtime_type,
+        "entry_point": entry_point,
+        "functions_dir": functions_dir,
+    });
+
+    let manifest_path = workspace_dir.join("_rift_manifest.json");
+    let content = serde_json::to_string_pretty(&manifest).map_err(|e| {
+        AppError::Internal(format!("failed to serialize manifest: {e}"))
+    })?;
+    fs::write(&manifest_path, content).await.map_err(|e| {
+        AppError::Internal(format!("failed to write manifest: {e}"))
+    })?;
+
+    Ok(())
 }
 
 /// Recursively copy a directory tree.

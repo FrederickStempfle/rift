@@ -1,5 +1,20 @@
 use std::path::Path;
 
+// -----------------------------------------------------------------------
+// NOTE: This seccomp profile is DEFINED but NOT APPLIED at runtime.
+//
+// The profile is tested and valid, but the worker spawn path in
+// `pool/mod.rs` does not currently attach it. To enable seccomp:
+//
+// 1. Docker-level: `--security-opt seccomp=<path>` using the profile
+//    written by `write_seccomp_profile()`.
+// 2. Process-level: call `seccomp()` syscall before exec in the
+//    worker spawn path (requires `libseccomp` or raw syscall).
+//
+// Until one of these is implemented, worker isolation relies on
+// Deno's permission flags and cgroup limits only.
+// -----------------------------------------------------------------------
+
 /// Seccomp BPF profile for worker processes.
 ///
 /// This is a JSON seccomp profile compatible with Docker's `--security-opt seccomp=`

@@ -492,7 +492,17 @@ function dispatch(route: Route, data: WorkerRequest): Promise<Response> {{
     let settled = false;
     const worker = new Worker(route.workerPath, {{
       type: "module",
-      deno: {{ permissions: "inherit" }},
+      deno: {{
+        permissions: {{
+          net: true,
+          read: true,
+          env: true,
+          write: false,
+          run: false,
+          ffi: false,
+          sys: false,
+        }},
+      }},
     }} as WorkerOptions);
 
     const timeout = setTimeout(() => {{

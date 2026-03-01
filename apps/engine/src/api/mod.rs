@@ -23,7 +23,7 @@ use crate::{
         acme::AcmeChallengeStore, analytics_collector::AnalyticsCollector,
         firewall_cache::FirewallCache, tls::CertResolver,
     },
-    runtime::{backend::RuntimeBackend, RuntimeManager},
+    runtime::backend::RuntimeBackend,
     services::{
         audit::AuditLogger, auth::TokenService, password::PasswordService,
         rate_limit::AuthRateLimiters,
@@ -54,8 +54,6 @@ pub struct AppState {
     pub audit_logger: AuditLogger,
     /// The runtime backend (process-based or pool-based).
     pub runtime_backend: Arc<dyn RuntimeBackend>,
-    /// Legacy RuntimeManager kept for BuildManager compatibility during transition.
-    pub runtime_manager: RuntimeManager,
     pub build_manager: BuildManager,
     /// Auto-detected or overridden via RIFT_PUBLIC_IP. Resolved once at startup.
     pub public_ip: Option<String>,
