@@ -78,6 +78,32 @@ pub struct Config {
 
     #[arg(long, env = "RIFT_HTTPS_PORT", default_value_t = 8443)]
     pub https_port: u16,
+
+    // --- Worker Pool Configuration ---
+
+    /// Runtime mode: "process" (legacy subprocess) or "pool" (pre-warmed worker pool).
+    #[arg(long, env = "RIFT_RUNTIME_MODE", default_value = "process")]
+    pub runtime_mode: String,
+
+    /// Number of pre-warmed Deno workers to maintain.
+    #[arg(long, env = "RIFT_POOL_WARM_SIZE", default_value_t = 3)]
+    pub pool_warm_size: usize,
+
+    /// Maximum number of specialized (active) workers.
+    #[arg(long, env = "RIFT_POOL_MAX_ACTIVE", default_value_t = 50)]
+    pub pool_max_active: usize,
+
+    /// Maximum memory per worker in MB.
+    #[arg(long, env = "RIFT_WORKER_MEMORY_LIMIT_MB", default_value_t = 512)]
+    pub worker_memory_limit_mb: u64,
+
+    /// Path to the worker loader TypeScript file.
+    #[arg(
+        long,
+        env = "RIFT_WORKER_LOADER",
+        default_value = "/opt/rift/templates/worker_loader.ts"
+    )]
+    pub worker_loader: String,
 }
 
 impl Config {

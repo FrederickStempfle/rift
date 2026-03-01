@@ -23,7 +23,7 @@ use crate::{
         acme::AcmeChallengeStore, analytics_collector::AnalyticsCollector,
         firewall_cache::FirewallCache, tls::CertResolver,
     },
-    runtime::RuntimeManager,
+    runtime::{backend::RuntimeBackend, RuntimeManager},
     services::{
         audit::AuditLogger, auth::TokenService, password::PasswordService,
         rate_limit::AuthRateLimiters,
@@ -40,6 +40,7 @@ pub mod env_vars;
 pub mod firewall;
 pub mod logs;
 pub mod projects;
+pub mod runtime;
 pub mod users;
 pub mod webhooks;
 
@@ -51,6 +52,9 @@ pub struct AppState {
     pub password_service: PasswordService,
     pub auth_rate_limiters: AuthRateLimiters,
     pub audit_logger: AuditLogger,
+    /// The runtime backend (process-based or pool-based).
+    pub runtime_backend: Arc<dyn RuntimeBackend>,
+    /// Legacy RuntimeManager kept for BuildManager compatibility during transition.
     pub runtime_manager: RuntimeManager,
     pub build_manager: BuildManager,
     /// Auto-detected or overridden via RIFT_PUBLIC_IP. Resolved once at startup.
@@ -113,6 +117,7 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/firewall", firewall::routes())
         .nest("/api/webhooks", webhooks::routes())
         .route("/api/analytics", get(analytics::get_analytics))
+        .route("/api/runtime/stats", get(runtime::get_runtime_stats))
         .route("/api/logs", get(logs::list_logs))
         .route("/api/ws/logs", get(crate::ws::handler::ws_logs_handler))
         .layer(DefaultBodyLimit::max(1_048_576))

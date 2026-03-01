@@ -36,9 +36,9 @@ pub async fn handle_request(
 
     let result = route_and_forward(req, remote_addr, &client, &state).await;
 
-    let (status_code, project_id) = match &result {
-        Ok((resp, pid)) => (resp.status().as_u16(), *pid),
-        Err((sc, pid)) => (sc.as_u16(), *pid),
+    let (status_code, project_id, cold_start) = match &result {
+        Ok((resp, pid, cs)) => (resp.status().as_u16(), *pid, *cs),
+        Err((sc, pid)) => (sc.as_u16(), *pid, false),
     };
 
     if let Some(pid) = project_id {
@@ -46,21 +46,23 @@ pub async fn handle_request(
             project_id: pid,
             status: status_code,
             duration_ms: start.elapsed().as_millis() as u64,
+            cold_start,
         });
     }
 
     match result {
-        Ok((resp, _)) => Ok(resp),
+        Ok((resp, _, _)) => Ok(resp),
         Err((sc, _)) => Ok(error_response(sc)),
     }
 }
 
+/// Return type includes (response, project_id, cold_start).
 async fn route_and_forward(
     req: Request<Incoming>,
     remote_addr: SocketAddr,
     client: &HttpClient,
     state: &AppState,
-) -> Result<(Response<Full<Bytes>>, Option<Uuid>), (StatusCode, Option<Uuid>)> {
+) -> Result<(Response<Full<Bytes>>, Option<Uuid>, bool), (StatusCode, Option<Uuid>)> {
     let host = extract_host(req.headers()).ok_or((StatusCode::BAD_REQUEST, None))?;
 
     let project_id = resolve_project_id(state, &host)
@@ -81,15 +83,15 @@ async fn route_and_forward(
     }
 
     // Look up active runtime URL (in-memory, no DB hit)
-    let target_base = match state.runtime_manager.active_url(project_id).await {
+    let (target_base, cold_start) = match state.runtime_backend.active_url(project_id).await {
         Some(url) => {
-            state.runtime_manager.touch(project_id).await;
-            url
+            state.runtime_backend.touch(project_id).await;
+            (url, false)
         }
         None => {
-            // Not running — try waking a suspended deployment
-            match state.runtime_manager.wake(project_id).await {
-                Ok(Some(url)) => url,
+            // Not running — try waking a suspended deployment (cold start)
+            match state.runtime_backend.wake(project_id).await {
+                Ok(Some(url)) => (url, true),
                 Ok(None) => return Err((StatusCode::SERVICE_UNAVAILABLE, pid)),
                 Err(_) => return Err((StatusCode::SERVICE_UNAVAILABLE, pid)),
             }
@@ -174,7 +176,7 @@ async fn route_and_forward(
         .body(Full::new(resp_bytes))
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, pid))?;
 
-    Ok((resp, pid))
+    Ok((resp, pid, cold_start))
 }
 
 async fn resolve_project_id(state: &AppState, host: &str) -> Result<Option<Uuid>, AppError> {

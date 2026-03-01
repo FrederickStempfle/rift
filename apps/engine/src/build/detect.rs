@@ -20,6 +20,8 @@ pub enum BuildOutput {
     SvelteKitSSR,
     RemixSSR,
     Static { dir: String },
+    /// Serverless functions only (rift/functions/ directory, no framework).
+    Functions,
 }
 
 #[derive(Clone, Debug)]
@@ -332,6 +334,21 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
         .find(|&&fw| all_deps.iter().any(|dep| *dep == fw))
         .map(|&fw| if fw == "next" { "nextjs" } else { fw }.to_owned())
         .unwrap_or_else(|| project.framework.clone());
+
+    // Check for serverless functions directory (rift/functions/)
+    // If no framework was detected but functions exist, treat as functions-only project
+    if crate::build::functions::has_functions(workspace_dir)
+        && framework == project.framework
+        && !all_deps.iter().any(|dep| WEB_FRAMEWORKS.iter().any(|fw| dep == fw))
+    {
+        return Ok(BuildPlan {
+            framework: "functions".to_owned(),
+            package_manager,
+            install_command,
+            build_command,
+            output: BuildOutput::Functions,
+        });
+    }
 
     Ok(BuildPlan {
         framework,

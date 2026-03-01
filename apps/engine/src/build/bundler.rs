@@ -52,3 +52,135 @@ pub async fn generate_deno_entry(output_dir: &Path) -> Result<(), AppError> {
             ))
         })
 }
+
+/// Generate a pool-compatible entry wrapper for SSR frameworks.
+///
+/// For static sites, no wrapper is needed — the existing `_entry.ts` already
+/// exports a Deno.serve handler compatible with the worker loader.
+///
+/// For SSR frameworks (Next.js, Nuxt, Astro, SvelteKit, Remix), we generate
+/// a wrapper that starts the framework's server internally and proxies to it.
+pub async fn generate_pool_entry(
+    kind: &crate::runtime::RuntimeKind,
+    deploy_dir: &Path,
+    wrapper_dir: &Path,
+) -> Result<std::path::PathBuf, AppError> {
+    use crate::runtime::RuntimeKind;
+
+    let entry_path = deploy_dir.join("_rift_pool_entry.ts");
+
+    match kind {
+        RuntimeKind::StaticDeno { dir } => {
+            // Static sites use the existing _entry.ts directly — no wrapper needed.
+            Ok(dir.join("_entry.ts"))
+        }
+        RuntimeKind::NextDeno { dir } => {
+            let standalone_dir = dir.join(".next/standalone");
+            let (server_js, server_dir) = if standalone_dir.join("server.js").exists() {
+                ("server.js".to_string(), standalone_dir.to_string_lossy().to_string())
+            } else {
+                // Find server.js in monorepo nested structure
+                find_server_js_in_standalone(&standalone_dir)
+                    .unwrap_or_else(|| ("server.js".to_string(), standalone_dir.to_string_lossy().to_string()))
+            };
+
+            // Read the wrapper template and inject paths
+            let wrapper_src = wrapper_dir.join("wrappers/next_wrapper.ts");
+            let mut content = fs::read_to_string(&wrapper_src).await.map_err(|e| {
+                AppError::Internal(format!(
+                    "failed to read next_wrapper.ts: {e}"
+                ))
+            })?;
+
+            // Replace the env var defaults with actual values
+            content = content.replace(
+                r#"Deno.env.get("RIFT_NEXT_SERVER_JS") ?? "./server.js""#,
+                &format!(r#""{server_js}""#),
+            );
+            content = content.replace(
+                r#"Deno.env.get("RIFT_NEXT_SERVER_DIR") ?? ".""#,
+                &format!(r#""{server_dir}""#),
+            );
+
+            fs::write(&entry_path, content).await.map_err(|e| {
+                AppError::Internal(format!(
+                    "failed to write pool entry: {e}"
+                ))
+            })?;
+
+            Ok(entry_path)
+        }
+        RuntimeKind::NodeServer { dir, entry } => {
+            let is_remix = dir.join("node_modules/.bin/remix-serve").exists()
+                && entry.to_string_lossy().contains("build/server");
+
+            let wrapper_src = wrapper_dir.join("wrappers/node_wrapper.ts");
+            let mut content = fs::read_to_string(&wrapper_src).await.map_err(|e| {
+                AppError::Internal(format!(
+                    "failed to read node_wrapper.ts: {e}"
+                ))
+            })?;
+
+            let entry_str = entry.to_string_lossy().to_string();
+            let dir_str = dir.to_string_lossy().to_string();
+
+            content = content.replace(
+                r#"Deno.env.get("RIFT_NODE_ENTRY") ?? "./index.js""#,
+                &format!(r#""{entry_str}""#),
+            );
+            content = content.replace(
+                r#"Deno.env.get("RIFT_NODE_SERVER_DIR") ?? ".""#,
+                &format!(r#""{dir_str}""#),
+            );
+            content = content.replace(
+                r#"Deno.env.get("RIFT_IS_REMIX") === "true""#,
+                if is_remix { "true" } else { "false" },
+            );
+
+            fs::write(&entry_path, content).await.map_err(|e| {
+                AppError::Internal(format!(
+                    "failed to write pool entry: {e}"
+                ))
+            })?;
+
+            Ok(entry_path)
+        }
+    }
+}
+
+/// Find server.js path and directory within a standalone dir.
+fn find_server_js_in_standalone(
+    standalone_dir: &Path,
+) -> Option<(String, String)> {
+    let Ok(entries) = std::fs::read_dir(standalone_dir) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let d1 = entry.path();
+        if d1.join("server.js").exists() {
+            return Some((
+                "server.js".to_string(),
+                d1.to_string_lossy().to_string(),
+            ));
+        }
+        let Ok(sub) = std::fs::read_dir(&d1) else {
+            continue;
+        };
+        for sub_entry in sub.flatten() {
+            if !sub_entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let d2 = sub_entry.path();
+            if d2.join("server.js").exists() {
+                return Some((
+                    "server.js".to_string(),
+                    d2.to_string_lossy().to_string(),
+                ));
+            }
+        }
+    }
+    None
+}

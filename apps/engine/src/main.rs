@@ -10,7 +10,11 @@ use rift_engine::{
         self, acme::AcmeChallengeStore, analytics_collector::AnalyticsCollector,
         firewall_cache::FirewallCache, tls::CertResolver,
     },
-    runtime::RuntimeManager,
+    runtime::{
+        backend::{PoolBackend, ProcessBackend},
+        pool::{PoolConfig, WorkerPool},
+        RuntimeManager,
+    },
     services::{
         audit::AuditLogger, auth::TokenService, password::PasswordService,
         rate_limit::AuthRateLimiters,
@@ -39,6 +43,30 @@ async fn main() -> anyhow::Result<()> {
     let password_service =
         PasswordService::new().context("failed to initialize password service")?;
     let runtime_manager = RuntimeManager::new();
+    let runtime_backend: Arc<dyn rift_engine::runtime::backend::RuntimeBackend> =
+        match config.runtime_mode.as_str() {
+            "pool" => {
+                let pool_config = PoolConfig {
+                    warm_pool_size: config.pool_warm_size,
+                    max_active_workers: config.pool_max_active,
+                    idle_timeout: std::time::Duration::from_secs(300),
+                    worker_memory_limit: config.worker_memory_limit_mb * 1024 * 1024,
+                    loader_script: config.worker_loader.clone().into(),
+                    deploy_root: config.deploy_root.clone().into(),
+                };
+                let worker_pool = WorkerPool::new(pool_config)
+                    .await
+                    .context("failed to initialize worker pool")?;
+                // Spawn health monitor for crash recovery
+                worker_pool.spawn_health_monitor();
+                tracing::info!("runtime mode: pool (pre-warmed workers)");
+                Arc::new(PoolBackend::new(worker_pool))
+            }
+            _ => {
+                tracing::info!("runtime mode: process (legacy subprocesses)");
+                Arc::new(ProcessBackend::new(runtime_manager.clone()))
+            }
+        };
     let analytics_collector = AnalyticsCollector::new(pool.clone());
     let log_broadcaster = LogBroadcaster::new();
     let build_manager = BuildManager::new(
@@ -77,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
         password_service,
         auth_rate_limiters: AuthRateLimiters::new(),
         audit_logger: AuditLogger::new(pool),
+        runtime_backend: runtime_backend.clone(),
         runtime_manager,
         build_manager,
         public_ip,
@@ -90,8 +119,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Restore deployments that were running before the engine restarted
     let restored = state
-        .runtime_manager
-        .restore_deployments(&state.pool, &config)
+        .runtime_backend
+        .restore(&state.pool, &config)
         .await;
     if restored > 0 {
         tracing::info!(count = restored, "restored deployments from previous run");
@@ -101,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
     ssl_manager.spawn_renewal_task();
 
     // Spawn scale-to-zero background task
-    rift_engine::runtime::scaler::spawn_scaler(state.runtime_manager.clone());
+    rift_engine::runtime::scaler::spawn_scaler(state.runtime_backend.clone());
 
     let api_state = state.clone();
     let proxy_state = state;

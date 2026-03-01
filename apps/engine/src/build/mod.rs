@@ -1,5 +1,6 @@
 pub mod bundler;
 pub mod detect;
+pub mod functions;
 pub mod pipeline;
 
 use std::{path::PathBuf, sync::Arc, time::Instant};
@@ -17,8 +18,9 @@ use crate::{
 };
 
 use self::{
-    bundler::generate_deno_entry,
+    bundler::{generate_deno_entry, generate_pool_entry},
     detect::{detect_build_plan, detect_output_dir, BuildOutput, PackageManager},
+    functions::build_function_bundle,
     pipeline::{
         elapsed_ms, insert_and_broadcast_log, read_git_metadata, run_command_and_log,
         run_command_and_log_with_env,
@@ -551,7 +553,137 @@ impl BuildManager {
 
                 RuntimeKind::StaticDeno { dir: output_dir }
             }
+            BuildOutput::Functions => {
+                // Functions-only project: bundle the function router as the entry point
+                let output_dir = workspace_dir.join("_rift_functions_output");
+                let function_routes =
+                    build_function_bundle(&workspace_dir, &output_dir).await?;
+
+                if function_routes.is_empty() {
+                    insert_and_broadcast_log(
+                        &self.pool,
+                        &self.log_broadcaster,
+                        deployment_id,
+                        "error",
+                        "No function files found in rift/functions/",
+                        "build",
+                    )
+                    .await?;
+                    deployments::mark_failed(
+                        &self.pool,
+                        deployment_id,
+                        Some(elapsed_ms(started_at)),
+                    )
+                    .await?;
+                    return Err(AppError::Internal(
+                        "no function files found".into(),
+                    ));
+                }
+
+                insert_and_broadcast_log(
+                    &self.pool,
+                    &self.log_broadcaster,
+                    deployment_id,
+                    "info",
+                    &format!(
+                        "Bundled {} serverless function route(s): {}",
+                        function_routes.len(),
+                        function_routes
+                            .iter()
+                            .map(|r| r.pattern.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    "build",
+                )
+                .await?;
+
+                RuntimeKind::StaticDeno { dir: output_dir }
+            }
         };
+
+        // Bundle serverless functions alongside the framework if rift/functions/ exists.
+        // Generates a combined entry that routes function requests first, then falls
+        // through to the framework handler for all other paths.
+        if functions::has_functions(&workspace_dir) && !matches!(plan.output, BuildOutput::Functions) {
+            let fn_output_dir = workspace_dir.join("_rift_functions_output");
+            match build_function_bundle(&workspace_dir, &fn_output_dir).await {
+                Ok(routes) if !routes.is_empty() => {
+                    // Determine the framework's entry point for the combined router
+                    let framework_entry = match &runtime_kind {
+                        RuntimeKind::StaticDeno { dir } => Some(dir.join("_entry.ts")),
+                        RuntimeKind::NextDeno { .. } | RuntimeKind::NodeServer { .. } => {
+                            let pool_entry = workspace_dir.join("_rift_pool_entry.ts");
+                            if pool_entry.exists() {
+                                Some(pool_entry)
+                            } else {
+                                None
+                            }
+                        }
+                    };
+
+                    if let Some(fw_entry) = framework_entry {
+                        let combined_code = functions::generate_combined_entry(
+                            &routes,
+                            &workspace_dir,
+                            &fw_entry,
+                        );
+                        let combined_path = fn_output_dir.join("_rift_combined_entry.ts");
+                        if let Err(e) = fs::write(&combined_path, combined_code).await {
+                            tracing::warn!(error = %e, "failed to write combined entry");
+                        } else {
+                            insert_and_broadcast_log(
+                                &self.pool,
+                                &self.log_broadcaster,
+                                deployment_id,
+                                "info",
+                                &format!(
+                                    "Bundled {} function route(s) with {} (combined entry)",
+                                    routes.len(),
+                                    plan.framework
+                                ),
+                                "build",
+                            )
+                            .await?;
+                        }
+                    } else {
+                        insert_and_broadcast_log(
+                            &self.pool,
+                            &self.log_broadcaster,
+                            deployment_id,
+                            "info",
+                            &format!(
+                                "Bundled {} serverless function route(s) alongside {}",
+                                routes.len(),
+                                plan.framework
+                            ),
+                            "build",
+                        )
+                        .await?;
+                    }
+                }
+                Ok(_) => {} // empty, skip
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to bundle serverless functions");
+                }
+            }
+        }
+
+        // Generate pool-compatible entry wrapper if in pool mode
+        if self.config.runtime_mode == "pool" {
+            let wrapper_dir = std::path::PathBuf::from(&self.config.worker_loader)
+                .parent()
+                .unwrap_or(std::path::Path::new("/opt/rift/templates"))
+                .to_path_buf();
+            if let Err(e) =
+                generate_pool_entry(&runtime_kind, &workspace_dir, &wrapper_dir).await
+            {
+                tracing::warn!(
+                    error = %e,
+                    "failed to generate pool entry, will use direct entry"
+                );
+            }
+        }
 
         let (url, port) = match self
             .runtime_manager

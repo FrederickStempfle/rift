@@ -31,8 +31,11 @@ WORKDIR /app
 COPY --from=builder /app/target/release/rift-engine /usr/local/bin/rift-engine
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
+# Copy templates for worker pool mode (worker loader, wrappers, function router)
+COPY templates/ /opt/rift/templates/
+
 RUN chmod +x /usr/local/bin/entrypoint.sh \
-    && mkdir -p /var/rift/deployments /var/rift/builds /var/rift/ssl
+    && mkdir -p /var/rift/deployments /var/rift/builds /var/rift/ssl /opt/rift/templates
 
 ENV RUST_LOG=rift_engine=info,tower_http=info
 EXPOSE 3001 8080

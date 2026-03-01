@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 aes-gcm = "0.10"
 anyhow = "1"
+async-trait = "0.1"
 bytes = "1"
 argon2 = "0.5"
 axum = { version = "0.8", features = ["macros", "json", "ws"] }
@@ -49,3 +50,4 @@ zeroize = "1"
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json", "cookies", "rustls-tls"] }
 serial_test = "3"
+tempfile = "3"

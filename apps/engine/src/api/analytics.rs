@@ -29,6 +29,7 @@ pub struct BucketResponse {
     pub requests: i64,
     pub errors: i64,
     pub avg_ms: f64,
+    pub cold_starts: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -36,6 +37,7 @@ pub struct AnalyticsResponse {
     pub buckets: Vec<BucketResponse>,
     pub total_requests: i64,
     pub total_errors: i64,
+    pub total_cold_starts: i64,
     pub avg_response_ms: f64,
     pub error_rate: f64,
 }
@@ -60,6 +62,7 @@ pub async fn get_analytics(
     let total_requests: i64 = buckets.iter().map(|b| b.requests).sum();
     let total_errors: i64 = buckets.iter().map(|b| b.errors).sum();
     let total_ms: i64 = buckets.iter().map(|b| b.total_ms).sum();
+    let total_cold_starts: i64 = buckets.iter().map(|b| b.cold_starts).sum();
 
     let avg_response_ms = if total_requests > 0 {
         total_ms as f64 / total_requests as f64
@@ -85,6 +88,7 @@ pub async fn get_analytics(
                 requests: b.requests,
                 errors: b.errors,
                 avg_ms: avg,
+                cold_starts: b.cold_starts,
             }
         })
         .collect();
@@ -93,6 +97,7 @@ pub async fn get_analytics(
         buckets: response_buckets,
         total_requests,
         total_errors,
+        total_cold_starts,
         avg_response_ms,
         error_rate,
     }))

@@ -10,7 +10,7 @@ use rift_engine::{
         acme::AcmeChallengeStore, analytics_collector::AnalyticsCollector,
         firewall_cache::FirewallCache, tls::CertResolver,
     },
-    runtime::RuntimeManager,
+    runtime::{backend::ProcessBackend, RuntimeManager},
     services::{
         audit::AuditLogger, auth::TokenService, password::PasswordService,
         rate_limit::AuthRateLimiters,
@@ -72,6 +72,11 @@ impl TestServer {
             acme_email: None,
             acme_staging: false,
             https_port: 0,
+            runtime_mode: "process".into(),
+            pool_warm_size: 3,
+            pool_max_active: 50,
+            worker_memory_limit_mb: 512,
+            worker_loader: "/opt/rift/templates/worker_loader.ts".into(),
         });
         let runtime_manager = RuntimeManager::new();
         let log_broadcaster = LogBroadcaster::new();
@@ -93,6 +98,9 @@ impl TestServer {
             challenge_store.clone(),
         );
 
+        let runtime_backend: Arc<dyn rift_engine::runtime::backend::RuntimeBackend> =
+            Arc::new(ProcessBackend::new(runtime_manager.clone()));
+
         let state = AppState {
             pool: pool.clone(),
             config: Arc::clone(&config),
@@ -105,6 +113,7 @@ impl TestServer {
             password_service: PasswordService::new()?,
             auth_rate_limiters: AuthRateLimiters::new(),
             audit_logger: AuditLogger::new(pool),
+            runtime_backend,
             runtime_manager,
             build_manager,
             public_ip: config.public_ip.clone(),

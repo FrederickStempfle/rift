@@ -45,6 +45,9 @@ services:
     volumes:
       - deployments:/var/rift/deployments
       - ssl:/var/rift/ssl
+      # Mount cgroup v2 filesystem for worker pool resource limits
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    cgroup: host
     ulimits:
       nofile:
         soft: 65536

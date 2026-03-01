@@ -376,9 +376,9 @@ async fn project_response_from_parts(
 }
 
 async fn runtime_status_for_project(state: &AppState, project_id: Uuid) -> &'static str {
-    if state.runtime_manager.active_url(project_id).await.is_some() {
+    if state.runtime_backend.active_url(project_id).await.is_some() {
         "active"
-    } else if state.runtime_manager.is_suspended(project_id).await {
+    } else if state.runtime_backend.is_suspended(project_id).await {
         "suspended"
     } else {
         "inactive"

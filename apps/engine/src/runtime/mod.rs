@@ -1,4 +1,6 @@
+pub mod backend;
 pub mod health;
+pub mod pool;
 pub mod process;
 pub mod scaler;
 
