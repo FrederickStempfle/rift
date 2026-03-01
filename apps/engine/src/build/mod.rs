@@ -1688,13 +1688,7 @@ pub fn optimized_install_command(pm: &PackageManager, original: &str) -> String 
                 original.to_owned()
             }
         }
-        PackageManager::Yarn => {
-            if original == "yarn install" {
-                "yarn install --frozen-lockfile".to_owned()
-            } else {
-                original.to_owned()
-            }
-        }
+        PackageManager::Yarn => original.to_owned(),
         PackageManager::Bun => original.to_owned(),
     }
 }
