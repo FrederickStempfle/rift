@@ -16,6 +16,9 @@ pub enum PackageManager {
 pub enum BuildOutput {
     Next,
     Nuxt,
+    AstroSSR,
+    SvelteKitSSR,
+    RemixSSR,
     Static { dir: String },
 }
 
@@ -51,6 +54,12 @@ struct WorkspaceApp {
     is_next: bool,
     /// Whether the package has Nuxt.
     is_nuxt: bool,
+    /// Whether the package has Astro with @astrojs/node adapter.
+    is_astro_ssr: bool,
+    /// Whether the package has SvelteKit with adapter-node.
+    is_sveltekit_ssr: bool,
+    /// Whether the package has Remix.
+    is_remix: bool,
 }
 
 pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<BuildPlan, AppError> {
@@ -142,6 +151,36 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
                 });
             }
 
+            if app.is_astro_ssr {
+                return Ok(BuildPlan {
+                    framework: "astro".to_owned(),
+                    package_manager,
+                    install_command,
+                    build_command,
+                    output: BuildOutput::AstroSSR,
+                });
+            }
+
+            if app.is_sveltekit_ssr {
+                return Ok(BuildPlan {
+                    framework: "sveltekit".to_owned(),
+                    package_manager,
+                    install_command,
+                    build_command,
+                    output: BuildOutput::SvelteKitSSR,
+                });
+            }
+
+            if app.is_remix {
+                return Ok(BuildPlan {
+                    framework: "remix".to_owned(),
+                    package_manager,
+                    install_command,
+                    build_command,
+                    output: BuildOutput::RemixSSR,
+                });
+            }
+
             return Ok(BuildPlan {
                 framework: app.framework.clone(),
                 package_manager,
@@ -197,6 +236,46 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
             install_command,
             build_command,
             output: BuildOutput::Nuxt,
+        });
+    }
+
+    // Astro with @astrojs/node adapter → SSR
+    let has_astro = all_deps.iter().any(|dep| *dep == "astro");
+    let has_astro_node = all_deps.iter().any(|dep| *dep == "@astrojs/node");
+    if has_astro && has_astro_node {
+        return Ok(BuildPlan {
+            framework: "astro".to_owned(),
+            package_manager,
+            install_command,
+            build_command,
+            output: BuildOutput::AstroSSR,
+        });
+    }
+
+    // SvelteKit with adapter-node → SSR
+    let has_sveltekit = all_deps.iter().any(|dep| *dep == "@sveltejs/kit");
+    let has_adapter_node = all_deps.iter().any(|dep| *dep == "@sveltejs/adapter-node");
+    if has_sveltekit && has_adapter_node {
+        return Ok(BuildPlan {
+            framework: "sveltekit".to_owned(),
+            package_manager,
+            install_command,
+            build_command,
+            output: BuildOutput::SvelteKitSSR,
+        });
+    }
+
+    // Remix → always SSR
+    let has_remix = all_deps
+        .iter()
+        .any(|dep| *dep == "@remix-run/dev" || *dep == "@remix-run/react" || *dep == "@react-router/dev");
+    if has_remix {
+        return Ok(BuildPlan {
+            framework: "remix".to_owned(),
+            package_manager,
+            install_command,
+            build_command,
+            output: BuildOutput::RemixSSR,
         });
     }
 
@@ -375,13 +454,34 @@ fn find_deployable_app(workspace_dir: &Path) -> Option<WorkspaceApp> {
 
                 let has_index_html = entry.path().join("index.html").exists();
 
+                let is_astro_ssr =
+                    fw == "astro" && all_deps.iter().any(|dep| *dep == "@astrojs/node");
+                let is_sveltekit_ssr = fw == "@sveltejs/kit"
+                    && all_deps.iter().any(|dep| *dep == "@sveltejs/adapter-node");
+                let is_remix = fw == "@remix-run/dev"
+                    || all_deps.iter().any(|dep| {
+                        *dep == "@remix-run/react" || *dep == "@react-router/dev"
+                    });
+
                 candidates.push((
                     WorkspaceApp {
                         name: pkg_name,
                         rel_path: format!("{container}/{dir_name_str}"),
-                        framework: if fw == "next" { "nextjs" } else { fw }.to_owned(),
+                        framework: if fw == "next" {
+                            "nextjs"
+                        } else if fw == "@sveltejs/kit" {
+                            "sveltekit"
+                        } else if fw == "@remix-run/dev" {
+                            "remix"
+                        } else {
+                            fw
+                        }
+                        .to_owned(),
                         is_next: fw == "next",
                         is_nuxt: fw == "nuxt",
+                        is_astro_ssr,
+                        is_sveltekit_ssr,
+                        is_remix,
                     },
                     container == "apps",
                     has_index_html,

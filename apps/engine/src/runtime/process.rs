@@ -144,18 +144,32 @@ fn find_server_js_recursive(dir: &std::path::Path) -> Option<std::path::PathBuf>
     None
 }
 
-/// Spawn a Node.js process to run a Nuxt server (.output/server/index.mjs).
+/// Spawn a Node.js process to run an SSR server (Nuxt, Astro, SvelteKit, Remix).
 ///
-/// Nuxt's production server listens on HOST:PORT by default.
-pub fn spawn_nuxt_node(
+/// For Remix, auto-detects `remix-serve` in node_modules and uses it instead of `node`.
+pub fn spawn_node_server(
     dir: &std::path::Path,
+    entry: &std::path::Path,
     port: u16,
     envs: &[(String, String)],
 ) -> Result<Child, AppError> {
-    let server_entry = dir.join(".output/server/index.mjs");
-    let mut cmd = Command::new("node");
-    cmd.arg(&server_entry)
-        .current_dir(dir)
+    // Remix: entry exports handlers, needs remix-serve to wrap them
+    let is_remix = dir.join("node_modules/.bin/remix-serve").exists()
+        && entry
+            .to_string_lossy()
+            .contains("build/server");
+
+    let mut cmd = if is_remix {
+        let mut c = Command::new("npx");
+        c.arg("remix-serve").arg(entry);
+        c
+    } else {
+        let mut c = Command::new("node");
+        c.arg(entry);
+        c
+    };
+
+    cmd.current_dir(dir)
         .env("PORT", port.to_string())
         .env("HOST", "0.0.0.0")
         .env("NODE_ENV", "production")
@@ -170,7 +184,7 @@ pub fn spawn_nuxt_node(
 
     cmd.spawn().map_err(|e| {
         AppError::Internal(format!(
-            "failed to spawn Nuxt server in {}: {e}",
+            "failed to spawn Node server in {}: {e}",
             dir.display()
         ))
     })

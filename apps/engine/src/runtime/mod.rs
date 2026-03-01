@@ -16,7 +16,7 @@ use crate::{
 
 use self::{
     health::wait_for_port,
-    process::{allocate_port, spawn_deno_next, spawn_deno_static, spawn_nuxt_node},
+    process::{allocate_port, spawn_deno_next, spawn_deno_static, spawn_node_server},
 };
 
 #[derive(Clone, Debug)]
@@ -54,8 +54,8 @@ pub enum RuntimeKind {
     StaticDeno { dir: PathBuf },
     /// Next.js app: Deno runs the standalone server.js via Node compat.
     NextDeno { dir: PathBuf },
-    /// Nuxt app: Node.js runs .output/server/index.mjs.
-    NuxtNode { dir: PathBuf },
+    /// Node.js SSR server (Nuxt, Astro, SvelteKit, Remix).
+    NodeServer { dir: PathBuf, entry: PathBuf },
 }
 
 #[derive(Clone, Debug)]
@@ -88,7 +88,9 @@ impl RuntimeManager {
         let child = match &spec.kind {
             RuntimeKind::StaticDeno { dir } => spawn_deno_static(dir, port, &spec.env_vars)?,
             RuntimeKind::NextDeno { dir } => spawn_deno_next(dir, port, &spec.env_vars)?,
-            RuntimeKind::NuxtNode { dir } => spawn_nuxt_node(dir, port, &spec.env_vars)?,
+            RuntimeKind::NodeServer { dir, entry } => {
+                spawn_node_server(dir, entry, port, &spec.env_vars)?
+            }
         };
 
         if !wait_for_port("127.0.0.1", port, 40).await {
@@ -281,9 +283,35 @@ impl RuntimeManager {
 
             // Detect runtime kind from filesystem
             let kind = if workspace_dir.join(".next/standalone").exists() {
-                RuntimeKind::NextDeno { dir: workspace_dir }
+                RuntimeKind::NextDeno {
+                    dir: workspace_dir.clone(),
+                }
             } else if workspace_dir.join(".output/server/index.mjs").exists() {
-                RuntimeKind::NuxtNode { dir: workspace_dir }
+                let entry = workspace_dir.join(".output/server/index.mjs");
+                RuntimeKind::NodeServer {
+                    dir: workspace_dir,
+                    entry,
+                }
+            } else if workspace_dir.join("dist/server/entry.mjs").exists() {
+                let entry = workspace_dir.join("dist/server/entry.mjs");
+                RuntimeKind::NodeServer {
+                    dir: workspace_dir,
+                    entry,
+                }
+            } else if workspace_dir.join("build/index.js").exists()
+                && workspace_dir.join("build/handler.js").exists()
+            {
+                let entry = workspace_dir.join("build/index.js");
+                RuntimeKind::NodeServer {
+                    dir: workspace_dir,
+                    entry,
+                }
+            } else if workspace_dir.join("build/server/index.js").exists() {
+                let entry = workspace_dir.join("build/server/index.js");
+                RuntimeKind::NodeServer {
+                    dir: workspace_dir,
+                    entry,
+                }
             } else if let Some(entry_dir) = find_entry_ts(&workspace_dir) {
                 RuntimeKind::StaticDeno { dir: entry_dir }
             } else {

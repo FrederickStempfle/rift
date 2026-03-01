@@ -314,7 +314,11 @@ impl BuildManager {
                 )
                 .await?;
 
-                RuntimeKind::NuxtNode { dir: nuxt_app_dir }
+                let entry = nuxt_app_dir.join(".output/server/index.mjs");
+                RuntimeKind::NodeServer {
+                    dir: nuxt_app_dir,
+                    entry,
+                }
             }
             BuildOutput::Next => {
                 // Find the directory containing .next/standalone/server.js
@@ -370,6 +374,126 @@ impl BuildManager {
                 }
 
                 RuntimeKind::NextDeno { dir: next_app_dir }
+            }
+            BuildOutput::AstroSSR => {
+                let app_dir =
+                    find_ssr_entry(&workspace_dir, "dist/server/entry.mjs").await;
+                let app_dir = match app_dir {
+                    Some(dir) => dir,
+                    None => {
+                        insert_and_broadcast_log(
+                            &self.pool,
+                            &self.log_broadcaster,
+                            deployment_id,
+                            "error",
+                            "Astro SSR output not found (dist/server/entry.mjs). Ensure @astrojs/node adapter is configured in standalone mode.",
+                            "build",
+                        )
+                        .await?;
+                        deployments::mark_failed(
+                            &self.pool,
+                            deployment_id,
+                            Some(elapsed_ms(started_at)),
+                        )
+                        .await?;
+                        return Err(AppError::Internal(
+                            "Astro SSR output not found".into(),
+                        ));
+                    }
+                };
+
+                let entry = app_dir.join("dist/server/entry.mjs");
+                insert_and_broadcast_log(
+                    &self.pool,
+                    &self.log_broadcaster,
+                    deployment_id,
+                    "info",
+                    "Detected Astro SSR output (dist/server/entry.mjs)",
+                    "build",
+                )
+                .await?;
+
+                RuntimeKind::NodeServer { dir: app_dir, entry }
+            }
+            BuildOutput::SvelteKitSSR => {
+                let app_dir =
+                    find_ssr_entry(&workspace_dir, "build/index.js").await;
+                let app_dir = match app_dir {
+                    Some(dir) => dir,
+                    None => {
+                        insert_and_broadcast_log(
+                            &self.pool,
+                            &self.log_broadcaster,
+                            deployment_id,
+                            "error",
+                            "SvelteKit SSR output not found (build/index.js). Ensure @sveltejs/adapter-node is configured.",
+                            "build",
+                        )
+                        .await?;
+                        deployments::mark_failed(
+                            &self.pool,
+                            deployment_id,
+                            Some(elapsed_ms(started_at)),
+                        )
+                        .await?;
+                        return Err(AppError::Internal(
+                            "SvelteKit SSR output not found".into(),
+                        ));
+                    }
+                };
+
+                let entry = app_dir.join("build/index.js");
+                insert_and_broadcast_log(
+                    &self.pool,
+                    &self.log_broadcaster,
+                    deployment_id,
+                    "info",
+                    "Detected SvelteKit SSR output (build/index.js)",
+                    "build",
+                )
+                .await?;
+
+                RuntimeKind::NodeServer { dir: app_dir, entry }
+            }
+            BuildOutput::RemixSSR => {
+                let app_dir =
+                    find_ssr_entry(&workspace_dir, "build/server/index.js").await;
+                let app_dir = match app_dir {
+                    Some(dir) => dir,
+                    None => {
+                        insert_and_broadcast_log(
+                            &self.pool,
+                            &self.log_broadcaster,
+                            deployment_id,
+                            "error",
+                            "Remix server output not found (build/server/index.js). Build may have failed.",
+                            "build",
+                        )
+                        .await?;
+                        deployments::mark_failed(
+                            &self.pool,
+                            deployment_id,
+                            Some(elapsed_ms(started_at)),
+                        )
+                        .await?;
+                        return Err(AppError::Internal(
+                            "Remix server output not found".into(),
+                        ));
+                    }
+                };
+
+                let entry = app_dir.join("build/server/index.js");
+                insert_and_broadcast_log(
+                    &self.pool,
+                    &self.log_broadcaster,
+                    deployment_id,
+                    "info",
+                    "Detected Remix server output (build/server/index.js)",
+                    "build",
+                )
+                .await?;
+
+                RuntimeKind::NodeServer { dir: app_dir, entry }
             }
             BuildOutput::Static { .. } => {
                 let detected_dir = detect_output_dir(&project, &workspace_dir);
@@ -640,11 +764,16 @@ fn find_server_js_dir(standalone_dir: &std::path::Path) -> Option<std::path::Pat
     None
 }
 
-/// Find the directory containing `.output/server/index.mjs` (Nuxt output).
-/// Checks the workspace root first, then scans workspace packages (apps/*, packages/*).
-async fn find_nuxt_output(workspace_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+/// Find an SSR entry file relative to workspace root or monorepo packages.
+/// Returns the app directory (not the entry file itself).
+///
+/// Checks workspace root first, then scans `apps/*/` and `packages/*/`.
+async fn find_ssr_entry(
+    workspace_dir: &std::path::Path,
+    relative_entry: &str,
+) -> Option<std::path::PathBuf> {
     // Check root
-    if workspace_dir.join(".output/server/index.mjs").exists() {
+    if workspace_dir.join(relative_entry).exists() {
         return Some(workspace_dir.to_path_buf());
     }
 
@@ -665,7 +794,7 @@ async fn find_nuxt_output(workspace_dir: &std::path::Path) -> Option<std::path::
                 .unwrap_or(false)
             {
                 let candidate = entry.path();
-                if candidate.join(".output/server/index.mjs").exists() {
+                if candidate.join(relative_entry).exists() {
                     return Some(candidate);
                 }
             }
@@ -673,6 +802,11 @@ async fn find_nuxt_output(workspace_dir: &std::path::Path) -> Option<std::path::
     }
 
     None
+}
+
+/// Find the directory containing `.output/server/index.mjs` (Nuxt output).
+async fn find_nuxt_output(workspace_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    find_ssr_entry(workspace_dir, ".output/server/index.mjs").await
 }
 
 /// Recursively copy a directory tree.
