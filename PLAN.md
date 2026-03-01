@@ -316,7 +316,6 @@ shadcn/ui         SWR or TanStack Query
 - [x] Project list, new project wizard
 - [x] Deployment list, real-time log viewer (terminal-style)
 - [x] Manual redeploy button
-- [ ] Dark-mode-first, minimal design
 - [ ] **Verify**: full flow through the UI
 
 ### Phase 5: Env Vars + Custom Domains + SSL
