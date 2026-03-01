@@ -1,15 +1,19 @@
 use std::path::Path;
 
 use tokio::fs;
+use uuid::Uuid;
 
-use crate::error::AppError;
+use crate::{error::AppError, ws::LogBroadcaster};
+
+use super::pipeline::{insert_and_broadcast_log, run_command_and_log};
 
 /// Check if a project has serverless functions.
 pub fn has_functions(workspace_dir: &Path) -> bool {
     workspace_dir.join("rift/functions").is_dir()
 }
 
-/// Scan the `rift/functions/` directory and generate a bundled router entry point.
+/// Scan the `rift/functions/` directory, bundle each function with esbuild,
+/// generate per-function worker wrappers, and write the dispatcher entry point.
 ///
 /// File naming conventions:
 ///   `rift/functions/api/hello.ts`      → route `/api/hello`
@@ -18,6 +22,10 @@ pub fn has_functions(workspace_dir: &Path) -> bool {
 pub async fn build_function_bundle(
     workspace_dir: &Path,
     output_dir: &Path,
+    template_dir: &Path,
+    pool: &sqlx::PgPool,
+    broadcaster: &LogBroadcaster,
+    deployment_id: Uuid,
 ) -> Result<Vec<FunctionRoute>, AppError> {
     let functions_dir = workspace_dir.join("rift/functions");
     if !functions_dir.is_dir() {
@@ -38,9 +46,6 @@ pub async fn build_function_bundle(
         a_has_param.cmp(&b_has_param).then(a.pattern.cmp(&b.pattern))
     });
 
-    // Generate the router entry point
-    let router_code = generate_router_code(&routes, workspace_dir);
-
     fs::create_dir_all(output_dir).await.map_err(|e| {
         AppError::Internal(format!(
             "failed to create output dir {}: {e}",
@@ -48,12 +53,36 @@ pub async fn build_function_bundle(
         ))
     })?;
 
-    let entry_path = output_dir.join("_rift_functions_entry.ts");
-    fs::write(&entry_path, router_code).await.map_err(|e| {
+    let bundles_dir = output_dir.join("bundles");
+    fs::create_dir_all(&bundles_dir).await.map_err(|e| {
         AppError::Internal(format!(
-            "failed to write function router: {e}"
+            "failed to create bundles dir {}: {e}",
+            bundles_dir.display()
         ))
     })?;
+
+    // Bundle all functions with esbuild in a single invocation
+    bundle_functions_with_esbuild(
+        &routes,
+        workspace_dir,
+        &bundles_dir,
+        pool,
+        broadcaster,
+        deployment_id,
+    )
+    .await?;
+
+    // Assign bundle_file paths now that esbuild has run
+    for route in &mut routes {
+        let sanitized = sanitize_route_name(&route.pattern);
+        route.bundle_file = format!("bundles/{sanitized}.js");
+    }
+
+    // Generate per-function worker wrappers
+    generate_worker_wrappers(&routes, output_dir, template_dir).await?;
+
+    // Generate the dispatcher entry as _entry.ts
+    generate_dispatcher_entry(&routes, output_dir, template_dir).await?;
 
     Ok(routes)
 }
@@ -65,6 +94,8 @@ pub struct FunctionRoute {
     pub pattern: String,
     /// Relative path to the source file.
     pub file_path: String,
+    /// Path to the pre-bundled .js file (relative to output_dir), set after esbuild.
+    pub bundle_file: String,
 }
 
 /// Recursively scan a directory for function files.
@@ -121,6 +152,7 @@ fn scan_functions_dir(
                 routes.push(FunctionRoute {
                     pattern: route_pattern,
                     file_path: file_rel,
+                    bundle_file: String::new(), // filled after esbuild
                 });
             }
         }
@@ -167,47 +199,241 @@ fn file_path_to_route_pattern(rel_path: &Path) -> String {
     }
 }
 
-/// Generate a combined entry point that routes to functions first, then
-/// falls through to the framework handler for non-matching requests.
-///
-/// This is used when a project has both a framework (Next.js, Nuxt, etc.)
-/// and serverless functions in `rift/functions/`.
-pub fn generate_combined_entry(
+/// Sanitize a route pattern into a valid filename.
+/// e.g. "/api/hello" → "api_hello", "/api/users/:id" → "api_users__id"
+fn sanitize_route_name(pattern: &str) -> String {
+    pattern
+        .trim_start_matches('/')
+        .replace('/', "_")
+        .replace(':', "_")
+        .replace('*', "_star")
+}
+
+/// Bundle all function source files with esbuild in a single invocation.
+async fn bundle_functions_with_esbuild(
     routes: &[FunctionRoute],
     workspace_dir: &Path,
-    framework_entry_path: &Path,
-) -> String {
+    bundles_dir: &Path,
+    pool: &sqlx::PgPool,
+    broadcaster: &LogBroadcaster,
+    deployment_id: Uuid,
+) -> Result<(), AppError> {
     let functions_dir = workspace_dir.join("rift/functions");
-    let mut route_entries = Vec::new();
 
+    // Collect absolute paths to all function source files
+    let source_files: Vec<String> = routes
+        .iter()
+        .map(|r| {
+            functions_dir
+                .parent()
+                .unwrap_or(&functions_dir)
+                .join(&r.file_path)
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
+
+    if source_files.is_empty() {
+        return Ok(());
+    }
+
+    insert_and_broadcast_log(
+        pool,
+        broadcaster,
+        deployment_id,
+        "info",
+        &format!("Bundling {} function(s) with esbuild", source_files.len()),
+        "build",
+    )
+    .await?;
+
+    // Build esbuild command: bundle all files in one invocation
+    // esbuild produces <bundles_dir>/<original_filename>.js for each entry
+    let mut cmd_parts = vec![
+        "npx".to_string(),
+        "esbuild".to_string(),
+        "--bundle".to_string(),
+        "--format=esm".to_string(),
+        "--platform=neutral".to_string(),
+        format!("--outdir={}", bundles_dir.display()),
+    ];
+    cmd_parts.extend(source_files.clone());
+
+    let cmd = cmd_parts.join(" ");
+    run_command_and_log(pool, broadcaster, deployment_id, "build", workspace_dir, &cmd).await?;
+
+    // esbuild names outputs based on the source filename (e.g. hello.js).
+    // We need to rename them to match our sanitized route names.
     for route in routes {
-        let abs_path = functions_dir
+        let source_path = functions_dir
             .parent()
             .unwrap_or(&functions_dir)
             .join(&route.file_path);
-        let abs_str = abs_path.to_string_lossy();
-        let url_pattern = route.pattern.replace(":", ":");
+        let source_stem = source_path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
+
+        let esbuild_output = bundles_dir.join(format!("{source_stem}.js"));
+        let sanitized = sanitize_route_name(&route.pattern);
+        let target = bundles_dir.join(format!("{sanitized}.js"));
+
+        if esbuild_output.exists() && esbuild_output != target {
+            fs::rename(&esbuild_output, &target).await.map_err(|e| {
+                AppError::Internal(format!(
+                    "failed to rename bundle {} → {}: {e}",
+                    esbuild_output.display(),
+                    target.display()
+                ))
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Generate per-function Web Worker wrapper files.
+///
+/// Each wrapper imports the pre-bundled function and handles postMessage IPC
+/// with the dispatcher process.
+async fn generate_worker_wrappers(
+    routes: &[FunctionRoute],
+    output_dir: &Path,
+    template_dir: &Path,
+) -> Result<(), AppError> {
+    let template_path = template_dir.join("function_worker.ts");
+    let template = fs::read_to_string(&template_path).await.map_err(|e| {
+        AppError::Internal(format!(
+            "failed to read function_worker.ts template: {e}"
+        ))
+    })?;
+
+    for route in routes {
+        let sanitized = sanitize_route_name(&route.pattern);
+        let bundle_abs = output_dir
+            .join(&route.bundle_file)
+            .to_string_lossy()
+            .to_string();
+
+        let wrapper_code = template.replace("\"__BUNDLE_IMPORT__\"", &format!("\"file://{bundle_abs}\""));
+        let wrapper_path = output_dir.join(format!("_worker_{sanitized}.ts"));
+
+        fs::write(&wrapper_path, wrapper_code).await.map_err(|e| {
+            AppError::Internal(format!(
+                "failed to write worker wrapper {}: {e}",
+                wrapper_path.display()
+            ))
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Generate the dispatcher entry point that routes requests to per-function Workers.
+///
+/// Reads the function_dispatcher.ts template and injects the route table.
+/// Written as `_entry.ts` so the existing RuntimeKind::Functions spawn works.
+async fn generate_dispatcher_entry(
+    routes: &[FunctionRoute],
+    output_dir: &Path,
+    template_dir: &Path,
+) -> Result<(), AppError> {
+    let template_path = template_dir.join("function_dispatcher.ts");
+    let template = fs::read_to_string(&template_path).await.map_err(|e| {
+        AppError::Internal(format!(
+            "failed to read function_dispatcher.ts template: {e}"
+        ))
+    })?;
+
+    // Build the route table entries
+    let mut route_entries = Vec::new();
+    for route in routes {
+        let sanitized = sanitize_route_name(&route.pattern);
+        let worker_path = output_dir
+            .join(format!("_worker_{sanitized}.ts"))
+            .to_string_lossy()
+            .to_string();
 
         route_entries.push(format!(
-            r#"  {{
-    pattern: new URLPattern({{ pathname: "{url_pattern}" }}),
-    path: "{file_path}",
-    module: () => import("file://{abs_str}"),
-  }}"#,
-            url_pattern = url_pattern,
-            file_path = route.file_path,
-            abs_str = abs_str,
+            r#"  {{ pattern: new URLPattern({{ pathname: "{pattern}" }}), workerPath: "file://{worker_path}", worker: null, pending: new Map() }}"#,
+            pattern = route.pattern,
+            worker_path = worker_path,
         ));
     }
 
-    let routes_array = route_entries.join(",\n");
+    let routes_array = format!("[\n{}\n]", route_entries.join(",\n"));
+    let dispatcher_code = template
+        .replace("__ROUTES__", &routes_array)
+        .replace("__ROUTE_COUNT__", &routes.len().to_string());
+
+    let entry_path = output_dir.join("_entry.ts");
+    fs::write(&entry_path, dispatcher_code).await.map_err(|e| {
+        AppError::Internal(format!(
+            "failed to write function dispatcher entry: {e}"
+        ))
+    })?;
+
+    Ok(())
+}
+
+/// Generate a combined entry point that dispatches function requests to Workers
+/// and falls through to the framework handler for non-matching requests.
+pub async fn generate_combined_entry(
+    routes: &[FunctionRoute],
+    output_dir: &Path,
+    framework_entry_path: &Path,
+    template_dir: &Path,
+) -> Result<String, AppError> {
+    let template_path = template_dir.join("function_worker.ts");
+    let worker_template = fs::read_to_string(&template_path).await.map_err(|e| {
+        AppError::Internal(format!(
+            "failed to read function_worker.ts template: {e}"
+        ))
+    })?;
+
+    // Generate worker wrappers for the combined entry
+    for route in routes {
+        let sanitized = sanitize_route_name(&route.pattern);
+        let bundle_abs = output_dir
+            .join(&route.bundle_file)
+            .to_string_lossy()
+            .to_string();
+
+        let wrapper_code = worker_template.replace("\"__BUNDLE_IMPORT__\"", &format!("\"file://{bundle_abs}\""));
+        let wrapper_path = output_dir.join(format!("_worker_{sanitized}.ts"));
+
+        fs::write(&wrapper_path, wrapper_code).await.map_err(|e| {
+            AppError::Internal(format!(
+                "failed to write worker wrapper {}: {e}",
+                wrapper_path.display()
+            ))
+        })?;
+    }
+
+    // Build route table
+    let mut route_entries = Vec::new();
+    for route in routes {
+        let sanitized = sanitize_route_name(&route.pattern);
+        let worker_path = output_dir
+            .join(format!("_worker_{sanitized}.ts"))
+            .to_string_lossy()
+            .to_string();
+
+        route_entries.push(format!(
+            r#"  {{ pattern: new URLPattern({{ pathname: "{pattern}" }}), workerPath: "file://{worker_path}", worker: null, pending: new Map() }}"#,
+            pattern = route.pattern,
+            worker_path = worker_path,
+        ));
+    }
+
+    let routes_array = format!("[\n{}\n]", route_entries.join(",\n"));
     let framework_path = framework_entry_path.to_string_lossy();
 
-    format!(
+    let combined = format!(
         r#"/**
- * Rift Combined Router (auto-generated)
+ * Rift Combined Dispatcher (auto-generated)
  *
- * Routes function requests to rift/functions/ handlers,
+ * Routes function requests to isolated Web Workers,
  * all other requests fall through to the framework handler.
  *
  * {count} function route(s) detected.
@@ -215,172 +441,140 @@ pub fn generate_combined_entry(
 
 import frameworkHandler from "file://{framework_path}";
 
-const functionRoutes = [
-{routes_array}
-];
+const PORT = parseInt(Deno.env.get("PORT") ?? "3000");
 
-function resolveHandler(mod) {{
-  const d = mod.default;
-  if (d && typeof d.fetch === "function") return d.fetch.bind(d);
-  if (typeof d === "function") return d;
-  if (typeof mod.fetch === "function") return mod.fetch;
-  if (typeof mod.handler === "function") return mod.handler;
-  return null;
+interface Route {{
+  pattern: URLPattern;
+  workerPath: string;
+  worker: Worker | null;
+  pending: Map<number, {{
+    resolve: (r: Response) => void;
+    reject: (e: Error) => void;
+  }}>;
 }}
 
-export default {{
-  async fetch(req) {{
-    const url = new URL(req.url);
+interface WorkerRequest {{
+  id: number;
+  url: string;
+  method: string;
+  headers: [string, string][];
+  body: number[] | null;
+}}
 
-    // Try function routes first
-    for (const route of functionRoutes) {{
-      const match = route.pattern.exec(url);
-      if (match) {{
-        const groups = match.pathname.groups;
-        const headers = new Headers(req.headers);
-        for (const [k, v] of Object.entries(groups)) {{
-          if (v !== undefined) headers.set(`x-rift-param-${{k}}`, v);
-        }}
+interface WorkerResponse {{
+  id: number;
+  status: number;
+  headers: [string, string][];
+  body: number[] | null;
+  error?: string;
+}}
 
-        try {{
-          const mod = await route.module();
-          const handler = resolveHandler(mod);
-          if (!handler) {{
-            return new Response(
-              JSON.stringify({{ error: `No handler in ${{route.path}}` }}),
-              {{ status: 500, headers: {{ "content-type": "application/json" }} }},
-            );
-          }}
-          return await handler(new Request(req.url, {{
-            method: req.method,
-            headers,
-            body: req.body,
-          }}));
-        }} catch (e) {{
-          console.error(`[rift-functions] Error in ${{route.path}}: ${{e}}`);
-          return new Response(
-            JSON.stringify({{ error: "Internal Server Error" }}),
-            {{ status: 500, headers: {{ "content-type": "application/json" }} }},
-          );
-        }}
-      }}
+const routes: Route[] = {routes_array};
+
+let nextRequestId = 0;
+
+function getWorker(route: Route): Worker {{
+  if (route.worker) return route.worker;
+
+  route.worker = new Worker(route.workerPath, {{
+    type: "module",
+    deno: {{ permissions: "inherit" }},
+  }} as WorkerOptions);
+
+  route.worker.onmessage = (e: MessageEvent<WorkerResponse>) => {{
+    const data = e.data;
+    const p = route.pending.get(data.id);
+    if (!p) return;
+    route.pending.delete(data.id);
+
+    if (data.error) {{
+      p.resolve(new Response(
+        JSON.stringify({{ error: "Internal Server Error" }}),
+        {{ status: 500, headers: {{ "content-type": "application/json" }} }},
+      ));
+      return;
     }}
 
-    // No function route matched — delegate to framework handler
-    if (frameworkHandler && typeof frameworkHandler.fetch === "function") {{
-      return frameworkHandler.fetch(req);
+    const body = data.body ? new Uint8Array(data.body) : null;
+    p.resolve(new Response(body, {{
+      status: data.status,
+      headers: new Headers(data.headers),
+    }}));
+  }};
+
+  route.worker.onerror = (e: ErrorEvent) => {{
+    console.error(`[rift-dispatcher] Worker error: ${{e.message}}`);
+    for (const [id, p] of route.pending) {{
+      route.pending.delete(id);
+      p.resolve(new Response(
+        JSON.stringify({{ error: "Worker Error" }}),
+        {{ status: 500, headers: {{ "content-type": "application/json" }} }},
+      ));
     }}
-    if (typeof frameworkHandler === "function") {{
-      return frameworkHandler(req);
+    route.worker = null;
+  }};
+
+  return route.worker;
+}}
+
+// Eagerly start function workers
+for (const route of routes) {{
+  try {{ getWorker(route); }} catch (_) {{}}
+}}
+
+Deno.serve({{ port: PORT, hostname: "0.0.0.0" }}, async (req) => {{
+  const url = new URL(req.url);
+
+  // Try function routes first (isolated Workers)
+  for (const route of routes) {{
+    const match = route.pattern.exec(url);
+    if (!match) continue;
+
+    const groups = match.pathname.groups;
+    const headers: [string, string][] = [...req.headers.entries()];
+    for (const [k, v] of Object.entries(groups)) {{
+      if (v !== undefined) headers.push([`x-rift-param-${{k}}`, v as string]);
     }}
 
-    return new Response(
-      JSON.stringify({{ error: "Not Found" }}),
-      {{ status: 404, headers: {{ "content-type": "application/json" }} }},
-    );
-  }},
-}};
-"#,
-        count = routes.len(),
-        routes_array = routes_array,
-        framework_path = framework_path,
-    )
-}
+    const body = req.body
+      ? Array.from(new Uint8Array(await req.arrayBuffer()))
+      : null;
 
-/// Generate the router TypeScript code with the actual route definitions.
-fn generate_router_code(routes: &[FunctionRoute], workspace_dir: &Path) -> String {
-    let functions_dir = workspace_dir.join("rift/functions");
-    let mut route_entries = Vec::new();
+    const id = nextRequestId++;
+    const worker = getWorker(route);
 
-    for route in routes {
-        let abs_path = functions_dir
-            .parent()
-            .unwrap_or(&functions_dir)
-            .join(&route.file_path);
-        let abs_str = abs_path.to_string_lossy();
-
-        // Convert :param to URLPattern syntax (:param)
-        let url_pattern = route.pattern.replace(":",":");
-
-        route_entries.push(format!(
-            r#"  {{
-    pattern: new URLPattern({{ pathname: "{url_pattern}" }}),
-    path: "{file_path}",
-    module: () => import("file://{abs_str}"),
-  }}"#,
-            url_pattern = url_pattern,
-            file_path = route.file_path,
-            abs_str = abs_str,
+    return new Promise<Response>((resolve, reject) => {{
+      route.pending.set(id, {{ resolve, reject }});
+      try {{
+        worker.postMessage({{ id, url: req.url, method: req.method, headers, body }});
+      }} catch (e) {{
+        route.pending.delete(id);
+        resolve(new Response(
+          JSON.stringify({{ error: "Failed to dispatch to worker" }}),
+          {{ status: 500, headers: {{ "content-type": "application/json" }} }},
         ));
-    }
-
-    let routes_array = route_entries.join(",\n");
-
-    format!(
-        r#"/**
- * Rift Function Router (auto-generated)
- *
- * {count} route(s) detected.
- */
-
-const routes = [
-{routes_array}
-];
-
-function resolveHandler(mod) {{
-  const d = mod.default;
-  if (d && typeof d.fetch === "function") return d.fetch.bind(d);
-  if (typeof d === "function") return d;
-  if (typeof mod.fetch === "function") return mod.fetch;
-  if (typeof mod.handler === "function") return mod.handler;
-  return null;
-}}
-
-export default {{
-  async fetch(req) {{
-    const url = new URL(req.url);
-
-    for (const route of routes) {{
-      const match = route.pattern.exec(url);
-      if (match) {{
-        const groups = match.pathname.groups;
-        const headers = new Headers(req.headers);
-        for (const [k, v] of Object.entries(groups)) {{
-          if (v !== undefined) headers.set(`x-rift-param-${{k}}`, v);
-        }}
-
-        try {{
-          const mod = await route.module();
-          const handler = resolveHandler(mod);
-          if (!handler) {{
-            return new Response(
-              JSON.stringify({{ error: `No handler in ${{route.path}}` }}),
-              {{ status: 500, headers: {{ "content-type": "application/json" }} }},
-            );
-          }}
-          return await handler(new Request(req.url, {{
-            method: req.method,
-            headers,
-            body: req.body,
-          }}));
-        }} catch (e) {{
-          console.error(`[rift-functions] Error in ${{route.path}}: ${{e}}`);
-          return new Response(
-            JSON.stringify({{ error: "Internal Server Error" }}),
-            {{ status: 500, headers: {{ "content-type": "application/json" }} }},
-          );
-        }}
       }}
-    }}
+    }});
+  }}
 
-    return new Response(
-      JSON.stringify({{ error: "Not Found" }}),
-      {{ status: 404, headers: {{ "content-type": "application/json" }} }},
-    );
-  }},
-}};
+  // No function route matched — delegate to framework handler
+  if (frameworkHandler && typeof (frameworkHandler as any).fetch === "function") {{
+    return (frameworkHandler as any).fetch(req);
+  }}
+  if (typeof frameworkHandler === "function") {{
+    return (frameworkHandler as any)(req);
+  }}
+
+  return new Response(
+    JSON.stringify({{ error: "Not Found" }}),
+    {{ status: 404, headers: {{ "content-type": "application/json" }} }},
+  );
+}});
 "#,
         count = routes.len(),
+        framework_path = framework_path,
         routes_array = routes_array,
-    )
+    );
+
+    Ok(combined)
 }

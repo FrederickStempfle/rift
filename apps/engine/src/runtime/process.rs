@@ -144,6 +144,42 @@ fn find_server_js_recursive(dir: &std::path::Path) -> Option<std::path::PathBuf>
     None
 }
 
+/// Spawn a Deno process to run the serverless function dispatcher.
+///
+/// Broader permissions than static sites:
+/// - Network: full outbound (functions may call external APIs)
+/// - Filesystem: read access to the output dir (bundles + worker wrappers)
+/// - Environment: user env vars
+pub fn spawn_deno_functions(
+    dir: &std::path::Path,
+    port: u16,
+    envs: &[(String, String)],
+) -> Result<Child, AppError> {
+    let entry = dir.join("_entry.ts");
+    let mut cmd = Command::new("deno");
+    cmd.arg("run")
+        .arg("--allow-net")
+        .arg("--allow-read")
+        .arg("--allow-env")
+        .arg("--no-prompt")
+        .arg(&entry)
+        .current_dir(dir)
+        .env("PORT", port.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+
+    cmd.spawn().map_err(|e| {
+        AppError::Internal(format!(
+            "failed to spawn Deno function dispatcher in {}: {e}",
+            dir.display()
+        ))
+    })
+}
+
 /// Spawn a Node.js process to run an SSR server (Nuxt, Astro, SvelteKit, Remix).
 ///
 /// For Remix, auto-detects `remix-serve` in node_modules and uses it instead of `node`.

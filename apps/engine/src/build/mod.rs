@@ -554,10 +554,22 @@ impl BuildManager {
                 RuntimeKind::StaticDeno { dir: output_dir }
             }
             BuildOutput::Functions => {
-                // Functions-only project: bundle the function router as the entry point
+                // Functions-only project: bundle each function with esbuild,
+                // generate per-function Web Worker wrappers, and write dispatcher entry.
                 let output_dir = workspace_dir.join("_rift_functions_output");
-                let function_routes =
-                    build_function_bundle(&workspace_dir, &output_dir).await?;
+                let template_dir = std::path::PathBuf::from(&self.config.worker_loader)
+                    .parent()
+                    .unwrap_or(std::path::Path::new("/opt/rift/templates"))
+                    .to_path_buf();
+                let function_routes = build_function_bundle(
+                    &workspace_dir,
+                    &output_dir,
+                    &template_dir,
+                    &self.pool,
+                    &self.log_broadcaster,
+                    deployment_id,
+                )
+                .await?;
 
                 if function_routes.is_empty() {
                     insert_and_broadcast_log(
@@ -598,20 +610,34 @@ impl BuildManager {
                 )
                 .await?;
 
-                RuntimeKind::StaticDeno { dir: output_dir }
+                RuntimeKind::Functions { dir: output_dir }
             }
         };
 
         // Bundle serverless functions alongside the framework if rift/functions/ exists.
-        // Generates a combined entry that routes function requests first, then falls
-        // through to the framework handler for all other paths.
+        // Each function gets its own Web Worker isolate; non-matching requests
+        // fall through to the framework handler.
         if functions::has_functions(&workspace_dir) && !matches!(plan.output, BuildOutput::Functions) {
             let fn_output_dir = workspace_dir.join("_rift_functions_output");
-            match build_function_bundle(&workspace_dir, &fn_output_dir).await {
+            let template_dir = std::path::PathBuf::from(&self.config.worker_loader)
+                .parent()
+                .unwrap_or(std::path::Path::new("/opt/rift/templates"))
+                .to_path_buf();
+            match build_function_bundle(
+                &workspace_dir,
+                &fn_output_dir,
+                &template_dir,
+                &self.pool,
+                &self.log_broadcaster,
+                deployment_id,
+            )
+            .await
+            {
                 Ok(routes) if !routes.is_empty() => {
-                    // Determine the framework's entry point for the combined router
+                    // Determine the framework's entry point for the combined dispatcher
                     let framework_entry = match &runtime_kind {
                         RuntimeKind::StaticDeno { dir } => Some(dir.join("_entry.ts")),
+                        RuntimeKind::Functions { dir } => Some(dir.join("_entry.ts")),
                         RuntimeKind::NextDeno { .. } | RuntimeKind::NodeServer { .. } => {
                             let pool_entry = workspace_dir.join("_rift_pool_entry.ts");
                             if pool_entry.exists() {
@@ -623,28 +649,46 @@ impl BuildManager {
                     };
 
                     if let Some(fw_entry) = framework_entry {
-                        let combined_code = functions::generate_combined_entry(
+                        match functions::generate_combined_entry(
                             &routes,
-                            &workspace_dir,
+                            &fn_output_dir,
                             &fw_entry,
-                        );
-                        let combined_path = fn_output_dir.join("_rift_combined_entry.ts");
-                        if let Err(e) = fs::write(&combined_path, combined_code).await {
-                            tracing::warn!(error = %e, "failed to write combined entry");
-                        } else {
-                            insert_and_broadcast_log(
-                                &self.pool,
-                                &self.log_broadcaster,
-                                deployment_id,
-                                "info",
-                                &format!(
-                                    "Bundled {} function route(s) with {} (combined entry)",
-                                    routes.len(),
-                                    plan.framework
-                                ),
-                                "build",
-                            )
-                            .await?;
+                            &template_dir,
+                        )
+                        .await
+                        {
+                            Ok(combined_code) => {
+                                let combined_path =
+                                    fn_output_dir.join("_rift_combined_entry.ts");
+                                if let Err(e) =
+                                    fs::write(&combined_path, combined_code).await
+                                {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "failed to write combined entry"
+                                    );
+                                } else {
+                                    insert_and_broadcast_log(
+                                        &self.pool,
+                                        &self.log_broadcaster,
+                                        deployment_id,
+                                        "info",
+                                        &format!(
+                                            "Bundled {} function route(s) with {} (isolated Workers + combined entry)",
+                                            routes.len(),
+                                            plan.framework
+                                        ),
+                                        "build",
+                                    )
+                                    .await?;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "failed to generate combined entry"
+                                );
+                            }
                         }
                     } else {
                         insert_and_broadcast_log(

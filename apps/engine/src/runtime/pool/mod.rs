@@ -176,6 +176,7 @@ impl WorkerPool {
         let deploy_dir = self.config.deploy_root.join(deployment_id.to_string());
         match kind {
             RuntimeKind::StaticDeno { dir } => dir.join("_entry.ts"),
+            RuntimeKind::Functions { dir } => dir.join("_entry.ts"),
             RuntimeKind::NextDeno { .. } => {
                 // For pool mode, we use a wrapper entry that starts Next.js internally
                 deploy_dir.join("_rift_pool_entry.ts")
@@ -210,6 +211,7 @@ impl WorkerPool {
                     }
                 }
                 RuntimeKind::NodeServer { entry, .. } => entry.clone(),
+                RuntimeKind::Functions { dir } => dir.join("_entry.ts"),
             }
         };
 
@@ -595,6 +597,10 @@ fn detect_runtime_kind(workspace_dir: &std::path::Path) -> Option<RuntimeKind> {
         Some(RuntimeKind::NodeServer {
             dir: workspace_dir.to_path_buf(),
             entry: workspace_dir.join("build/server/index.js"),
+        })
+    } else if workspace_dir.join("_rift_functions_output/bundles").is_dir() {
+        Some(RuntimeKind::Functions {
+            dir: workspace_dir.join("_rift_functions_output"),
         })
     } else if find_entry_ts(workspace_dir).is_some() {
         Some(RuntimeKind::StaticDeno {

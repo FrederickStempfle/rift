@@ -18,7 +18,7 @@ use crate::{
 
 use self::{
     health::wait_for_port,
-    process::{allocate_port, spawn_deno_next, spawn_deno_static, spawn_node_server},
+    process::{allocate_port, spawn_deno_functions, spawn_deno_next, spawn_deno_static, spawn_node_server},
 };
 
 #[derive(Clone, Debug)]
@@ -58,6 +58,8 @@ pub enum RuntimeKind {
     NextDeno { dir: PathBuf },
     /// Node.js SSR server (Nuxt, Astro, SvelteKit, Remix).
     NodeServer { dir: PathBuf, entry: PathBuf },
+    /// Serverless functions: Deno dispatcher with per-function Web Worker isolates.
+    Functions { dir: PathBuf },
 }
 
 #[derive(Clone, Debug)]
@@ -93,6 +95,7 @@ impl RuntimeManager {
             RuntimeKind::NodeServer { dir, entry } => {
                 spawn_node_server(dir, entry, port, &spec.env_vars)?
             }
+            RuntimeKind::Functions { dir } => spawn_deno_functions(dir, port, &spec.env_vars)?,
         };
 
         if !wait_for_port("127.0.0.1", port, 40).await {
@@ -314,6 +317,9 @@ impl RuntimeManager {
                     dir: workspace_dir,
                     entry,
                 }
+            } else if workspace_dir.join("_rift_functions_output/bundles").is_dir() {
+                let fn_dir = workspace_dir.join("_rift_functions_output");
+                RuntimeKind::Functions { dir: fn_dir }
             } else if let Some(entry_dir) = find_entry_ts(&workspace_dir) {
                 RuntimeKind::StaticDeno { dir: entry_dir }
             } else {
