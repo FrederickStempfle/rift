@@ -40,7 +40,7 @@ services:
     tmpfs:
       - /tmp:size=5G,exec
       - /var/rift/builds:size=5G,exec
-      - /var/rift/cache:size=2G
+      - /var/rift/cache:size=10G
       - /root:size=3G,exec
       - /usr/local/share/.cache:size=5G
     volumes:
