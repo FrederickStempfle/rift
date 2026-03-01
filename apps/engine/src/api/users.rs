@@ -33,6 +33,9 @@ pub fn routes() -> Router<AppState> {
         .route("/logout", post(logout))
         .route("/logout/internal", post(logout_internal))
         .route("/me", get(me))
+        .route("/login/cli", post(login_cli))
+        .route("/refresh/cli", post(refresh_cli))
+        .route("/logout/cli", post(logout_cli))
         .route("/exchange/github", post(exchange_github_session))
 }
 
@@ -284,6 +287,95 @@ pub async fn me(
         .ok_or_else(|| AppError::Unauthorized("user not found".into()))?;
 
     Ok(Json(UserResponse::from(user)))
+}
+
+/// CLI login — returns access + refresh tokens in the response body (no cookie).
+/// No internal API token required — credentials are the auth.
+pub async fn login_cli(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(payload): Json<LoginRequest>,
+) -> AppResult<Json<BackendSessionResponse>> {
+    let email = payload.email.trim().to_ascii_lowercase();
+
+    validation::validate_email(&email)?;
+    validation::validate_password(&payload.password)?;
+
+    let allowed = state
+        .auth_rate_limiters
+        .login_by_email
+        .check_and_increment(&email, 5, Duration::from_secs(15 * 60))
+        .await;
+    if !allowed {
+        return Err(AppError::RateLimited(
+            "login rate limit exceeded; try again later".into(),
+        ));
+    }
+
+    let maybe_user = users::find_user_by_email(&state.pool, &email).await?;
+    let verified = state.password_service.verify_or_dummy(
+        maybe_user.as_ref().map(|user| user.password_hash.as_str()),
+        &payload.password,
+    );
+
+    if !verified {
+        let email_hash = hash_email(&email);
+        state
+            .audit_logger
+            .log(AuditEvent {
+                user_id: None,
+                event: "user.login_failed",
+                resource_id: None,
+                ip_address: Some(addr.ip()),
+                user_agent: user_agent(&headers),
+                metadata: json!({ "email_hash": email_hash }),
+            })
+            .await?;
+
+        return Err(AppError::Unauthorized("invalid email or password".into()));
+    }
+
+    let user =
+        maybe_user.ok_or_else(|| AppError::Unauthorized("invalid email or password".into()))?;
+
+    state
+        .audit_logger
+        .log(AuditEvent {
+            user_id: Some(user.id),
+            event: "user.login",
+            resource_id: Some(user.id),
+            ip_address: Some(addr.ip()),
+            user_agent: user_agent(&headers),
+            metadata: json!({ "success": true, "provider": "cli" }),
+        })
+        .await?;
+
+    let session = create_session(state, &user).await?;
+    Ok(Json(session.into_backend_response()))
+}
+
+/// CLI token refresh — accepts refresh token in body, no internal API token required.
+/// The refresh token itself is proof of identity.
+pub async fn refresh_cli(
+    State(state): State<AppState>,
+    Json(payload): Json<RefreshInternalRequest>,
+) -> AppResult<Json<BackendSessionResponse>> {
+    let session = refresh_session_from_token(state, &payload.refresh_token).await?;
+    Ok(Json(session.into_backend_response()))
+}
+
+/// CLI logout — accepts refresh token in body, revokes it.
+pub async fn logout_cli(
+    State(state): State<AppState>,
+    Json(payload): Json<LogoutInternalRequest>,
+) -> AppResult<StatusCode> {
+    let token_hash = state
+        .token_service
+        .hash_refresh_token(&payload.refresh_token);
+    refresh_tokens::revoke_by_hash(&state.pool, &token_hash).await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn exchange_github_session(
