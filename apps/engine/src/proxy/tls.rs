@@ -103,3 +103,27 @@ impl ResolvesServerCert for CertResolver {
         self.resolve_sync(client_hello.server_name())
     }
 }
+
+/// Generate a self-signed certificate for bootstrapping the HTTPS listener.
+///
+/// Returns `(cert_pem, key_pem)` as byte vectors. The cert covers both the
+/// base domain and a wildcard (`*.base_domain`) so all subdomains get TLS
+/// until real ACME certs replace it.
+pub fn generate_self_signed(base_domain: &str) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    use rcgen::{CertificateParams, DnType, KeyPair, SanType};
+
+    let mut params = CertificateParams::new(vec![
+        base_domain.to_owned(),
+        format!("*.{base_domain}"),
+    ])?;
+    params.distinguished_name.push(DnType::CommonName, base_domain);
+    params.subject_alt_names = vec![
+        SanType::DnsName(base_domain.try_into()?),
+        SanType::DnsName(format!("*.{base_domain}").try_into()?),
+    ];
+
+    let key_pair = KeyPair::generate()?;
+    let cert = params.self_signed(&key_pair)?;
+
+    Ok((cert.pem().into_bytes(), key_pair.serialize_pem().into_bytes()))
+}

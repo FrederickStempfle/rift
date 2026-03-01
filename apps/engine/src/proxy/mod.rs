@@ -18,17 +18,10 @@ use hyper_util::{client::legacy::Client, rt::TokioExecutor, rt::TokioIo};
 use crate::api::AppState;
 
 pub async fn serve(state: AppState) -> anyhow::Result<()> {
-    let has_certs = state.cert_resolver.has_any_certs().await;
-    let has_acme_email = state.config.acme_email.is_some();
-
-    if has_certs || has_acme_email {
-        // Run both HTTP and HTTPS listeners
-        tokio::try_join!(serve_http(state.clone()), serve_https(state),)?;
-    } else {
-        // No TLS configured — run HTTP-only proxy (original behavior)
-        serve_http_proxy(state).await?;
-    }
-
+    // Always run both HTTP and HTTPS listeners.
+    // HTTP handles ACME challenges and redirects to HTTPS once real certs exist.
+    // HTTPS serves traffic using either real ACME certs or the self-signed fallback.
+    tokio::try_join!(serve_http(state.clone()), serve_https(state))?;
     Ok(())
 }
 
@@ -154,46 +147,6 @@ async fn serve_https(state: AppState) -> anyhow::Result<()> {
             {
                 if !is_benign_connection_error(&e) {
                     tracing::debug!(error = %e, peer = %remote_addr, "HTTPS proxy connection error");
-                }
-            }
-        });
-    }
-}
-
-/// Original HTTP-only proxy (no TLS, no ACME redirects).
-async fn serve_http_proxy(state: AppState) -> anyhow::Result<()> {
-    let bind_addr = state.config.proxy_addr();
-    let listener = tokio::net::TcpListener::bind(&bind_addr)
-        .await
-        .with_context(|| format!("failed to bind proxy listener on {bind_addr}"))?;
-
-    tracing::info!(address = %bind_addr, "proxy server listening (HTTP only)");
-
-    let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor::new())
-        .pool_idle_timeout(Duration::from_secs(60))
-        .pool_max_idle_per_host(10)
-        .build_http();
-
-    loop {
-        let (stream, remote_addr) = listener.accept().await?;
-        let io = TokioIo::new(stream);
-        let client = client.clone();
-        let state = state.clone();
-
-        tokio::spawn(async move {
-            let client = client.clone();
-            let state = state.clone();
-            let service = service_fn(move |req| {
-                handler::handle_request(req, remote_addr, client.clone(), state.clone())
-            });
-
-            if let Err(e) = http1::Builder::new()
-                .serve_connection(io, service)
-                .with_upgrades()
-                .await
-            {
-                if !is_benign_connection_error(&e) {
-                    tracing::debug!(error = %e, peer = %remote_addr, "proxy connection error");
                 }
             }
         });

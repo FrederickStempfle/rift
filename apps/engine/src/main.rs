@@ -167,6 +167,29 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!(error = %e, "failed to load existing TLS certificates");
     }
 
+    // Bootstrap a self-signed fallback so the HTTPS listener can always start.
+    // Real ACME certs replace it once provisioned.
+    if !cert_resolver.has_any_certs().await {
+        match proxy::tls::generate_self_signed(&config.base_domain) {
+            Ok((cert_pem, key_pem)) => {
+                if let Err(e) = cert_resolver
+                    .load_cert(&config.base_domain, &cert_pem, &key_pem)
+                    .await
+                {
+                    tracing::warn!(error = %e, "failed to load self-signed fallback cert");
+                } else {
+                    tracing::info!(
+                        domain = %config.base_domain,
+                        "bootstrapped self-signed TLS certificate (HTTPS listener ready)"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to generate self-signed fallback cert");
+            }
+        }
+    }
+
     let state = AppState {
         pool: pool.clone(),
         config: Arc::clone(&config),
