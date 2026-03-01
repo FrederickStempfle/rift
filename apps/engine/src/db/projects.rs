@@ -16,7 +16,7 @@ pub struct NewProject {
     pub build_command: Option<String>,
     pub output_dir: Option<String>,
     pub install_command: Option<String>,
-    pub subdomain: String,
+    pub subdomain: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]

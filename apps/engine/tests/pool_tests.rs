@@ -245,7 +245,7 @@ mod build_detection {
             build_command: None,
             output_dir: None,
             install_command: None,
-            subdomain: "test".to_string(),
+            subdomain: Some("test".to_string()),
             webhook_id: None,
             webhook_secret: None,
             created_at: chrono::Utc::now(),

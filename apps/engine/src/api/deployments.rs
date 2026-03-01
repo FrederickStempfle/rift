@@ -91,10 +91,11 @@ async fn public_url_for_deployment(
     if let Some(domain) = domains::get_primary_domain_for_project(&state.pool, project.id).await? {
         return Ok(Some(state.config.public_url_for_host(&domain.domain)));
     }
-    // No custom domain — use subdomain-based URL
-    Ok(Some(
-        state.config.public_url_for_subdomain(&project.subdomain),
-    ))
+    // No custom domain — use subdomain-based URL if subdomain is set
+    Ok(project
+        .subdomain
+        .as_deref()
+        .map(|s| state.config.public_url_for_subdomain(s)))
 }
 
 impl DeploymentResponse {

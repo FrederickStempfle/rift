@@ -37,7 +37,7 @@ pub struct Project {
     pub build_command: Option<String>,
     pub output_dir: Option<String>,
     pub install_command: Option<String>,
-    pub subdomain: String,
+    pub subdomain: Option<String>,
     pub webhook_id: Option<i64>,
     pub webhook_secret: Option<String>,
     pub created_at: DateTime<Utc>,

@@ -42,7 +42,7 @@ pub struct CreateProjectRequest {
     pub build_command: Option<String>,
     pub output_dir: Option<String>,
     pub install_command: Option<String>,
-    pub subdomain: String,
+    pub subdomain: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -68,8 +68,8 @@ pub struct ProjectResponse {
     pub build_command: Option<String>,
     pub output_dir: Option<String>,
     pub install_command: Option<String>,
-    pub subdomain: String,
-    pub public_url: String,
+    pub subdomain: Option<String>,
+    pub public_url: Option<String>,
     pub primary_domain: Option<String>,
     pub latest_deployment: Option<ProjectDeploymentSummary>,
     pub runtime_status: String,
@@ -97,7 +97,9 @@ pub async fn create_project(
 ) -> AppResult<(StatusCode, Json<ProjectResponse>)> {
     validation::validate_project_name(&payload.name)?;
     validation::validate_repo_url(&payload.repo_url)?;
-    validation::validate_subdomain(&payload.subdomain)?;
+    if let Some(ref subdomain) = payload.subdomain {
+        validation::validate_subdomain(subdomain)?;
+    }
 
     if let Some(branch) = &payload.branch {
         validation::ensure_no_null_bytes(branch, "branch")?;
@@ -349,8 +351,11 @@ async fn project_response_from_parts(
         .filter(|domain| domain.ssl_status == "active")
         .map(|domain| domain.domain.as_str())
     {
-        Some(domain) => state.config.public_url_for_host(domain),
-        None => state.config.public_url_for_subdomain(&value.subdomain),
+        Some(domain) => Some(state.config.public_url_for_host(domain)),
+        None => value
+            .subdomain
+            .as_deref()
+            .map(|s| state.config.public_url_for_subdomain(s)),
     };
     let runtime_status = runtime_status_for_project(state, value.id).await.to_owned();
 
