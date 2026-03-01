@@ -313,7 +313,7 @@ pub fn detect_output_dir(project: &Project, workspace_dir: &Path) -> String {
     }
 
     // Scan apps/ first (preferred), then packages/, looking for web output with index.html
-    for container in ["apps", "packages"] {
+    for container in ["apps", "packages", "sites"] {
         for pkg_dir in list_subdirs(&workspace_dir.join(container)) {
             let pkg_name = pkg_dir
                 .file_name()
@@ -397,7 +397,7 @@ fn find_deployable_app(workspace_dir: &Path) -> Option<WorkspaceApp> {
     let mut candidates = Vec::new();
 
     // Scan apps/ first, then packages/
-    for container in ["apps", "packages"] {
+    for container in ["apps", "packages", "sites"] {
         let container_dir = workspace_dir.join(container);
         if !container_dir.is_dir() {
             continue;

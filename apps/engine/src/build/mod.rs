@@ -227,7 +227,7 @@ impl BuildManager {
             self.inject_next_standalone_config(&workspace_dir, deployment_id)
                 .await?;
             // Also inject in workspace packages for monorepos
-            for container in ["apps", "packages"] {
+            for container in ["apps", "packages", "sites"] {
                 let container_dir = workspace_dir.join(container);
                 if container_dir.is_dir() {
                     if let Ok(entries) = fs::read_dir(&container_dir).await {
@@ -708,7 +708,7 @@ async fn find_next_standalone(workspace_dir: &std::path::Path) -> Option<std::pa
     }
 
     // Scan monorepo package directories
-    for container in ["apps", "packages"] {
+    for container in ["apps", "packages", "sites"] {
         let container_dir = workspace_dir.join(container);
         if !container_dir.exists() {
             continue;
@@ -778,7 +778,7 @@ async fn find_ssr_entry(
     }
 
     // Scan monorepo package directories
-    for container in ["apps", "packages"] {
+    for container in ["apps", "packages", "sites"] {
         let container_dir = workspace_dir.join(container);
         if !container_dir.exists() {
             continue;
