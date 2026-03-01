@@ -143,6 +143,11 @@ async fn route_and_forward(
         .header("x-forwarded-proto", &state.config.proxy_scheme)
         .header(HOST, &host);
 
+    // Inject project ID for function-only projects (global dispatcher needs it)
+    if state.runtime_backend.is_function_only(project_id).await {
+        upstream = upstream.header("x-rift-project-id", project_id.to_string());
+    }
+
     let upstream_req = upstream
         .body(Full::new(body_bytes))
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, pid))?;

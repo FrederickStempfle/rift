@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod function_registry;
 pub mod health;
 pub mod pool;
 pub mod process;
@@ -24,6 +25,8 @@ use self::{
 #[derive(Clone, Debug)]
 pub struct RuntimeManager {
     inner: Arc<Mutex<RuntimeState>>,
+    /// Global function dispatcher registry (None if not yet initialized).
+    function_registry: Option<function_registry::FunctionRegistry>,
 }
 
 #[derive(Debug)]
@@ -78,7 +81,18 @@ impl RuntimeManager {
                 active: HashMap::new(),
                 suspended: HashMap::new(),
             })),
+            function_registry: None,
         }
+    }
+
+    /// Set the function registry (called after global dispatcher starts).
+    pub fn set_function_registry(&mut self, registry: function_registry::FunctionRegistry) {
+        self.function_registry = Some(registry);
+    }
+
+    /// Get a reference to the function registry.
+    pub fn function_registry(&self) -> Option<&function_registry::FunctionRegistry> {
+        self.function_registry.as_ref()
     }
 
     /// Deploy a project and return `(internal_url, port)`.
@@ -87,6 +101,48 @@ impl RuntimeManager {
     /// old one is touched. After the atomic swap the old process gets a 5-second
     /// drain period before being killed.
     pub async fn deploy(&self, spec: RuntimeLaunchSpec) -> Result<(String, u16), AppError> {
+        // Function-only projects: register with the global dispatcher instead
+        // of spawning a per-project Deno process.
+        if let RuntimeKind::Functions { ref dir } = spec.kind {
+            if let Some(registry) = &self.function_registry {
+                // Read routes manifest
+                let manifest_path = dir.join("_routes.json");
+                let routes = if manifest_path.exists() {
+                    let content = tokio::fs::read_to_string(&manifest_path)
+                        .await
+                        .map_err(|e| {
+                            AppError::Internal(format!("failed to read _routes.json: {e}"))
+                        })?;
+                    serde_json::from_str(&content).map_err(|e| {
+                        AppError::Internal(format!("failed to parse _routes.json: {e}"))
+                    })?
+                } else {
+                    Vec::new()
+                };
+
+                let output_dir = dir.to_string_lossy().to_string();
+
+                // Unregister old version (if any)
+                let _ = registry.unregister(spec.project_id).await;
+
+                // Register new routes with global dispatcher
+                registry
+                    .register(
+                        spec.project_id,
+                        spec.deployment_id,
+                        &routes,
+                        &spec.env_vars,
+                        &output_dir,
+                    )
+                    .await?;
+
+                let url = registry.dispatcher_url();
+                let port = 0; // No port allocated for function-only projects
+                return Ok((url, port));
+            }
+            // Fall through to legacy per-project process if no registry
+        }
+
         let port = allocate_port()?;
 
         let child = match &spec.kind {
@@ -140,6 +196,13 @@ impl RuntimeManager {
     }
 
     pub async fn stop_project(&self, project_id: Uuid) -> Result<(), AppError> {
+        // Unregister from global dispatcher if function-only
+        if let Some(registry) = &self.function_registry {
+            if registry.is_function_project(project_id).await {
+                return registry.unregister(project_id).await;
+            }
+        }
+
         let mut state = self.inner.lock().await;
         state.suspended.remove(&project_id);
         if let Some(runtime) = state.active.remove(&project_id) {
@@ -150,6 +213,13 @@ impl RuntimeManager {
     }
 
     pub async fn active_url(&self, project_id: Uuid) -> Option<String> {
+        // Function-only projects are always active via the global dispatcher
+        if let Some(registry) = &self.function_registry {
+            if registry.is_function_project(project_id).await {
+                return Some(registry.dispatcher_url());
+            }
+        }
+
         self.inner
             .lock()
             .await
@@ -159,6 +229,13 @@ impl RuntimeManager {
     }
 
     pub async fn active_deployment_id(&self, project_id: Uuid) -> Option<Uuid> {
+        // Check function registry first
+        if let Some(registry) = &self.function_registry {
+            if let Some(dep_id) = registry.deployment_id(project_id).await {
+                return Some(dep_id);
+            }
+        }
+
         self.inner
             .lock()
             .await
@@ -335,6 +412,63 @@ impl RuntimeManager {
                 env_vars::get_decrypted_env_vars(pool, deployment.project_id, &config.master_key)
                     .await
                     .unwrap_or_default();
+
+            // Function-only projects: register with global dispatcher (no process needed)
+            if let RuntimeKind::Functions { ref dir } = kind {
+                if let Some(registry) = &self.function_registry {
+                    let manifest_path = dir.join("_routes.json");
+                    let routes: Vec<crate::build::functions::FunctionRoute> =
+                        if manifest_path.exists() {
+                            match tokio::fs::read_to_string(&manifest_path).await {
+                                Ok(content) => {
+                                    serde_json::from_str(&content).unwrap_or_default()
+                                }
+                                Err(_) => Vec::new(),
+                            }
+                        } else {
+                            Vec::new()
+                        };
+
+                    if routes.is_empty() {
+                        tracing::warn!(
+                            deployment_id = %deployment.id,
+                            "no routes manifest found, skipping function restore"
+                        );
+                        continue;
+                    }
+
+                    let output_dir = dir.to_string_lossy().to_string();
+                    match registry
+                        .register(
+                            deployment.project_id,
+                            deployment.id,
+                            &routes,
+                            &env_vars,
+                            &output_dir,
+                        )
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::info!(
+                                deployment_id = %deployment.id,
+                                project_id = %deployment.project_id,
+                                routes = routes.len(),
+                                "restored function deployment via global dispatcher"
+                            );
+                            restored += 1;
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                deployment_id = %deployment.id,
+                                project_id = %deployment.project_id,
+                                error = %e,
+                                "failed to restore function deployment"
+                            );
+                        }
+                    }
+                    continue;
+                }
+            }
 
             match self
                 .deploy(RuntimeLaunchSpec {

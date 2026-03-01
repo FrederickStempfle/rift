@@ -104,6 +104,10 @@ pub struct Config {
         default_value = "/opt/rift/templates/worker_loader.ts"
     )]
     pub worker_loader: String,
+
+    /// Fixed port for the global function dispatcher (not allocated from the deployment range).
+    #[arg(long, env = "RIFT_GLOBAL_DISPATCHER_PORT", default_value_t = 9999)]
+    pub global_dispatcher_port: u16,
 }
 
 impl Config {

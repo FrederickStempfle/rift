@@ -180,6 +180,31 @@ pub fn spawn_deno_functions(
     })
 }
 
+/// Spawn the global function dispatcher — a single always-running Deno process
+/// that handles ALL projects' function invocations via dynamic route registration.
+pub fn spawn_global_dispatcher(
+    template_dir: &std::path::Path,
+    port: u16,
+) -> Result<Child, AppError> {
+    let entry = template_dir.join("global_function_dispatcher.ts");
+    let mut cmd = Command::new("deno");
+    cmd.arg("run")
+        .arg("--allow-net")
+        .arg("--allow-read")
+        .arg("--allow-env")
+        .arg("--no-prompt")
+        .arg(&entry)
+        .env("PORT", port.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+
+    cmd.spawn().map_err(|e| {
+        AppError::Internal(format!(
+            "failed to spawn global function dispatcher: {e}"
+        ))
+    })
+}
+
 /// Spawn a Node.js process to run an SSR server (Nuxt, Astro, SvelteKit, Remix).
 ///
 /// For Remix, auto-detects `remix-serve` in node_modules and uses it instead of `node`.

@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
 use tokio::fs;
 use uuid::Uuid;
 
@@ -84,11 +85,21 @@ pub async fn build_function_bundle(
     // Generate the dispatcher entry as _entry.ts
     generate_dispatcher_entry(&routes, output_dir, template_dir).await?;
 
+    // Persist route manifest for restore after engine restart
+    let manifest = serde_json::to_string_pretty(&routes).map_err(|e| {
+        AppError::Internal(format!("failed to serialize routes manifest: {e}"))
+    })?;
+    fs::write(output_dir.join("_routes.json"), manifest)
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!("failed to write _routes.json: {e}"))
+        })?;
+
     Ok(routes)
 }
 
 /// A detected function route.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionRoute {
     /// URL pattern (e.g., "/api/hello", "/api/users/:id").
     pub pattern: String,

@@ -42,7 +42,28 @@ async fn main() -> anyhow::Result<()> {
 
     let password_service =
         PasswordService::new().context("failed to initialize password service")?;
-    let runtime_manager = RuntimeManager::new();
+    let mut runtime_manager = RuntimeManager::new();
+
+    // Start the global function dispatcher
+    let template_dir = std::path::Path::new("/opt/rift/templates");
+    match rift_engine::runtime::function_registry::FunctionRegistry::start(
+        template_dir,
+        config.global_dispatcher_port,
+    )
+    .await
+    {
+        Ok(registry) => {
+            registry.spawn_health_monitor();
+            runtime_manager.set_function_registry(registry);
+            tracing::info!("global function dispatcher ready");
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to start global function dispatcher — functions will use per-project processes"
+            );
+        }
+    }
     let runtime_backend: Arc<dyn rift_engine::runtime::backend::RuntimeBackend> =
         match config.runtime_mode.as_str() {
             "pool" => {

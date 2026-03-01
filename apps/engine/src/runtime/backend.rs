@@ -54,6 +54,12 @@ pub trait RuntimeBackend: Send + Sync + 'static {
     /// Restore deployments from database after restart.
     async fn restore(&self, pool: &PgPool, config: &Config) -> usize;
 
+    /// Check if a project is a function-only project served by the global dispatcher.
+    async fn is_function_only(&self, project_id: Uuid) -> bool {
+        let _ = project_id;
+        false
+    }
+
     /// Get pool statistics (only meaningful for pool backend).
     async fn pool_stats(&self) -> Option<PoolStats> {
         None
@@ -104,6 +110,13 @@ impl RuntimeBackend for ProcessBackend {
 
     async fn suspend_idle(&self, threshold: Duration) -> usize {
         self.manager.suspend_idle(threshold).await
+    }
+
+    async fn is_function_only(&self, project_id: Uuid) -> bool {
+        if let Some(registry) = self.manager.function_registry() {
+            return registry.is_function_project(project_id).await;
+        }
+        false
     }
 
     async fn restore(&self, pool: &PgPool, config: &Config) -> usize {
