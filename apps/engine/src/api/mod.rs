@@ -118,6 +118,7 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/webhooks", webhooks::routes())
         .route("/api/analytics", get(analytics::get_analytics))
         .route("/api/runtime/stats", get(runtime::get_runtime_stats))
+        .route("/api/runtime/project", get(runtime::get_project_runtime))
         .route("/api/logs", get(logs::list_logs))
         .route("/api/ws/logs", get(crate::ws::handler::ws_logs_handler))
         .layer(DefaultBodyLimit::max(1_048_576))
