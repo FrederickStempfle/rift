@@ -355,7 +355,7 @@ async fn generate_dispatcher_entry(
             .to_string();
 
         route_entries.push(format!(
-            r#"  {{ pattern: new URLPattern({{ pathname: "{pattern}" }}), workerPath: "file://{worker_path}", worker: null, pending: new Map() }}"#,
+            r#"  {{ pattern: new URLPattern({{ pathname: "{pattern}" }}), workerPath: "file://{worker_path}", active: 0 }}"#,
             pattern = route.pattern,
             worker_path = worker_path,
         ));
@@ -420,7 +420,7 @@ pub async fn generate_combined_entry(
             .to_string();
 
         route_entries.push(format!(
-            r#"  {{ pattern: new URLPattern({{ pathname: "{pattern}" }}), workerPath: "file://{worker_path}", worker: null, pending: new Map() }}"#,
+            r#"  {{ pattern: new URLPattern({{ pathname: "{pattern}" }}), workerPath: "file://{worker_path}", active: 0 }}"#,
             pattern = route.pattern,
             worker_path = worker_path,
         ));
@@ -433,8 +433,9 @@ pub async fn generate_combined_entry(
         r#"/**
  * Rift Combined Dispatcher (auto-generated)
  *
- * Routes function requests to isolated Web Workers,
- * all other requests fall through to the framework handler.
+ * True serverless: each request gets a fresh V8 isolate via a new Web Worker.
+ * No shared state between invocations. Non-matching requests fall through
+ * to the framework handler.
  *
  * {count} function route(s) detected.
  */
@@ -442,19 +443,15 @@ pub async fn generate_combined_entry(
 import frameworkHandler from "file://{framework_path}";
 
 const PORT = parseInt(Deno.env.get("PORT") ?? "3000");
+const MAX_CONCURRENT = parseInt(Deno.env.get("RIFT_MAX_CONCURRENT") ?? "50");
 
 interface Route {{
   pattern: URLPattern;
   workerPath: string;
-  worker: Worker | null;
-  pending: Map<number, {{
-    resolve: (r: Response) => void;
-    reject: (e: Error) => void;
-  }}>;
+  active: number;
 }}
 
 interface WorkerRequest {{
-  id: number;
   url: string;
   method: string;
   headers: [string, string][];
@@ -462,7 +459,6 @@ interface WorkerRequest {{
 }}
 
 interface WorkerResponse {{
-  id: number;
   status: number;
   headers: [string, string][];
   body: number[] | null;
@@ -471,61 +467,94 @@ interface WorkerResponse {{
 
 const routes: Route[] = {routes_array};
 
-let nextRequestId = 0;
-
-function getWorker(route: Route): Worker {{
-  if (route.worker) return route.worker;
-
-  route.worker = new Worker(route.workerPath, {{
-    type: "module",
-    deno: {{ permissions: "inherit" }},
-  }} as WorkerOptions);
-
-  route.worker.onmessage = (e: MessageEvent<WorkerResponse>) => {{
-    const data = e.data;
-    const p = route.pending.get(data.id);
-    if (!p) return;
-    route.pending.delete(data.id);
-
-    if (data.error) {{
-      p.resolve(new Response(
-        JSON.stringify({{ error: "Internal Server Error" }}),
-        {{ status: 500, headers: {{ "content-type": "application/json" }} }},
+function dispatch(route: Route, data: WorkerRequest): Promise<Response> {{
+  return new Promise<Response>((resolve) => {{
+    if (route.active >= MAX_CONCURRENT) {{
+      resolve(new Response(
+        JSON.stringify({{ error: "Too Many Requests" }}),
+        {{ status: 429, headers: {{ "content-type": "application/json" }} }},
       ));
       return;
     }}
 
-    const body = data.body ? new Uint8Array(data.body) : null;
-    p.resolve(new Response(body, {{
-      status: data.status,
-      headers: new Headers(data.headers),
-    }}));
-  }};
+    route.active++;
+    let settled = false;
+    const worker = new Worker(route.workerPath, {{
+      type: "module",
+      deno: {{ permissions: "inherit" }},
+    }} as WorkerOptions);
 
-  route.worker.onerror = (e: ErrorEvent) => {{
-    console.error(`[rift-dispatcher] Worker error: ${{e.message}}`);
-    for (const [id, p] of route.pending) {{
-      route.pending.delete(id);
-      p.resolve(new Response(
+    const timeout = setTimeout(() => {{
+      if (!settled) {{
+        settled = true;
+        route.active--;
+        worker.terminate();
+        resolve(new Response(
+          JSON.stringify({{ error: "Function timed out" }}),
+          {{ status: 504, headers: {{ "content-type": "application/json" }} }},
+        ));
+      }}
+    }}, 30_000);
+
+    worker.onmessage = (e: MessageEvent<WorkerResponse>) => {{
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      route.active--;
+
+      const resp = e.data;
+      const body = resp.body ? new Uint8Array(resp.body) : null;
+      worker.terminate();
+
+      if (resp.error) {{
+        resolve(new Response(
+          JSON.stringify({{ error: "Internal Server Error" }}),
+          {{ status: resp.status || 500, headers: {{ "content-type": "application/json" }} }},
+        ));
+        return;
+      }}
+
+      resolve(new Response(body, {{
+        status: resp.status,
+        headers: new Headers(resp.headers),
+      }}));
+    }};
+
+    worker.onerror = (e: ErrorEvent) => {{
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      route.active--;
+      worker.terminate();
+
+      console.error(`[rift-dispatcher] Worker error: ${{e.message}}`);
+      resolve(new Response(
         JSON.stringify({{ error: "Worker Error" }}),
         {{ status: 500, headers: {{ "content-type": "application/json" }} }},
       ));
+    }};
+
+    try {{
+      worker.postMessage(data);
+    }} catch (e) {{
+      if (!settled) {{
+        settled = true;
+        clearTimeout(timeout);
+        route.active--;
+        worker.terminate();
+        resolve(new Response(
+          JSON.stringify({{ error: "Failed to dispatch to worker" }}),
+          {{ status: 500, headers: {{ "content-type": "application/json" }} }},
+        ));
+      }}
     }}
-    route.worker = null;
-  }};
-
-  return route.worker;
-}}
-
-// Eagerly start function workers
-for (const route of routes) {{
-  try {{ getWorker(route); }} catch (_) {{}}
+  }});
 }}
 
 Deno.serve({{ port: PORT, hostname: "0.0.0.0" }}, async (req) => {{
   const url = new URL(req.url);
 
-  // Try function routes first (isolated Workers)
+  // Try function routes first (isolated per-request Workers)
   for (const route of routes) {{
     const match = route.pattern.exec(url);
     if (!match) continue;
@@ -540,20 +569,11 @@ Deno.serve({{ port: PORT, hostname: "0.0.0.0" }}, async (req) => {{
       ? Array.from(new Uint8Array(await req.arrayBuffer()))
       : null;
 
-    const id = nextRequestId++;
-    const worker = getWorker(route);
-
-    return new Promise<Response>((resolve, reject) => {{
-      route.pending.set(id, {{ resolve, reject }});
-      try {{
-        worker.postMessage({{ id, url: req.url, method: req.method, headers, body }});
-      }} catch (e) {{
-        route.pending.delete(id);
-        resolve(new Response(
-          JSON.stringify({{ error: "Failed to dispatch to worker" }}),
-          {{ status: 500, headers: {{ "content-type": "application/json" }} }},
-        ));
-      }}
+    return dispatch(route, {{
+      url: req.url,
+      method: req.method,
+      headers,
+      body,
     }});
   }}
 
