@@ -3,9 +3,11 @@ pub mod function_registry;
 pub mod health;
 #[cfg(feature = "v8-isolate")]
 pub mod isolate;
+pub mod namespace;
 pub mod pool;
 pub mod process;
 pub mod scaler;
+pub mod seccomp;
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
 
@@ -21,6 +23,7 @@ use crate::{
 
 use self::{
     health::wait_for_port,
+    pool::sandbox::SeccompEnforcer,
     process::{allocate_port, spawn_deno_functions, spawn_deno_next, spawn_deno_static, spawn_node_server},
 };
 
@@ -29,6 +32,12 @@ pub struct RuntimeManager {
     inner: Arc<Mutex<RuntimeState>>,
     /// Global function dispatcher registry (None if not yet initialized).
     function_registry: Option<function_registry::FunctionRegistry>,
+    /// Seccomp enforcer for process-level BPF filtering.
+    seccomp: Option<SeccompEnforcer>,
+    /// Milliseconds between health-check TCP probes.
+    healthcheck_interval_ms: u64,
+    /// Maximum number of health-check attempts.
+    healthcheck_attempts: usize,
 }
 
 #[derive(Debug)]
@@ -92,7 +101,54 @@ impl RuntimeManager {
                 suspended: HashMap::new(),
             })),
             function_registry: None,
+            seccomp: None,
+            healthcheck_interval_ms: 200,
+            healthcheck_attempts: 50,
         }
+    }
+
+    /// Configure health-check parameters from engine config.
+    pub fn set_healthcheck(&mut self, interval_ms: u64, attempts: usize) {
+        self.healthcheck_interval_ms = interval_ms;
+        self.healthcheck_attempts = attempts;
+    }
+
+    /// Get the current health-check interval in milliseconds.
+    pub fn healthcheck_interval_ms(&self) -> u64 {
+        self.healthcheck_interval_ms
+    }
+
+    /// Get the current health-check attempt count.
+    pub fn healthcheck_attempts(&self) -> usize {
+        self.healthcheck_attempts
+    }
+
+    /// Initialize seccomp enforcement for spawned worker processes.
+    pub fn init_seccomp(&mut self, deploy_root: &std::path::Path, enforce: bool) {
+        match SeccompEnforcer::init(deploy_root, enforce) {
+            Ok(enforcer) => {
+                tracing::info!(
+                    enforce = enforcer.enforce,
+                    has_profile = enforcer.profile_path.is_some(),
+                    "process-level seccomp initialized"
+                );
+                self.seccomp = Some(enforcer);
+            }
+            Err(e) => {
+                if enforce {
+                    tracing::error!(error = %e, "seccomp enforcement required but initialization failed");
+                } else {
+                    tracing::warn!(error = %e, "seccomp initialization failed, continuing without enforcement");
+                }
+            }
+        }
+    }
+
+    /// Get the seccomp profile path for process spawning.
+    fn seccomp_profile_path(&self) -> Option<&std::path::Path> {
+        self.seccomp
+            .as_ref()
+            .and_then(|s| s.profile_path.as_deref())
     }
 
     /// Set the function registry (called after global dispatcher starts).
@@ -154,20 +210,21 @@ impl RuntimeManager {
         }
 
         let port = allocate_port()?;
+        let seccomp_path = self.seccomp_profile_path();
 
         let child = match &spec.kind {
-            RuntimeKind::StaticDeno { dir } => spawn_deno_static(dir, port, &spec.env_vars)?,
-            RuntimeKind::NextDeno { dir } => spawn_deno_next(dir, port, &spec.env_vars)?,
+            RuntimeKind::StaticDeno { dir } => spawn_deno_static(dir, port, &spec.env_vars, seccomp_path)?,
+            RuntimeKind::NextDeno { dir } => spawn_deno_next(dir, port, &spec.env_vars, seccomp_path)?,
             RuntimeKind::NodeServer { dir, entry } => {
-                spawn_node_server(dir, entry, port, &spec.env_vars)?
+                spawn_node_server(dir, entry, port, &spec.env_vars, seccomp_path)?
             }
-            RuntimeKind::Functions { dir } => spawn_deno_functions(dir, port, &spec.env_vars)?,
+            RuntimeKind::Functions { dir } => spawn_deno_functions(dir, port, &spec.env_vars, seccomp_path)?,
             RuntimeKind::Combined { entry, functions_dir } => {
-                process::spawn_deno_combined(entry, functions_dir, port, &spec.env_vars)?
+                process::spawn_deno_combined(entry, functions_dir, port, &spec.env_vars, seccomp_path)?
             }
         };
 
-        if !wait_for_port("127.0.0.1", port, 40).await {
+        if !wait_for_port("127.0.0.1", port, self.healthcheck_attempts, self.healthcheck_interval_ms).await {
             // New process failed health check — kill it, leave old running.
             let mut child = child;
             let _ = child.kill().await;
@@ -542,5 +599,17 @@ fn find_entry_ts(workspace_dir: &PathBuf) -> Option<PathBuf> {
 impl Default for RuntimeManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_manager_default_has_no_seccomp() {
+        let rm = RuntimeManager::new();
+        assert!(rm.seccomp.is_none());
+        assert!(rm.seccomp_profile_path().is_none());
     }
 }

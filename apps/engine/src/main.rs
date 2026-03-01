@@ -44,6 +44,18 @@ async fn main() -> anyhow::Result<()> {
         PasswordService::new().context("failed to initialize password service")?;
     let mut runtime_manager = RuntimeManager::new();
 
+    // Initialize process-level seccomp for worker processes
+    runtime_manager.init_seccomp(
+        std::path::Path::new(&config.deploy_root),
+        config.seccomp_enforce,
+    );
+
+    // Configure health-check parameters
+    runtime_manager.set_healthcheck(
+        config.healthcheck_interval_ms,
+        config.healthcheck_attempts,
+    );
+
     // Start the global function dispatcher
     let template_dir = std::path::Path::new("/opt/rift/templates");
     let function_registry = match rift_engine::runtime::function_registry::FunctionRegistry::start(
@@ -81,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
                     worker_memory_limit: config.worker_memory_limit_mb * 1024 * 1024,
                     loader_script: config.worker_loader.clone().into(),
                     deploy_root: config.deploy_root.clone().into(),
+                    seccomp_enforce: config.seccomp_enforce,
                 };
                 let worker_pool = WorkerPool::new(pool_config)
                     .await

@@ -82,6 +82,14 @@ impl TestServer {
             isolate_max_concurrent: 50,
             isolate_timeout_secs: 30,
             isolate_heap_limit_mb: 128,
+            seccomp_enforce: false,
+            build_concurrency: 4,
+            build_cache_dir: "/tmp/rift-test-cache".into(),
+            build_clean_cache: false,
+            install_skip_on_cache_hit: true,
+            artifact_copy_mode: "auto".into(),
+            healthcheck_interval_ms: 200,
+            healthcheck_attempts: 50,
         });
         let runtime_manager = RuntimeManager::new();
         let log_broadcaster = LogBroadcaster::new();

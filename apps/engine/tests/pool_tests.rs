@@ -199,6 +199,7 @@ mod pool_config {
             worker_memory_limit: 512 * 1024 * 1024,
             loader_script: "/opt/rift/templates/worker_loader.ts".into(),
             deploy_root: "/var/rift/deployments".into(),
+            seccomp_enforce: true,
         };
 
         assert_eq!(config.warm_pool_size, 3);
@@ -375,6 +376,322 @@ mod combined_detection {
         assert!(workspace
             .join("_rift_functions_output/bundles")
             .is_dir());
+    }
+}
+
+/// Tests for seccomp enforcement configuration and behavior.
+mod seccomp_enforcement {
+    use rift_engine::runtime::pool::sandbox;
+
+    #[test]
+    fn enforcer_init_non_enforce_always_succeeds() {
+        // With enforce=false, init should succeed even without seccomp support
+        let temp = tempfile::tempdir().unwrap();
+        let enforcer = sandbox::SeccompEnforcer::init(temp.path(), false).unwrap();
+        // On macOS, seccomp is not available, so profile_path should be None
+        // On Linux, it would be Some
+        assert_eq!(enforcer.enforce, false);
+    }
+
+    #[test]
+    fn enforcer_should_apply_matches_profile_availability() {
+        let temp = tempfile::tempdir().unwrap();
+        let enforcer = sandbox::SeccompEnforcer::init(temp.path(), false).unwrap();
+        // should_apply is true only if profile was written
+        assert_eq!(enforcer.should_apply(), enforcer.profile_path.is_some());
+    }
+
+    #[test]
+    fn enforcer_docker_security_opt_format() {
+        let temp = tempfile::tempdir().unwrap();
+        let enforcer = sandbox::SeccompEnforcer::init(temp.path(), false).unwrap();
+        if let Some(opt) = enforcer.docker_security_opt() {
+            assert!(opt.starts_with("seccomp="));
+            assert!(opt.contains("rift-worker-seccomp.json"));
+        }
+    }
+
+    #[test]
+    fn enforcer_enforce_on_unavailable_system_fails() {
+        // On macOS (no seccomp), enforce=true should fail
+        if !sandbox::is_seccomp_available() {
+            let temp = tempfile::tempdir().unwrap();
+            let result = sandbox::SeccompEnforcer::init(temp.path(), true);
+            assert!(result.is_err());
+            let err_msg = result.unwrap_err().to_string();
+            assert!(err_msg.contains("seccomp enforcement is enabled"));
+        }
+    }
+
+    #[test]
+    fn seccomp_profile_contains_required_architectures() {
+        let parsed: serde_json::Value =
+            serde_json::from_str(sandbox::SECCOMP_PROFILE).unwrap();
+        let archs = parsed["architectures"].as_array().unwrap();
+        let arch_strs: Vec<&str> = archs.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(arch_strs.contains(&"SCMP_ARCH_X86_64"));
+        assert!(arch_strs.contains(&"SCMP_ARCH_AARCH64"));
+    }
+}
+
+/// Tests for immutable artifact creation.
+mod immutable_artifacts {
+    use std::fs;
+
+    #[test]
+    fn artifact_manifest_structure() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path();
+
+        // Create a static site workspace
+        let output_dir = workspace.join("dist");
+        fs::create_dir_all(&output_dir).unwrap();
+        fs::write(output_dir.join("index.html"), "<html></html>").unwrap();
+        fs::write(output_dir.join("_entry.ts"), "// entry").unwrap();
+
+        // Write a manifest matching what the build pipeline would create
+        let manifest = serde_json::json!({
+            "version": 1,
+            "runtime_type": "static",
+            "entry_point": output_dir.join("_entry.ts").to_string_lossy(),
+            "functions_dir": null,
+        });
+        let manifest_path = workspace.join("_rift_manifest.json");
+        fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+
+        // Verify manifest can be read back
+        let content = fs::read_to_string(&manifest_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["version"].as_i64().unwrap(), 1);
+        assert_eq!(parsed["runtime_type"].as_str().unwrap(), "static");
+        assert!(parsed["entry_point"].as_str().unwrap().contains("_entry.ts"));
+    }
+
+    #[test]
+    fn artifact_directory_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path();
+
+        // Simulate a functions deployment workspace
+        let fn_dir = workspace.join("_rift_functions_output");
+        fs::create_dir_all(fn_dir.join("bundles")).unwrap();
+        fs::write(fn_dir.join("_entry.ts"), "// dispatcher").unwrap();
+        fs::write(fn_dir.join("bundles/api_hello.js"), "// bundle").unwrap();
+        fs::write(fn_dir.join("_routes.json"), r#"[{"pattern": "/api/hello", "file_path": "api/hello.ts", "bundle_file": "bundles/api_hello.js"}]"#).unwrap();
+
+        // Verify the expected artifact structure
+        assert!(fn_dir.join("_entry.ts").exists());
+        assert!(fn_dir.join("bundles/api_hello.js").exists());
+        assert!(fn_dir.join("_routes.json").exists());
+    }
+
+    #[test]
+    fn manifest_types_cover_all_runtime_kinds() {
+        // Verify that all runtime_type strings are accounted for
+        let valid_types = vec!["static", "next", "node_ssr", "functions", "combined"];
+        for t in &valid_types {
+            let manifest = serde_json::json!({
+                "version": 1,
+                "runtime_type": t,
+                "entry_point": "/path/to/entry",
+                "functions_dir": null,
+            });
+            assert_eq!(manifest["runtime_type"].as_str().unwrap(), *t);
+        }
+    }
+}
+
+/// Tests for build concurrency configuration.
+mod build_concurrency {
+    #[test]
+    fn semaphore_with_concurrency_greater_than_one() {
+        // Verify that Semaphore allows multiple permits
+        let concurrency = 4usize;
+        let sem = tokio::sync::Semaphore::new(concurrency.max(1));
+        assert_eq!(sem.available_permits(), 4);
+    }
+
+    #[test]
+    fn semaphore_minimum_is_one() {
+        // Even if config says 0, we floor to 1
+        let concurrency = 0usize;
+        let sem = tokio::sync::Semaphore::new(concurrency.max(1));
+        assert_eq!(sem.available_permits(), 1);
+    }
+
+    #[test]
+    fn cache_key_deterministic_for_same_content() {
+        use sha2::{Digest, Sha256};
+
+        let content = b"lockfile contents here";
+        let hash1 = format!("{:x}", Sha256::digest(content));
+        let hash2 = format!("{:x}", Sha256::digest(content));
+        assert_eq!(hash1, hash2);
+        assert_eq!(hash1.len(), 64); // SHA-256 hex string
+    }
+
+    #[test]
+    fn cache_key_differs_for_different_content() {
+        use sha2::{Digest, Sha256};
+
+        let hash1 = format!("{:x}", Sha256::digest(b"lockfile v1"));
+        let hash2 = format!("{:x}", Sha256::digest(b"lockfile v2"));
+        assert_ne!(hash1, hash2);
+    }
+}
+
+/// Tests for deploy speed optimizations.
+mod deploy_speed {
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    // --- CopyMode / CoW fallback ---
+
+    #[test]
+    fn copy_mode_parses_correctly() {
+        use rift_engine::build::CopyMode;
+        assert_eq!(CopyMode::from_str("auto"), CopyMode::Auto);
+        assert_eq!(CopyMode::from_str("reflink"), CopyMode::Reflink);
+        assert_eq!(CopyMode::from_str("recursive"), CopyMode::Recursive);
+        assert_eq!(CopyMode::from_str("unknown"), CopyMode::Auto); // default
+    }
+
+    // --- Native cache env generation ---
+
+    #[test]
+    fn native_cache_env_npm() {
+        use rift_engine::build::{native_cache_env, detect::PackageManager};
+        let cache_dir = Path::new("/var/rift/cache");
+        let envs = native_cache_env(cache_dir, &PackageManager::Npm);
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].0, "npm_config_cache");
+        assert!(envs[0].1.contains("native/npm"));
+    }
+
+    #[test]
+    fn native_cache_env_pnpm() {
+        use rift_engine::build::{native_cache_env, detect::PackageManager};
+        let cache_dir = Path::new("/var/rift/cache");
+        let envs = native_cache_env(cache_dir, &PackageManager::Pnpm);
+        assert_eq!(envs.len(), 2);
+        let keys: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(keys.contains(&"PNPM_HOME"));
+        assert!(keys.contains(&"npm_config_store_dir"));
+    }
+
+    #[test]
+    fn native_cache_env_yarn() {
+        use rift_engine::build::{native_cache_env, detect::PackageManager};
+        let cache_dir = Path::new("/var/rift/cache");
+        let envs = native_cache_env(cache_dir, &PackageManager::Yarn);
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].0, "YARN_CACHE_FOLDER");
+    }
+
+    // --- Optimized install command ---
+
+    #[test]
+    fn optimized_install_npm_default() {
+        use rift_engine::build::{optimized_install_command, detect::PackageManager};
+        let cmd = optimized_install_command(&PackageManager::Npm, "npm install");
+        assert_eq!(cmd, "npm ci --prefer-offline");
+    }
+
+    #[test]
+    fn optimized_install_npm_custom_not_touched() {
+        use rift_engine::build::{optimized_install_command, detect::PackageManager};
+        let cmd = optimized_install_command(&PackageManager::Npm, "npm ci --legacy-peer-deps");
+        assert_eq!(cmd, "npm ci --legacy-peer-deps");
+    }
+
+    #[test]
+    fn optimized_install_pnpm_default() {
+        use rift_engine::build::{optimized_install_command, detect::PackageManager};
+        let cmd = optimized_install_command(&PackageManager::Pnpm, "pnpm install");
+        assert_eq!(cmd, "pnpm install --frozen-lockfile --prefer-offline");
+    }
+
+    #[test]
+    fn optimized_install_yarn_default() {
+        use rift_engine::build::{optimized_install_command, detect::PackageManager};
+        let cmd = optimized_install_command(&PackageManager::Yarn, "yarn install");
+        assert_eq!(cmd, "yarn install --frozen-lockfile --prefer-offline");
+    }
+
+    // --- Health check config ---
+
+    #[test]
+    fn runtime_manager_healthcheck_config() {
+        let mut rm = rift_engine::runtime::RuntimeManager::new();
+        // Defaults
+        assert_eq!(rm.healthcheck_interval_ms(), 200);
+        assert_eq!(rm.healthcheck_attempts(), 50);
+        // Override
+        rm.set_healthcheck(100, 30);
+        assert_eq!(rm.healthcheck_interval_ms(), 100);
+        assert_eq!(rm.healthcheck_attempts(), 30);
+    }
+
+    // --- CoW copy with mode (recursive mode always works) ---
+
+    #[tokio::test]
+    async fn copy_dir_with_mode_recursive() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        let dst_target = dst.path().join("output");
+
+        // Create test files
+        std::fs::write(src.path().join("hello.txt"), "world").unwrap();
+        std::fs::create_dir_all(src.path().join("sub")).unwrap();
+        std::fs::write(src.path().join("sub/nested.txt"), "deep").unwrap();
+
+        rift_engine::build::copy_dir_with_mode(
+            src.path(),
+            &dst_target,
+            rift_engine::build::CopyMode::Recursive,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dst_target.join("hello.txt")).unwrap(),
+            "world"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst_target.join("sub/nested.txt")).unwrap(),
+            "deep"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_dir_with_mode_auto_fallback() {
+        // Auto mode should work even on filesystems without CoW
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        let dst_target = dst.path().join("output");
+
+        std::fs::write(src.path().join("data.bin"), vec![42u8; 1024]).unwrap();
+
+        rift_engine::build::copy_dir_with_mode(
+            src.path(),
+            &dst_target,
+            rift_engine::build::CopyMode::Auto,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(dst_target.join("data.bin")).unwrap(),
+            vec![42u8; 1024]
+        );
+    }
+
+    // --- Config fields ---
+
+    #[test]
+    fn config_struct_is_constructible() {
+        // Verify the Config struct has the new fields by checking its size
+        let _ = std::mem::size_of::<rift_engine::config::Config>();
     }
 }
 

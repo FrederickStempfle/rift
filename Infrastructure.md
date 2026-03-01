@@ -70,6 +70,8 @@ Important generated artifacts inside a deployment:
 - `_rift_functions_output/_routes.json`: persisted function route manifest
 - `_rift_functions_output/_worker_<route>.ts`: per-route worker wrapper
 - `_rift_functions_output/bundles/*.js`: esbuild output for functions
+- `_rift_manifest.json`: artifact manifest recording runtime type, entry point, and functions directory
+- `_rift_artifact/`: immutable runtime artifact directory (read-only copy of runtime-required files)
 
 ## Deployment lifecycle
 
@@ -107,7 +109,7 @@ Environment variables are decrypted from Postgres and provided to install, build
 
 The engine runs the chosen install and build commands inside the deployment workspace and streams logs into both Postgres and WebSocket subscribers.
 
-Build concurrency is currently serialized with a semaphore of size `1`.
+Build concurrency is configurable via `RIFT_BUILD_CONCURRENCY` (default: 4). When all build slots are occupied, new builds are queued and the deployment status is set to `queued` with a log message indicating backpressure.
 
 ### 6. Runtime artifacts are generated
 
@@ -334,7 +336,7 @@ For each incoming function request:
 - route params are injected as `x-rift-param-<name>` headers
 - a semaphore limits concurrent V8 executions (`RIFT_ISOLATE_MAX_CONCURRENT`, default 50)
 - a fresh `deno_core::JsRuntime` is created inside a `spawn_blocking` task
-- a Web Standards JS shim provides `Request`, `Response`, `Headers`, `fetch()`, `console`, `Deno.env`, `process.env`, and `crypto.randomUUID()`
+- a Web Standards JS shim provides `Request`, `Response`, `Headers`, `fetch()`, `URL`, `URLSearchParams`, `AbortController`, `AbortSignal`, `Event`, `EventTarget`, `Blob`, `FormData`, `TextEncoder`, `TextDecoder`, `structuredClone`, `atob`/`btoa`, `queueMicrotask`, `crypto`, `console`, `setTimeout`, `Deno.env`, and `process.env`
 - the pre-loaded ESM bundle is imported via a `data:` URL
 - the handler is resolved and invoked with a `Request` object
 - the response is deserialized from V8 and returned directly to the proxy — no HTTP hop
@@ -478,7 +480,53 @@ The engine mounts the cgroup filesystem into the container and sets up the base 
 
 ### Seccomp
 
-There is a seccomp profile in the repo for worker processes, but it is not currently attached during worker spawn. At the moment it is defined and tested, not enforced in the runtime launch path.
+Seccomp enforcement is controlled by `RIFT_SECCOMP_ENFORCE` (default: `true`).
+
+Seccomp is enforced at two levels:
+
+1. **Docker-level**: The seccomp profile is written to disk and referenced in `docker-compose.yml` via `--security-opt seccomp=<profile>`. This applies to the entire engine container.
+
+2. **Process-level**: Each spawned worker process (Deno or Node) has seccomp BPF filtering applied directly via `prctl(PR_SET_NO_NEW_PRIVS)` + `seccomp(SECCOMP_SET_MODE_FILTER)` in a `pre_exec` hook. The seccomp JSON profile is parsed at command-build time, compiled into a BPF program, and injected into the child process before `exec`. This ensures seccomp is enforced even when running the engine directly on a host without Docker.
+
+Fail-safe behavior: if `RIFT_SECCOMP_ENFORCE=true` and seccomp is not available (e.g., macOS development), the engine refuses to start. Set `RIFT_SECCOMP_ENFORCE=false` for local development without seccomp support.
+
+### Linux namespace isolation
+
+Worker processes are spawned with PID and mount namespace isolation via `unshare(2)`:
+
+- **PID namespace**: Each worker sees itself as PID 1 and cannot see or signal other workers or the engine process.
+- **Mount namespace**: Each worker gets a private mount table. The mount propagation is set to `MS_PRIVATE` and `/proc` is remounted for the new PID namespace.
+
+Network namespaces are not isolated because workers need to bind ports and make outbound connections. User namespaces are not isolated because UID mapping requires additional configuration.
+
+Namespace isolation requires `CAP_SYS_ADMIN` (provided in `docker-compose.yml`). If `unshare` fails (e.g., unprivileged container or macOS development), the worker continues without namespace isolation — this is non-fatal and logged.
+
+### Host firewall and kernel hardening
+
+The engine container applies defense-in-depth network hardening via `entrypoint.sh`:
+
+**iptables rules:**
+- Default `INPUT` policy is `DROP`; only established connections, loopback, and service ports (3001, 8080, 8443) are accepted
+- Worker port range (10000-10100) is restricted to localhost only
+- Workers are blocked from connecting to the API port (3001)
+- Dropped packets are rate-limited logged
+
+**Kernel sysctl hardening (applied at container and entrypoint levels):**
+- IP forwarding disabled
+- ICMP redirects ignored (anti-MITM)
+- SYN cookies enabled (SYN flood protection)
+- Source-routed packets rejected
+- Reverse path filtering enabled (anti-spoofing)
+- Martian packet logging enabled
+- ICMP broadcast requests ignored (Smurf attack prevention)
+- TCP FIN timeout reduced for faster port reuse
+
+**Container-level hardening (docker-compose.yml):**
+- `no-new-privileges` security option
+- All capabilities dropped except `NET_BIND_SERVICE`, `SYS_ADMIN`, `NET_ADMIN`
+- Read-only root filesystem with tmpfs for writable areas
+- Process count limits via `nproc` ulimit
+- File descriptor limits via `nofile` ulimit
 
 ## Storage and state
 
@@ -542,36 +590,24 @@ The restore path detects combined entries from the filesystem and restores them 
 
 These describe the code as it exists today.
 
-### 1. Seccomp is defined but not applied at runtime
+### 1. V8 isolate pool shim does not provide streaming APIs
 
-The seccomp profile exists in `runtime/pool/sandbox.rs` and is tested. However, it is not attached during worker spawn.
+The Web Standards JS shim loaded into V8 isolates provides `Request`, `Response`, `Headers`, `fetch()`, `URL`, `URLSearchParams`, `AbortController`, `AbortSignal`, `Event`, `EventTarget`, `Blob`, `FormData`, `TextEncoder`, `TextDecoder`, `structuredClone`, `atob`/`btoa`, `queueMicrotask`, `crypto.randomUUID()`, `crypto.getRandomValues()`, `console`, `setTimeout`/`clearTimeout`, `Deno.env`, and `process.env`.
 
-To enable it:
+It does not provide `ReadableStream`, `WritableStream`, `TransformStream`, or `WebSocket`. Handlers needing streaming APIs should use Deno mode (`RIFT_FUNCTION_MODE=deno`).
 
-- Docker-level: `--security-opt seccomp=<path>` using the profile written by `write_seccomp_profile()`
-- Process-level: call `seccomp()` syscall before exec in the worker spawn path
-
-Until one of these is implemented, worker isolation relies on Deno permission flags, cgroup limits, and the restricted Worker permission set.
-
-### 2. V8 isolate pool shim is not spec-complete
-
-The Web Standards JS shim loaded into V8 isolates provides `Request`, `Response`, `Headers`, `fetch()`, `console`, `setTimeout`, `Deno.env`, `process.env`, and `crypto.randomUUID()`. It does not provide `ReadableStream`, `WritableStream`, `Blob`, `FormData`, `WebSocket`, `AbortController`, or complete `URL` behavior. Handlers needing these APIs should use Deno mode (`RIFT_FUNCTION_MODE=deno`).
-
-### 3. Function dispatcher "cold starts" count every invocation
+### 2. Function dispatcher "cold starts" count every invocation
 
 The global function dispatcher increments its `totalColdStarts` counter every time it creates a new `Worker`. That is consistent with "fresh isolate per request", but it does not distinguish between platform cold starts and normal invocation startup.
 
-### 4. Deployment workspaces are still mutable
+### 4. Immutable artifacts are best-effort read-only
 
-Deployments execute from the cloned workspace directory (`/var/rift/deployments/<id>/`), which contains source code, `node_modules`, build caches, and generated artifacts. This is not immutable.
+After build, the engine creates `_rift_artifact/` inside the deployment workspace containing only the runtime-required files (determined from `_rift_manifest.json`). This directory is set to read-only (mode `0555`/`0444` on Unix). Runtime processes execute from this immutable copy, not from the mutable build workspace.
 
-As a first step, each deployment now writes `_rift_manifest.json` after build, listing:
-
-- runtime type
-- entry point path
-- functions output directory (if any)
-
-This manifest establishes the boundary between "build workspace" and "runtime artifact". A future step can use it to copy only the listed files to an immutable read-only artifact directory and mount that for execution.
+Limitations:
+- The build workspace itself is still mutable (it contains source code, `node_modules`, etc.)
+- Read-only enforcement is filesystem-level permissions, not a separate mount namespace
+- For Node.js SSR frameworks (Nuxt, Astro, SvelteKit, Remix), the entire workspace is copied because these frameworks require node_modules and support files at runtime
 
 ## Function isolation model
 
@@ -609,4 +645,51 @@ The platform is:
 - scale-to-zero for user app runtimes
 - per-request isolated for function routes via in-process V8 isolates (default) or Deno Workers (fallback)
 - unified runtime control: build, proxy, scaler, and restore all use `RuntimeBackend`
-- moving toward immutable artifacts (manifest written, execution not yet decoupled)
+- immutable runtime artifacts (runtime executes from read-only `_rift_artifact/` directory)
+- seccomp-enforced worker processes (Docker-level + process-level BPF, configurable via `RIFT_SECCOMP_ENFORCE`)
+- PID and mount namespace isolation for worker processes (Linux, requires `CAP_SYS_ADMIN`)
+- host firewall (iptables) and kernel hardening (sysctl) applied at container startup
+- configurable build concurrency with backpressure (`RIFT_BUILD_CONCURRENCY`, default 4)
+- dependency caching for faster rebuilds (`RIFT_BUILD_CACHE_DIR`)
+
+## Operational Notes
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `RIFT_SECCOMP_ENFORCE` | `true` | Enforce seccomp BPF on worker processes. Set `false` for dev without seccomp. |
+| `RIFT_BUILD_CONCURRENCY` | `4` | Max concurrent builds. Set `1` for serial builds. |
+| `RIFT_BUILD_CACHE_DIR` | `/var/rift/cache` | Directory for dependency caching. Empty string disables caching. |
+| `RIFT_RUNTIME_MODE` | `process` | Runtime backend: `process` (legacy) or `pool` (pre-warmed workers). |
+| `RIFT_FUNCTION_MODE` | `isolate` | Function execution: `isolate` (in-process V8) or `deno` (subprocess). |
+| `RIFT_POOL_WARM_SIZE` | `3` | Pre-warmed Deno workers to maintain (pool mode). |
+| `RIFT_POOL_MAX_ACTIVE` | `50` | Max specialized workers (pool mode). |
+| `RIFT_ISOLATE_MAX_CONCURRENT` | `50` | Max concurrent V8 isolate executions. |
+| `RIFT_ISOLATE_TIMEOUT_SECS` | `30` | Per-isolate execution timeout. |
+| `RIFT_ISOLATE_HEAP_LIMIT_MB` | `128` | Per-isolate V8 heap limit. |
+| `RIFT_BUILD_CLEAN_CACHE` | `false` | Run `yarn cache clean` / `npm cache clean` after install. Destroys warm-cache benefit; only enable when tmpfs space is tight. |
+| `RIFT_INSTALL_SKIP_ON_CACHE_HIT` | `true` | Skip `npm install` when lockfile hash matches cached `node_modules`. |
+| `RIFT_ARTIFACT_COPY_MODE` | `auto` | Artifact copy strategy: `auto` (CoW/reflink with fallback), `reflink` (fail if unsupported), `recursive` (traditional copy). |
+| `RIFT_HEALTHCHECK_INTERVAL_MS` | `200` | Milliseconds between TCP health probes during runtime startup. |
+| `RIFT_HEALTHCHECK_ATTEMPTS` | `50` | Maximum health-check attempts before declaring a runtime unhealthy. |
+
+### Operational tuning
+
+**Deploy speed**: The build pipeline now tracks per-stage timing (clone, detect, install, build, artifact, runtime_start, total) and logs it as a structured message in deploy logs and `tracing::info`. Typical bottlenecks:
+
+1. **Install**: On first deploy, `npm install` downloads all packages. Subsequent deploys reuse the native package manager cache (`npm_config_cache`, `PNPM_HOME`, `YARN_CACHE_FOLDER`) stored under `RIFT_BUILD_CACHE_DIR/native/`. When `RIFT_INSTALL_SKIP_ON_CACHE_HIT=true` (default) and the lockfile hash matches a previous build, install is skipped entirely.
+
+2. **Artifact copy**: For large Node SSR projects, the artifact step copies only runtime-essential files (output dir, `node_modules`, `package.json`, `public/`) instead of the entire workspace. On CoW filesystems (btrfs, xfs, APFS), `RIFT_ARTIFACT_COPY_MODE=auto` uses `FICLONE` (Linux) or `clonefile` (macOS) for near-instant file copies.
+
+3. **Health check**: The default 200ms × 50 attempts = 10s max wait replaced the old 500ms × 40 = 20s. For fast-starting apps (static sites), latency drops to ~200ms. Tune `RIFT_HEALTHCHECK_INTERVAL_MS` lower (e.g. 50) for even faster feedback.
+
+4. **Cache cleaning**: Disabled by default (`RIFT_BUILD_CLEAN_CACHE=false`). The previous behavior wiped the package manager cache after every install, which defeated the purpose of caching for subsequent builds.
+
+### Failure modes
+
+- **Seccomp unavailable + enforcement enabled**: Engine refuses to start. Error message directs operator to set `RIFT_SECCOMP_ENFORCE=false`.
+- **Build concurrency exhausted**: New builds are queued (status `queued`) and a log entry is emitted. No builds are rejected; they wait for a slot.
+- **Dependency cache corruption**: Cache is best-effort. If restore fails, the build falls back to a clean install. Old cache entries are pruned (max 10 kept).
+- **Immutable artifact copy failure**: If artifact creation fails, the runtime falls back to executing from the mutable workspace with a warning logged. Build does not fail.
+- **Worker seccomp profile write failure + enforcement enabled**: Engine refuses to start. Operator must fix permissions on the deploy root directory.

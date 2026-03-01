@@ -126,6 +126,49 @@ pub struct Config {
     /// Per-isolate V8 heap size limit in MB.
     #[arg(long, env = "RIFT_ISOLATE_HEAP_LIMIT_MB", default_value_t = 128)]
     pub isolate_heap_limit_mb: usize,
+
+    // --- Security Configuration ---
+
+    /// Enforce seccomp BPF profile on worker processes.
+    /// Default: true (production). Set to false for local development without seccomp support.
+    #[arg(long, env = "RIFT_SECCOMP_ENFORCE", default_value_t = true)]
+    pub seccomp_enforce: bool,
+
+    // --- Build Configuration ---
+
+    /// Maximum number of concurrent builds. Set to 1 for serial builds.
+    #[arg(long, env = "RIFT_BUILD_CONCURRENCY", default_value_t = 4)]
+    pub build_concurrency: usize,
+
+    /// Directory for caching build dependencies (node_modules). Empty string disables caching.
+    #[arg(long, env = "RIFT_BUILD_CACHE_DIR", default_value = "/var/rift/cache")]
+    pub build_cache_dir: String,
+
+    /// Run package-manager cache clean after install (destroys warm-cache benefit).
+    /// Default: false — leave native caches intact for faster subsequent installs.
+    #[arg(long, env = "RIFT_BUILD_CLEAN_CACHE", default_value_t = false)]
+    pub build_clean_cache: bool,
+
+    /// Skip `npm install` / `pnpm install` when lockfile hash matches the cached
+    /// node_modules. Default: true.
+    #[arg(long, env = "RIFT_INSTALL_SKIP_ON_CACHE_HIT", default_value_t = true)]
+    pub install_skip_on_cache_hit: bool,
+
+    /// Artifact copy strategy: "auto" tries CoW/reflink first then falls back to
+    /// recursive copy; "reflink" fails if CoW is unsupported; "recursive" always
+    /// uses the traditional recursive copy.
+    #[arg(long, env = "RIFT_ARTIFACT_COPY_MODE", default_value = "auto")]
+    pub artifact_copy_mode: String,
+
+    // --- Health Check Configuration ---
+
+    /// Milliseconds between health-check TCP probes during runtime startup.
+    #[arg(long, env = "RIFT_HEALTHCHECK_INTERVAL_MS", default_value_t = 200)]
+    pub healthcheck_interval_ms: u64,
+
+    /// Maximum number of health-check attempts before declaring a runtime unhealthy.
+    #[arg(long, env = "RIFT_HEALTHCHECK_ATTEMPTS", default_value_t = 50)]
+    pub healthcheck_attempts: usize,
 }
 
 impl Config {
