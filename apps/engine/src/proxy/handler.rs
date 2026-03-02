@@ -578,7 +578,7 @@ async fn handle_challenge_verify(
         Err(status) => return error_response(status),
     };
     let form: std::collections::HashMap<String, String> =
-        url::form_urlencoded::parse(&body_bytes).into_owned().collect();
+        serde_urlencoded::from_bytes(&body_bytes).unwrap_or_default();
     let return_to = sanitize_return_to(form.get("return_to").map(|s| s.as_str()).unwrap_or("/"));
     let ticket = form.get("ticket").map(|s| s.as_str()).unwrap_or_default();
 
