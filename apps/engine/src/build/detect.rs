@@ -84,7 +84,26 @@ struct WorkspaceApp {
 }
 
 pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<BuildPlan, AppError> {
+    let package_manager = if workspace_dir.join("pnpm-lock.yaml").exists() {
+        PackageManager::Pnpm
+    } else if workspace_dir.join("yarn.lock").exists() {
+        PackageManager::Yarn
+    } else if workspace_dir.join("bun.lock").exists() || workspace_dir.join("bun.lockb").exists() {
+        PackageManager::Bun
+    } else {
+        PackageManager::Npm
+    };
+
     let package_json_path = workspace_dir.join("package.json");
+    if !package_json_path.exists() {
+        return detect_build_plan_without_package_json(
+            project,
+            workspace_dir,
+            package_manager,
+            &package_json_path,
+        );
+    }
+
     let package_json = fs::read_to_string(&package_json_path).map_err(|error| {
         AppError::Internal(format!(
             "failed to read package.json from {}: {error}",
@@ -109,16 +128,6 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
         .flatten()
         .map(|(key, _)| key.as_str())
         .collect::<Vec<_>>();
-
-    let package_manager = if workspace_dir.join("pnpm-lock.yaml").exists() {
-        PackageManager::Pnpm
-    } else if workspace_dir.join("yarn.lock").exists() {
-        PackageManager::Yarn
-    } else if workspace_dir.join("bun.lock").exists() || workspace_dir.join("bun.lockb").exists() {
-        PackageManager::Bun
-    } else {
-        PackageManager::Npm
-    };
 
     let install_command =
         project
@@ -368,6 +377,58 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
     })
 }
 
+fn detect_build_plan_without_package_json(
+    project: &Project,
+    workspace_dir: &Path,
+    package_manager: PackageManager,
+    package_json_path: &Path,
+) -> Result<BuildPlan, AppError> {
+    // Support static-only repositories (no package manager metadata required).
+    if project.framework == "static"
+        || project.output_dir.is_some()
+        || looks_like_static_site_source(workspace_dir)
+    {
+        let install_command = project
+            .install_command
+            .clone()
+            .unwrap_or_else(|| "true".to_owned());
+        let build_command = project
+            .build_command
+            .clone()
+            .unwrap_or_else(|| "true".to_owned());
+        return Ok(BuildPlan {
+            framework: "static".to_owned(),
+            package_manager,
+            install_command,
+            build_command,
+            output: BuildOutput::Static { dir: String::new() },
+        });
+    }
+
+    if crate::build::functions::has_functions(workspace_dir) {
+        let install_command = project
+            .install_command
+            .clone()
+            .unwrap_or_else(|| "true".to_owned());
+        let build_command = project
+            .build_command
+            .clone()
+            .unwrap_or_else(|| "true".to_owned());
+        return Ok(BuildPlan {
+            framework: "functions".to_owned(),
+            package_manager,
+            install_command,
+            build_command,
+            output: BuildOutput::Functions,
+        });
+    }
+
+    Err(AppError::Internal(format!(
+        "failed to read package.json from {}: No such file or directory (os error 2)",
+        package_json_path.display()
+    )))
+}
+
 /// Detect the build output directory. Must be called AFTER the build completes
 /// so that output directories (dist/, build/, out/) actually exist on disk.
 pub fn detect_output_dir(project: &Project, workspace_dir: &Path) -> String {
@@ -456,6 +517,32 @@ fn list_subdirs(dir: &Path) -> Vec<std::path::PathBuf> {
         })
         .map(|e| e.path())
         .collect()
+}
+
+fn looks_like_static_site_source(workspace_dir: &Path) -> bool {
+    let common_paths = [
+        "index.html",
+        "public/index.html",
+        "dist/index.html",
+        "build/index.html",
+        "out/index.html",
+    ];
+    if common_paths
+        .iter()
+        .any(|path| workspace_dir.join(path).exists())
+    {
+        return true;
+    }
+
+    for container in ["apps", "packages", "sites"] {
+        for pkg_dir in list_subdirs(&workspace_dir.join(container)) {
+            if pkg_dir.join("index.html").exists() || pkg_dir.join("public/index.html").exists() {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Check if any unsupported platform-specific adapter is present in dependencies.
@@ -588,4 +675,71 @@ fn find_deployable_app(workspace_dir: &Path) -> Option<WorkspaceApp> {
     });
 
     Some(candidates.into_iter().next().unwrap().0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use tempfile::tempdir;
+    use uuid::Uuid;
+
+    fn project_with(framework: &str) -> Project {
+        Project {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            name: "test".to_owned(),
+            repo_url: "https://github.com/org/repo".to_owned(),
+            branch: "main".to_owned(),
+            framework: framework.to_owned(),
+            build_command: None,
+            output_dir: None,
+            install_command: None,
+            subdomain: None,
+            webhook_id: None,
+            webhook_secret: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn detects_static_repo_without_package_json() {
+        let temp = tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("index.html"), "<html>ok</html>").expect("index write");
+        let project = project_with("static");
+
+        let plan = detect_build_plan(&project, temp.path()).expect("build plan");
+
+        assert_eq!(plan.framework, "static");
+        assert_eq!(plan.install_command, "true");
+        assert_eq!(plan.build_command, "true");
+        assert!(matches!(plan.output, BuildOutput::Static { .. }));
+    }
+
+    #[test]
+    fn preserves_custom_static_commands_without_package_json() {
+        let temp = tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join("public")).expect("public dir");
+        std::fs::write(temp.path().join("public/index.html"), "ok").expect("index write");
+        let mut project = project_with("static");
+        project.install_command = Some("echo install".to_owned());
+        project.build_command = Some("echo build".to_owned());
+
+        let plan = detect_build_plan(&project, temp.path()).expect("build plan");
+
+        assert_eq!(plan.install_command, "echo install");
+        assert_eq!(plan.build_command, "echo build");
+    }
+
+    #[test]
+    fn missing_package_json_without_static_hints_fails() {
+        let temp = tempdir().expect("tempdir");
+        let project = project_with("unknown");
+
+        let err = detect_build_plan(&project, temp.path()).expect_err("should fail");
+        assert!(err
+            .to_string()
+            .contains("failed to read package.json from"));
+    }
 }

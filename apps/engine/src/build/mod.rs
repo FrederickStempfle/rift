@@ -372,11 +372,14 @@ impl BuildManager {
             .await?;
         } else {
             // Use optimized install command (frozen lockfile + offline-first)
-            let install_cmd = if cache_enabled {
-                optimized_install_command(&plan.package_manager, &plan.install_command)
-            } else {
-                plan.install_command.clone()
-            };
+            // only for auto-detected commands when a lockfile exists.
+            let install_cmd = select_install_command(
+                &plan.package_manager,
+                &plan.install_command,
+                cache_enabled,
+                install_is_custom,
+                cache_key.is_some(),
+            );
 
             let install_result = if install_is_custom {
                 if let Err(error) =
@@ -1892,6 +1895,20 @@ pub fn optimized_install_command(pm: &PackageManager, original: &str) -> String 
     }
 }
 
+fn select_install_command(
+    pm: &PackageManager,
+    original: &str,
+    cache_enabled: bool,
+    install_is_custom: bool,
+    has_lockfile: bool,
+) -> String {
+    if cache_enabled && !install_is_custom && has_lockfile {
+        optimized_install_command(pm, original)
+    } else {
+        original.to_owned()
+    }
+}
+
 /// Restore cached node_modules into the workspace via symlink to the cache.
 /// Returns Ok(true) if cache was restored, Ok(false) if no cache exists.
 async fn restore_dependency_cache(
@@ -1911,6 +1928,47 @@ async fn restore_dependency_cache(
 
     copy_dir_recursive(&cached_dir, &target).await?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_command_respects_custom_override() {
+        let cmd = select_install_command(
+            &PackageManager::Npm,
+            "npm install",
+            true,
+            true,
+            true,
+        );
+        assert_eq!(cmd, "npm install");
+    }
+
+    #[test]
+    fn install_command_requires_lockfile_for_optimization() {
+        let cmd = select_install_command(
+            &PackageManager::Npm,
+            "npm install",
+            true,
+            false,
+            false,
+        );
+        assert_eq!(cmd, "npm install");
+    }
+
+    #[test]
+    fn install_command_optimizes_default_npm_with_lockfile() {
+        let cmd = select_install_command(
+            &PackageManager::Npm,
+            "npm install",
+            true,
+            false,
+            true,
+        );
+        assert_eq!(cmd, "npm ci --prefer-offline");
+    }
 }
 
 /// Save node_modules to the cache directory, keyed by lockfile hash.
