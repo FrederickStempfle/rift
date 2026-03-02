@@ -20,8 +20,10 @@ use crate::{
     db::{domains, projects},
     error::AppError,
     proxy::{
-        access_bot_guard::MitigationAction, analytics_collector::RequestEvent,
-        client_ip::extract_client_ip, routing_cache::CacheLookup,
+        access_bot_guard::MitigationAction,
+        analytics_collector::RequestEvent,
+        client_ip::extract_client_ip,
+        routing_cache::CacheLookup,
         waf::{WafAction, WafRequestContext},
     },
     services::abuse::{AbuseDecision, AbuseLimit},
@@ -40,6 +42,7 @@ const PROXY_TOKEN_CHALLENGE: u64 = 650;
 const PROXY_PROJECT_LIMIT: u64 = 700;
 const PROXY_PROJECT_CHALLENGE: u64 = 500;
 const CHALLENGE_VERIFY_PATH: &str = "/__rift/challenge/verify";
+const ROBOTS_TXT_PATH: &str = "/robots.txt";
 
 const HOP_BY_HOP: &[&str] = &[
     "connection",
@@ -55,6 +58,13 @@ const HOP_BY_HOP: &[&str] = &[
 enum RouteError {
     Status(StatusCode, Option<Uuid>),
     Response(Response<Full<Bytes>>, Option<Uuid>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HoneypotMode {
+    Challenge,
+    Block,
+    Ban,
 }
 
 pub async fn handle_request(
@@ -150,6 +160,73 @@ async fn route_and_forward(
         .abuse_guard
         .should_bypass_proxy_limits(client_ip, req.headers())
         .await;
+    if state.config.honeypot_robots_enabled {
+        let honeypot_paths = state.config.parsed_honeypot_paths();
+        if req.uri().path() == ROBOTS_TXT_PATH {
+            return Ok((honeypot_robots_response(&honeypot_paths), None, false));
+        }
+
+        if !trusted && is_honeypot_probe_path(req.uri().path(), &honeypot_paths) {
+            let reason = format!("honeypot path accessed: {}", req.uri().path());
+            match parse_honeypot_mode(&state.config.honeypot_mode) {
+                HoneypotMode::Challenge => {
+                    return Err(RouteError::Response(
+                        proxy_challenge_response(
+                            state,
+                            client_ip,
+                            req.headers(),
+                            60,
+                            &reason,
+                            &return_to,
+                        ),
+                        None,
+                    ));
+                }
+                HoneypotMode::Block => {
+                    return Err(RouteError::Response(
+                        proxy_abuse_response(
+                            StatusCode::FORBIDDEN,
+                            "honeypot_block",
+                            state.config.honeypot_ban_window_secs.max(1),
+                            &reason,
+                        ),
+                        None,
+                    ));
+                }
+                HoneypotMode::Ban => {
+                    if let Some(response) = enforce_proxy_limit(
+                        state,
+                        AbuseLimit::per_ip(
+                            "proxy.honeypot_ip",
+                            client_ip,
+                            "honeypot",
+                            0,
+                            Duration::from_secs(state.config.honeypot_ban_window_secs.max(60)),
+                            None,
+                        ),
+                        client_ip,
+                        req.headers(),
+                        &return_to,
+                    )
+                    .await
+                    .map_err(|e| RouteError::Status(map_app_error(e), None))?
+                    {
+                        return Err(RouteError::Response(response, None));
+                    }
+                    return Err(RouteError::Response(
+                        proxy_abuse_response(
+                            StatusCode::FORBIDDEN,
+                            "honeypot_ban",
+                            state.config.honeypot_ban_window_secs.max(1),
+                            &reason,
+                        ),
+                        None,
+                    ));
+                }
+            }
+        }
+    }
+
     if !trusted {
         if let Some(mitigation) = state
             .access_bot_guard
@@ -732,6 +809,45 @@ fn proxy_overload_response() -> Response<Full<Bytes>> {
         .unwrap_or_else(|_| error_response(StatusCode::SERVICE_UNAVAILABLE))
 }
 
+fn honeypot_robots_response(paths: &[String]) -> Response<Full<Bytes>> {
+    let mut body = String::from("User-agent: *\n");
+    if paths.is_empty() {
+        body.push_str("Disallow: /__trap_disabled__\n");
+    } else {
+        for path in paths {
+            body.push_str("Disallow: ");
+            body.push_str(path);
+            body.push('\n');
+        }
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/plain; charset=utf-8")
+        .header("cache-control", "public, max-age=300")
+        .body(Full::new(Bytes::from(body)))
+        .unwrap_or_else(|_| error_response(StatusCode::OK))
+}
+
+fn is_honeypot_probe_path(path: &str, honeypot_paths: &[String]) -> bool {
+    let path = path.trim().to_ascii_lowercase();
+    honeypot_paths.iter().any(|trap| {
+        if trap.ends_with('/') {
+            path.starts_with(trap)
+        } else {
+            path == *trap
+        }
+    })
+}
+
+fn parse_honeypot_mode(raw: &str) -> HoneypotMode {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "challenge" => HoneypotMode::Challenge,
+        "block" => HoneypotMode::Block,
+        _ => HoneypotMode::Ban,
+    }
+}
+
 fn sanitize_return_to(input: &str) -> String {
     if input.starts_with('/')
         && !input.starts_with("//")
@@ -1009,7 +1125,10 @@ async fn evaluate_waf(
                 60,
                 &format!(
                     "WAF: {}",
-                    decision.matched_rule_name.as_deref().unwrap_or("rule match")
+                    decision
+                        .matched_rule_name
+                        .as_deref()
+                        .unwrap_or("rule match")
                 ),
                 return_to,
             ))
@@ -1236,5 +1355,21 @@ mod tests {
     fn sanitize_return_to_rejects_external_targets() {
         assert_eq!(sanitize_return_to("https://evil.tld"), "/");
         assert_eq!(sanitize_return_to("//evil.tld"), "/");
+    }
+
+    #[test]
+    fn honeypot_probe_matches_exact_and_prefix_paths() {
+        let paths = vec!["/.env".to_owned(), "/cgi-bin/".to_owned()];
+        assert!(is_honeypot_probe_path("/.env", &paths));
+        assert!(is_honeypot_probe_path("/cgi-bin/test.sh", &paths));
+        assert!(!is_honeypot_probe_path("/pricing", &paths));
+    }
+
+    #[test]
+    fn honeypot_mode_defaults_to_ban() {
+        assert_eq!(parse_honeypot_mode("challenge"), HoneypotMode::Challenge);
+        assert_eq!(parse_honeypot_mode("block"), HoneypotMode::Block);
+        assert_eq!(parse_honeypot_mode("ban"), HoneypotMode::Ban);
+        assert_eq!(parse_honeypot_mode("unknown"), HoneypotMode::Ban);
     }
 }

@@ -395,7 +395,8 @@ impl WafCache {
         scope: ScopeKey,
     ) -> Result<Arc<Vec<CompiledRule>>, AppError> {
         let db_rules = crate::db::waf::list_enabled_rules(pool, scope).await?;
-        let compiled: Vec<CompiledRule> = db_rules.into_iter().filter_map(compile_db_rule).collect();
+        let compiled: Vec<CompiledRule> =
+            db_rules.into_iter().filter_map(compile_db_rule).collect();
         let rules = Arc::new(compiled);
         let entry = WafCacheEntry {
             rules: Arc::clone(&rules),
@@ -418,10 +419,7 @@ impl WafCache {
 
 /// Batched WAF event writer. Collects events from the channel and flushes
 /// to the database in small batches, avoiding per-request spawn overhead.
-async fn waf_event_flush_loop(
-    mut rx: mpsc::Receiver<crate::db::waf::NewWafEvent>,
-    pool: PgPool,
-) {
+async fn waf_event_flush_loop(mut rx: mpsc::Receiver<crate::db::waf::NewWafEvent>, pool: PgPool) {
     let mut buffer: Vec<crate::db::waf::NewWafEvent> = Vec::with_capacity(64);
     let mut interval = tokio::time::interval(Duration::from_secs(2));
 
@@ -735,58 +733,126 @@ mod tests {
             name: name.into(),
             action,
             priority,
-            conditions: vec![
-                CompiledCondition::compile(field, op, value, None).unwrap(),
-            ],
+            conditions: vec![CompiledCondition::compile(field, op, value, None).unwrap()],
             is_managed: false,
         }
     }
 
     #[test]
     fn exact_match_works() {
-        let rule = make_rule("test", WafMatchField::Path, WafMatchOp::Exact, "/api/data", WafAction::Block, 1);
+        let rule = make_rule(
+            "test",
+            WafMatchField::Path,
+            WafMatchOp::Exact,
+            "/api/data",
+            WafAction::Block,
+            1,
+        );
         assert!(rule.matches(&test_ctx()));
 
-        let rule2 = make_rule("test", WafMatchField::Path, WafMatchOp::Exact, "/other", WafAction::Block, 1);
+        let rule2 = make_rule(
+            "test",
+            WafMatchField::Path,
+            WafMatchOp::Exact,
+            "/other",
+            WafAction::Block,
+            1,
+        );
         assert!(!rule2.matches(&test_ctx()));
     }
 
     #[test]
     fn prefix_match_works() {
-        let rule = make_rule("test", WafMatchField::Path, WafMatchOp::Prefix, "/api/", WafAction::Block, 1);
+        let rule = make_rule(
+            "test",
+            WafMatchField::Path,
+            WafMatchOp::Prefix,
+            "/api/",
+            WafAction::Block,
+            1,
+        );
         assert!(rule.matches(&test_ctx()));
 
-        let rule2 = make_rule("test", WafMatchField::Path, WafMatchOp::Prefix, "/other/", WafAction::Block, 1);
+        let rule2 = make_rule(
+            "test",
+            WafMatchField::Path,
+            WafMatchOp::Prefix,
+            "/other/",
+            WafAction::Block,
+            1,
+        );
         assert!(!rule2.matches(&test_ctx()));
     }
 
     #[test]
     fn contains_match_works() {
-        let rule = make_rule("test", WafMatchField::UserAgent, WafMatchOp::Contains, "Mozilla", WafAction::Block, 1);
+        let rule = make_rule(
+            "test",
+            WafMatchField::UserAgent,
+            WafMatchOp::Contains,
+            "Mozilla",
+            WafAction::Block,
+            1,
+        );
         assert!(rule.matches(&test_ctx()));
     }
 
     #[test]
     fn regex_match_works() {
-        let rule = make_rule("test", WafMatchField::Path, WafMatchOp::Regex, r"^/api/.*$", WafAction::Block, 1);
+        let rule = make_rule(
+            "test",
+            WafMatchField::Path,
+            WafMatchOp::Regex,
+            r"^/api/.*$",
+            WafAction::Block,
+            1,
+        );
         assert!(rule.matches(&test_ctx()));
 
-        let rule2 = make_rule("test", WafMatchField::Path, WafMatchOp::Regex, r"^/admin/.*$", WafAction::Block, 1);
+        let rule2 = make_rule(
+            "test",
+            WafMatchField::Path,
+            WafMatchOp::Regex,
+            r"^/admin/.*$",
+            WafAction::Block,
+            1,
+        );
         assert!(!rule2.matches(&test_ctx()));
     }
 
     #[test]
     fn cidr_match_works() {
-        let rule = make_rule("test", WafMatchField::Ip, WafMatchOp::Cidr, "203.0.113.0/24", WafAction::Block, 1);
+        let rule = make_rule(
+            "test",
+            WafMatchField::Ip,
+            WafMatchOp::Cidr,
+            "203.0.113.0/24",
+            WafAction::Block,
+            1,
+        );
         assert!(rule.matches(&test_ctx()));
 
-        let rule2 = make_rule("test", WafMatchField::Ip, WafMatchOp::Cidr, "10.0.0.0/8", WafAction::Block, 1);
+        let rule2 = make_rule(
+            "test",
+            WafMatchField::Ip,
+            WafMatchOp::Cidr,
+            "10.0.0.0/8",
+            WafAction::Block,
+            1,
+        );
         assert!(!rule2.matches(&test_ctx()));
     }
 
     #[test]
     fn single_ip_cidr_match() {
-        let rule = make_rule("test", WafMatchField::Ip, WafMatchOp::Cidr, "203.0.113.42", WafAction::Block, 1);
+        let rule = make_rule(
+            "test",
+            WafMatchField::Ip,
+            WafMatchOp::Cidr,
+            "203.0.113.42",
+            WafAction::Block,
+            1,
+        );
         assert!(rule.matches(&test_ctx()));
     }
 
@@ -813,9 +879,30 @@ mod tests {
     #[test]
     fn first_terminal_wins() {
         let rules = vec![
-            make_rule("log1", WafMatchField::Path, WafMatchOp::Prefix, "/api/", WafAction::Log, 1),
-            make_rule("challenge1", WafMatchField::Path, WafMatchOp::Prefix, "/api/", WafAction::Challenge, 2),
-            make_rule("block1", WafMatchField::Path, WafMatchOp::Prefix, "/api/", WafAction::Block, 3),
+            make_rule(
+                "log1",
+                WafMatchField::Path,
+                WafMatchOp::Prefix,
+                "/api/",
+                WafAction::Log,
+                1,
+            ),
+            make_rule(
+                "challenge1",
+                WafMatchField::Path,
+                WafMatchOp::Prefix,
+                "/api/",
+                WafAction::Challenge,
+                2,
+            ),
+            make_rule(
+                "block1",
+                WafMatchField::Path,
+                WafMatchOp::Prefix,
+                "/api/",
+                WafAction::Block,
+                3,
+            ),
         ];
         let decision = evaluate_rules(&rules, &test_ctx());
         assert_eq!(decision.action, WafAction::Challenge);
@@ -824,18 +911,28 @@ mod tests {
 
     #[test]
     fn no_match_allows() {
-        let rules = vec![
-            make_rule("block1", WafMatchField::Path, WafMatchOp::Exact, "/admin", WafAction::Block, 1),
-        ];
+        let rules = vec![make_rule(
+            "block1",
+            WafMatchField::Path,
+            WafMatchOp::Exact,
+            "/admin",
+            WafAction::Block,
+            1,
+        )];
         let decision = evaluate_rules(&rules, &test_ctx());
         assert_eq!(decision.action, WafAction::Allow);
     }
 
     #[test]
     fn log_only_allows() {
-        let rules = vec![
-            make_rule("log1", WafMatchField::Path, WafMatchOp::Prefix, "/api/", WafAction::Log, 1),
-        ];
+        let rules = vec![make_rule(
+            "log1",
+            WafMatchField::Path,
+            WafMatchOp::Prefix,
+            "/api/",
+            WafAction::Log,
+            1,
+        )];
         let decision = evaluate_rules(&rules, &test_ctx());
         assert_eq!(decision.action, WafAction::Allow);
         assert_eq!(decision.logged_rules.len(), 1);
@@ -844,8 +941,22 @@ mod tests {
     #[test]
     fn allow_rule_terminates() {
         let rules = vec![
-            make_rule("allow1", WafMatchField::Path, WafMatchOp::Prefix, "/api/", WafAction::Allow, 1),
-            make_rule("block1", WafMatchField::Path, WafMatchOp::Prefix, "/api/", WafAction::Block, 2),
+            make_rule(
+                "allow1",
+                WafMatchField::Path,
+                WafMatchOp::Prefix,
+                "/api/",
+                WafAction::Allow,
+                1,
+            ),
+            make_rule(
+                "block1",
+                WafMatchField::Path,
+                WafMatchOp::Prefix,
+                "/api/",
+                WafAction::Block,
+                2,
+            ),
         ];
         let decision = evaluate_rules(&rules, &test_ctx());
         assert_eq!(decision.action, WafAction::Allow);
@@ -860,12 +971,8 @@ mod tests {
 
     #[test]
     fn invalid_regex_returns_none() {
-        let result = CompiledCondition::compile(
-            WafMatchField::Path,
-            WafMatchOp::Regex,
-            "[invalid",
-            None,
-        );
+        let result =
+            CompiledCondition::compile(WafMatchField::Path, WafMatchOp::Regex, "[invalid", None);
         assert!(result.is_none());
     }
 
@@ -922,7 +1029,12 @@ mod tests {
             })
             .collect();
 
-        let ctx = test_ctx_with(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), "/wp-login.php", "", "");
+        let ctx = test_ctx_with(
+            IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
+            "/wp-login.php",
+            "",
+            "",
+        );
         let decision = evaluate_rules(&rules, &ctx);
         assert_eq!(decision.action, WafAction::Block);
     }

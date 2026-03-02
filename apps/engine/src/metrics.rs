@@ -260,12 +260,8 @@ mod tests {
             .with_label_values(&["proxy.global_ip", "allow"])
             .inc();
         ABUSE_BAN_TIER.with_label_values(&["5m"]).inc();
-        WAF_DECISION
-            .with_label_values(&["global", "allow"])
-            .inc();
-        WAF_RULE_MATCH
-            .with_label_values(&["test-rule"])
-            .inc();
+        WAF_DECISION.with_label_values(&["global", "allow"]).inc();
+        WAF_RULE_MATCH.with_label_values(&["test-rule"]).inc();
         WAF_EVAL_DURATION
             .with_label_values(&["global"])
             .observe(0.001);

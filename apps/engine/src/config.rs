@@ -1,6 +1,7 @@
 use chrono::Duration;
 use clap::Parser;
 use ipnet::IpNet;
+use std::collections::HashSet;
 use std::net::IpAddr;
 
 #[derive(Debug, Clone, Parser)]
@@ -386,6 +387,26 @@ pub struct Config {
     #[arg(long, env = "RIFT_WAF_EVENT_RETENTION_DAYS", default_value_t = 30)]
     pub waf_event_retention_days: u16,
 
+    /// Experimental: serve synthetic robots.txt with honeypot disallow paths.
+    #[arg(long, env = "RIFT_HONEYPOT_ROBOTS_ENABLED", default_value_t = false)]
+    pub honeypot_robots_enabled: bool,
+
+    /// Experimental honeypot response mode: challenge | block | ban.
+    #[arg(long, env = "RIFT_HONEYPOT_MODE", default_value = "ban")]
+    pub honeypot_mode: String,
+
+    /// Comma-separated honeypot paths advertised in synthetic robots.txt.
+    #[arg(
+        long,
+        env = "RIFT_HONEYPOT_PATHS",
+        default_value = "/.env,/.git/config,/backup.sql,/db.sql,/credentials.txt"
+    )]
+    pub honeypot_paths: String,
+
+    /// Sliding window in seconds for honeypot ban scope when mode=ban.
+    #[arg(long, env = "RIFT_HONEYPOT_BAN_WINDOW_SECS", default_value_t = 3600)]
+    pub honeypot_ban_window_secs: u64,
+
     /// Access-log-driven bot mitigation mode: off | challenge | block.
     #[arg(long, env = "RIFT_ACCESS_BOT_MODE", default_value = "challenge")]
     pub access_bot_mode: String,
@@ -465,6 +486,24 @@ impl Config {
 
     pub fn trusted_proxy_cidrs(&self) -> Vec<IpNet> {
         parse_cidr_list(&self.trusted_proxy_cidrs)
+    }
+
+    pub fn parsed_honeypot_paths(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        self.honeypot_paths
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(|item| {
+                if item.starts_with('/') {
+                    item.to_ascii_lowercase()
+                } else {
+                    format!("/{}", item.to_ascii_lowercase())
+                }
+            })
+            .filter(|path| path != "/robots.txt")
+            .filter(|path| seen.insert(path.clone()))
+            .collect()
     }
 
     /// Resolve the server's public IP: use the explicit override if set,

@@ -301,13 +301,11 @@ pub async fn list_events(
         .await
         .map_err(AppError::Db)?
     } else {
-        sqlx::query_as::<_, WafEvent>(
-            "SELECT * FROM waf_events ORDER BY created_at DESC LIMIT $1",
-        )
-        .bind(limit)
-        .fetch_all(pool)
-        .await
-        .map_err(AppError::Db)?
+        sqlx::query_as::<_, WafEvent>("SELECT * FROM waf_events ORDER BY created_at DESC LIMIT $1")
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+            .map_err(AppError::Db)?
     };
     Ok(rows)
 }

@@ -12,9 +12,9 @@ pub mod env_vars;
 pub mod firewall;
 pub mod models;
 pub mod projects;
-pub mod waf;
 pub mod refresh_tokens;
 pub mod users;
+pub mod waf;
 
 pub type DbPool = PgPool;
 

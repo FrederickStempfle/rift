@@ -818,6 +818,10 @@ mod resource_policy {
             access_bot_mitigation_secs: 300,
             waf_enabled: true,
             waf_event_retention_days: 30,
+            honeypot_robots_enabled: false,
+            honeypot_mode: "ban".into(),
+            honeypot_paths: "/.env,/.git/config,/backup.sql,/db.sql,/credentials.txt".into(),
+            honeypot_ban_window_secs: 3600,
         }
     }
 

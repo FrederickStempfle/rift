@@ -23,9 +23,7 @@ pub fn routes() -> Router<AppState> {
         .route("/rules", post(create_rule).get(list_rules))
         .route(
             "/rules/{rule_id}",
-            get(get_rule)
-                .put(update_rule)
-                .delete(delete_rule),
+            get(get_rule).put(update_rule).delete(delete_rule),
         )
         .route("/policy", get(get_policy).put(set_policy))
         .route("/events", get(list_events))
@@ -213,9 +211,7 @@ fn validate_rule_fields(
     }
 
     // Header field requires header_name
-    if field == WafMatchField::Header
-        && header_name.as_deref().is_none_or(str::is_empty)
-    {
+    if field == WafMatchField::Header && header_name.as_deref().is_none_or(str::is_empty) {
         return Err(AppError::BadRequest(
             "header_name is required when match_field is 'header'".into(),
         ));
@@ -223,16 +219,19 @@ fn validate_rule_fields(
 
     // Validate regex compiles
     if op == WafMatchOp::Regex {
-        regex::Regex::new(match_value).map_err(|e| {
-            AppError::BadRequest(format!("invalid regex pattern: {e}"))
-        })?;
+        regex::Regex::new(match_value)
+            .map_err(|e| AppError::BadRequest(format!("invalid regex pattern: {e}")))?;
     }
 
     // Validate CIDR parses
     if op == WafMatchOp::Cidr {
         match_value
             .parse::<ipnet::IpNet>()
-            .or_else(|_| match_value.parse::<std::net::IpAddr>().map(ipnet::IpNet::from))
+            .or_else(|_| {
+                match_value
+                    .parse::<std::net::IpAddr>()
+                    .map(ipnet::IpNet::from)
+            })
             .map_err(|_| AppError::BadRequest("invalid CIDR or IP address".into()))?;
     }
 
@@ -477,9 +476,13 @@ async fn set_policy(
         ));
     }
 
-    let policy =
-        waf::upsert_policy(&state.pool, payload.project_id, &payload.mode, payload.fail_open)
-            .await?;
+    let policy = waf::upsert_policy(
+        &state.pool,
+        payload.project_id,
+        &payload.mode,
+        payload.fail_open,
+    )
+    .await?;
 
     state.waf_cache.invalidate(payload.project_id).await;
 
@@ -514,7 +517,9 @@ async fn list_events(
 
     let limit = query.limit.clamp(1, 1000);
     let events = waf::list_events(&state.pool, query.project_id, limit).await?;
-    Ok(Json(events.into_iter().map(WafEventResponse::from).collect()))
+    Ok(Json(
+        events.into_iter().map(WafEventResponse::from).collect(),
+    ))
 }
 
 fn user_agent(headers: &HeaderMap) -> Option<String> {
