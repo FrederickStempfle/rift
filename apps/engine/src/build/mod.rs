@@ -497,6 +497,24 @@ impl BuildManager {
             }
         }
 
+        // Restore Next.js build cache for incremental compilation.
+        // Keyed by project ID so each project has its own persistent cache.
+        if cache_enabled && matches!(plan.output, BuildOutput::Next) {
+            let restored =
+                restore_next_build_caches(&cache_dir, project.id, &workspace_dir).await;
+            if restored {
+                insert_and_broadcast_log(
+                    &self.pool,
+                    &self.log_broadcaster,
+                    deployment_id,
+                    "info",
+                    "Restored Next.js build cache",
+                    "build",
+                )
+                .await?;
+            }
+        }
+
         let build_result = if build_is_custom {
             if let Err(error) = validation::validate_custom_command(&plan.build_command, "build command")
             {
@@ -548,6 +566,13 @@ impl BuildManager {
         }
 
         stage_timings.push(("build", started_at.elapsed().as_millis()));
+
+        // Save Next.js build cache after a successful build so the next deploy
+        // can skip recompiling unchanged modules. Cost is counted in artifact time.
+        if cache_enabled && matches!(plan.output, BuildOutput::Next) {
+            save_next_build_caches(&cache_dir, project.id, &workspace_dir).await;
+        }
+
         if !transition(
             &self.pool,
             deployment_id,
@@ -2036,4 +2061,119 @@ async fn save_dependency_cache(
     }
 
     Ok(())
+}
+
+/// Returns true if `dir` looks like a Next.js app root (has a next.config.* file).
+fn is_next_app_dir(dir: &std::path::Path) -> bool {
+    dir.join("next.config.js").exists()
+        || dir.join("next.config.ts").exists()
+        || dir.join("next.config.mjs").exists()
+        || dir.join("next.config.cjs").exists()
+}
+
+/// Derive a stable cache sub-key from the app dir relative to the workspace root.
+/// e.g. workspace root → "root", apps/web → "apps__web".
+fn next_app_cache_key(workspace_dir: &std::path::Path, app_dir: &std::path::Path) -> String {
+    match app_dir.strip_prefix(workspace_dir) {
+        Ok(rel) if rel == std::path::Path::new("") => "root".to_string(),
+        Ok(rel) => rel.to_string_lossy().replace(['/', '\\'], "__"),
+        Err(_) => "root".to_string(),
+    }
+}
+
+/// Collect Next.js app roots: the workspace root itself and any qualifying
+/// subdirectory under apps/, packages/, or sites/.
+async fn find_next_app_dirs(workspace_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+
+    if is_next_app_dir(workspace_dir) {
+        dirs.push(workspace_dir.to_path_buf());
+    }
+
+    for container in ["apps", "packages", "sites"] {
+        let container_dir = workspace_dir.join(container);
+        if !container_dir.exists() {
+            continue;
+        }
+        let Ok(mut entries) = fs::read_dir(&container_dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry
+                .file_type()
+                .await
+                .map(|ft| ft.is_dir())
+                .unwrap_or(false)
+            {
+                let path = entry.path();
+                if is_next_app_dir(&path) {
+                    dirs.push(path);
+                }
+            }
+        }
+    }
+
+    dirs
+}
+
+/// Restore Next.js build cache from persistent storage into the workspace so
+/// the compiler can skip recompiling unchanged modules. Returns true if any
+/// cache was restored.
+async fn restore_next_build_caches(
+    cache_dir: &std::path::Path,
+    project_id: Uuid,
+    workspace_dir: &std::path::Path,
+) -> bool {
+    let framework_cache = cache_dir.join("framework").join(project_id.to_string());
+    if !framework_cache.exists() {
+        return false;
+    }
+
+    let app_dirs = find_next_app_dirs(workspace_dir).await;
+    let mut restored = false;
+
+    for app_dir in &app_dirs {
+        let key = next_app_cache_key(workspace_dir, app_dir);
+        let src = framework_cache.join(&key);
+        if !src.exists() {
+            continue;
+        }
+        let dst = app_dir.join(".next").join("cache");
+        if dst.exists() {
+            continue;
+        }
+        let _ = fs::create_dir_all(app_dir.join(".next")).await;
+        if copy_dir_recursive(&src, &dst).await.is_ok() {
+            restored = true;
+        }
+    }
+
+    restored
+}
+
+/// Save .next/cache to persistent storage after a successful build so the next
+/// deploy can reuse it for incremental compilation.
+async fn save_next_build_caches(
+    cache_dir: &std::path::Path,
+    project_id: Uuid,
+    workspace_dir: &std::path::Path,
+) {
+    let framework_cache = cache_dir.join("framework").join(project_id.to_string());
+    let app_dirs = find_next_app_dirs(workspace_dir).await;
+
+    for app_dir in &app_dirs {
+        let src = app_dir.join(".next").join("cache");
+        if !src.exists() {
+            continue;
+        }
+        let key = next_app_cache_key(workspace_dir, app_dir);
+        let dst = framework_cache.join(&key);
+        if dst.exists() {
+            let _ = fs::remove_dir_all(&dst).await;
+        }
+        let _ = fs::create_dir_all(&framework_cache).await;
+        if let Err(e) = copy_dir_recursive(&src, &dst).await {
+            tracing::debug!(error = %e, "failed to save Next.js build cache for {key}");
+        }
+    }
 }
