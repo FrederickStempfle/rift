@@ -211,14 +211,6 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
                 });
             }
 
-            // Reject apps that use platform-specific adapters we can't run
-            if let Some(platform) = &app.unsupported_platform {
-                return Err(AppError::BadRequest(format!(
-                    "This project uses a {platform}-specific adapter which produces output that cannot be deployed here. \
-                     For Astro, switch to @astrojs/node. For SvelteKit, switch to @sveltejs/adapter-node or @sveltejs/adapter-static."
-                )));
-            }
-
             return Ok(BuildPlan {
                 framework: app.framework.clone(),
                 package_manager,
@@ -701,7 +693,12 @@ fn find_deployable_app(workspace_dir: &Path) -> Option<WorkspaceApp> {
             .then(b.2.cmp(&a.2)) // has index.html first
     });
 
-    Some(candidates.into_iter().next().unwrap().0)
+    // Skip candidates that use platform-specific adapters we cannot run —
+    // prefer a lower-priority but deployable package over a hard build error.
+    candidates
+        .into_iter()
+        .find(|(app, _, _)| app.unsupported_platform.is_none())
+        .map(|(app, _, _)| app)
 }
 
 #[cfg(test)]
