@@ -1,6 +1,7 @@
 services:
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: rift
       POSTGRES_USER: rift
@@ -15,6 +16,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -25,6 +27,7 @@ services:
       - redis_data:/data
 
   engine:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -103,6 +106,7 @@ services:
         hard: 8192
 
   frontend:
+    restart: unless-stopped
     build:
       context: ${RIFT_FRONTEND_CONTEXT:-../../frontend}
       dockerfile: ${RIFT_FRONTEND_DOCKERFILE:-Dockerfile}
