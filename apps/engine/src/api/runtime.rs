@@ -107,6 +107,7 @@ pub struct LifecycleActionResponse {
 }
 
 /// `POST /api/projects/{project_id}/stop`
+#[tracing::instrument(skip(state, auth_user, payload), fields(%project_id))]
 pub async fn stop_project(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -137,6 +138,9 @@ pub async fn stop_project(
 
     match state.runtime_backend.stop(project_id).await {
         Ok(()) => {
+            crate::metrics::RUNTIME_EVENT
+                .with_label_values(&["stop"])
+                .inc();
             // Mark latest active/suspended deployment as cancelled in DB.
             if let Some(dep) = deployments::latest_ready_or_suspended_deployment_for_project(
                 &state.pool,
@@ -163,6 +167,7 @@ pub async fn stop_project(
 }
 
 /// `POST /api/projects/{project_id}/suspend`
+#[tracing::instrument(skip(state, auth_user, payload), fields(%project_id))]
 pub async fn suspend_project(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -193,6 +198,11 @@ pub async fn suspend_project(
 
     match state.runtime_backend.suspend(project_id).await {
         Ok(suspended) => {
+            if suspended {
+                crate::metrics::RUNTIME_EVENT
+                    .with_label_values(&["suspend"])
+                    .inc();
+            }
             let _ = operations::complete_operation(
                 &state.pool,
                 op_id,
@@ -210,6 +220,7 @@ pub async fn suspend_project(
 }
 
 /// `POST /api/projects/{project_id}/wake`
+#[tracing::instrument(skip(state, auth_user, payload), fields(%project_id))]
 pub async fn wake_project(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -240,6 +251,11 @@ pub async fn wake_project(
 
     match state.runtime_backend.wake(project_id).await {
         Ok(url) => {
+            if url.is_some() {
+                crate::metrics::RUNTIME_EVENT
+                    .with_label_values(&["wake"])
+                    .inc();
+            }
             let _ = operations::complete_operation(
                 &state.pool,
                 op_id,

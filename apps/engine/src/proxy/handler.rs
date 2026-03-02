@@ -58,6 +58,8 @@ pub async fn handle_request(
 }
 
 /// Return type includes (response, project_id, cold_start).
+#[tracing::instrument(skip_all, fields(remote_addr = %remote_addr))]
+#[allow(clippy::type_complexity)]
 async fn route_and_forward(
     req: Request<Incoming>,
     remote_addr: SocketAddr,
@@ -100,8 +102,19 @@ async fn route_and_forward(
         }
         None => {
             // Not running — try waking a suspended deployment (cold start)
+            let wake_start = std::time::Instant::now();
             match state.runtime_backend.wake(project_id).await {
-                Ok(Some(url)) => (url, true),
+                Ok(Some(url)) => {
+                    let duration = wake_start.elapsed().as_secs_f64();
+                    crate::metrics::COLD_START_DURATION
+                        .with_label_values(&["wake"])
+                        .observe(duration);
+                    crate::metrics::RUNTIME_EVENT
+                        .with_label_values(&["cold_start"])
+                        .inc();
+                    tracing::info!(%project_id, duration_ms = %wake_start.elapsed().as_millis(), "cold start wake complete");
+                    (url, true)
+                }
                 Ok(None) => return Err((StatusCode::SERVICE_UNAVAILABLE, pid)),
                 Err(_) => return Err((StatusCode::SERVICE_UNAVAILABLE, pid)),
             }

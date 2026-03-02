@@ -70,6 +70,9 @@ impl RoutingCache {
             let pos = self.inner.positive.read().await;
             if let Some(entry) = pos.get(host) {
                 if entry.expires_at > Instant::now() {
+                    crate::metrics::ROUTING_CACHE_RESULT
+                        .with_label_values(&["hit"])
+                        .inc();
                     return CacheLookup::Hit(entry.project_id);
                 }
                 // Expired — fall through to miss (evictor will clean up).
@@ -81,11 +84,17 @@ impl RoutingCache {
             let neg = self.inner.negative.read().await;
             if let Some(entry) = neg.get(host) {
                 if entry.expires_at > Instant::now() {
+                    crate::metrics::ROUTING_CACHE_RESULT
+                        .with_label_values(&["negative_hit"])
+                        .inc();
                     return CacheLookup::NegativeHit;
                 }
             }
         }
 
+        crate::metrics::ROUTING_CACHE_RESULT
+            .with_label_values(&["miss"])
+            .inc();
         CacheLookup::Miss
     }
 

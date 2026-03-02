@@ -713,3 +713,420 @@ mod resource_limits {
         let _ = available;
     }
 }
+
+/// Phase 5.3 + 5.4: Build/runtime policy separation and enforcement tests.
+mod resource_policy {
+    use rift_engine::runtime::policy::{
+        resolve_build_policy, resolve_runtime_policy, BuildPolicy, EnforcementMode,
+        ProjectPolicyOverrides, ResourceError, RuntimePolicy,
+    };
+    use uuid::Uuid;
+
+    fn test_config() -> rift_engine::config::Config {
+        rift_engine::config::Config {
+            database_url: String::new(),
+            master_key: String::new(),
+            jwt_private_key_pem: String::new(),
+            jwt_public_key_pem: String::new(),
+            internal_api_token: String::new(),
+            api_bind: "0.0.0.0".into(),
+            api_port: 3001,
+            proxy_bind: "0.0.0.0".into(),
+            proxy_port: 8080,
+            public_port: None,
+            base_domain: "localhost".into(),
+            proxy_scheme: "http".into(),
+            access_token_ttl_minutes: 15,
+            refresh_token_ttl_days: 7,
+            cookie_secure: false,
+            cors_origin: None,
+            build_root: "/tmp/builds".into(),
+            deploy_root: "/tmp/deploys".into(),
+            public_ip: None,
+            ssl_dir: "/tmp/ssl".into(),
+            acme_email: None,
+            acme_staging: false,
+            https_port: 8443,
+            state_store: "local".into(),
+            redis_url: "redis://127.0.0.1:6379".into(),
+            worker_id: None,
+            runtime_mode: "process".into(),
+            pool_warm_size: 3,
+            pool_max_active: 50,
+            worker_memory_limit_mb: 512,
+            worker_loader: "/tmp/loader.ts".into(),
+            global_dispatcher_port: 9999,
+            function_mode: "isolate".into(),
+            isolate_max_concurrent: 50,
+            isolate_timeout_secs: 30,
+            isolate_heap_limit_mb: 128,
+            seccomp_enforce: false,
+            namespace_isolate: false,
+            build_concurrency: 4,
+            build_cache_dir: "/tmp/cache".into(),
+            build_clean_cache: false,
+            install_skip_on_cache_hit: true,
+            artifact_copy_mode: "auto".into(),
+            healthcheck_interval_ms: 200,
+            healthcheck_attempts: 50,
+            worker_cpu_quota_us: 100_000,
+            worker_max_pids: 64,
+            worker_max_open_files: 1024,
+            worker_request_timeout_secs: 30,
+            worker_max_concurrent_requests: 100,
+            resource_enforcement: "best-effort".into(),
+            build_memory_limit_mb: 2048,
+            build_cpu_quota_us: 200_000,
+            build_max_pids: 256,
+            build_timeout_secs: 600,
+        }
+    }
+
+    // --- Build/runtime separation tests ---
+
+    #[test]
+    fn build_and_runtime_policies_are_independent() {
+        let config = test_config();
+        let runtime = resolve_runtime_policy(&config, None);
+        let build = resolve_build_policy(&config, None);
+
+        // Build policy has higher resource limits than runtime
+        assert!(build.memory_max_bytes > runtime.memory_max_bytes);
+        assert!(build.cpu_quota_us > runtime.cpu_quota_us);
+        assert!(build.max_pids > runtime.max_pids);
+
+        // Runtime has fields that build does not
+        assert_eq!(runtime.max_open_files, 1024);
+        assert_eq!(runtime.request_timeout_secs, 30);
+        assert_eq!(runtime.max_concurrent_requests, 100);
+    }
+
+    #[test]
+    fn build_overrides_do_not_leak_to_runtime() {
+        let config = test_config();
+        let overrides = ProjectPolicyOverrides {
+            build_memory_max_bytes: Some(4 * 1024 * 1024 * 1024),
+            build_cpu_quota_us: Some(400_000),
+            build_timeout_secs: Some(1200),
+            ..Default::default()
+        };
+
+        let runtime = resolve_runtime_policy(&config, Some(&overrides));
+        let build = resolve_build_policy(&config, Some(&overrides));
+
+        // Runtime should use defaults (not build overrides)
+        assert_eq!(runtime.memory_max_bytes, 512 * 1024 * 1024);
+        assert_eq!(runtime.cpu_quota_us, 100_000);
+
+        // Build should use overrides
+        assert_eq!(build.memory_max_bytes, 4 * 1024 * 1024 * 1024);
+        assert_eq!(build.cpu_quota_us, 400_000);
+        assert_eq!(build.build_timeout_secs, 1200);
+    }
+
+    #[test]
+    fn runtime_overrides_do_not_leak_to_build() {
+        let config = test_config();
+        let overrides = ProjectPolicyOverrides {
+            memory_max_bytes: Some(128 * 1024 * 1024),
+            cpu_quota_us: Some(25_000),
+            max_concurrent_requests: Some(5),
+            ..Default::default()
+        };
+
+        let runtime = resolve_runtime_policy(&config, Some(&overrides));
+        let build = resolve_build_policy(&config, Some(&overrides));
+
+        // Runtime should use overrides
+        assert_eq!(runtime.memory_max_bytes, 128 * 1024 * 1024);
+        assert_eq!(runtime.cpu_quota_us, 25_000);
+        assert_eq!(runtime.max_concurrent_requests, 5);
+
+        // Build should use defaults (not runtime overrides)
+        assert_eq!(build.memory_max_bytes, 2048 * 1024 * 1024);
+        assert_eq!(build.cpu_quota_us, 200_000);
+    }
+
+    // --- Override precedence tests ---
+
+    #[test]
+    fn all_runtime_fields_can_be_overridden() {
+        let config = test_config();
+        let overrides = ProjectPolicyOverrides {
+            memory_max_bytes: Some(256 * 1024 * 1024),
+            memory_high_bytes: Some(200 * 1024 * 1024),
+            cpu_quota_us: Some(50_000),
+            max_pids: Some(32),
+            max_open_files: Some(512),
+            request_timeout_secs: Some(60),
+            max_concurrent_requests: Some(10),
+            ..Default::default()
+        };
+
+        let policy = resolve_runtime_policy(&config, Some(&overrides));
+
+        assert_eq!(policy.memory_max_bytes, 256 * 1024 * 1024);
+        assert_eq!(policy.memory_high_bytes, 200 * 1024 * 1024);
+        assert_eq!(policy.cpu_quota_us, 50_000);
+        assert_eq!(policy.max_pids, 32);
+        assert_eq!(policy.max_open_files, 512);
+        assert_eq!(policy.request_timeout_secs, 60);
+        assert_eq!(policy.max_concurrent_requests, 10);
+        // cpu_period_us is always fixed
+        assert_eq!(policy.cpu_period_us, 100_000);
+    }
+
+    #[test]
+    fn partial_overrides_keep_defaults_for_unset_fields() {
+        let config = test_config();
+        let overrides = ProjectPolicyOverrides {
+            memory_max_bytes: Some(1024 * 1024 * 1024), // Only override memory
+            ..Default::default()
+        };
+
+        let policy = resolve_runtime_policy(&config, Some(&overrides));
+
+        assert_eq!(policy.memory_max_bytes, 1024 * 1024 * 1024);
+        // Everything else uses config defaults
+        assert_eq!(policy.cpu_quota_us, 100_000);
+        assert_eq!(policy.max_pids, 64);
+        assert_eq!(policy.max_open_files, 1024);
+        assert_eq!(policy.request_timeout_secs, 30);
+        assert_eq!(policy.max_concurrent_requests, 100);
+    }
+
+    #[test]
+    fn empty_overrides_equal_no_overrides() {
+        let config = test_config();
+        let without = resolve_runtime_policy(&config, None);
+        let with_empty = resolve_runtime_policy(&config, Some(&ProjectPolicyOverrides::default()));
+
+        assert_eq!(without, with_empty);
+    }
+
+    // --- Config-driven defaults tests ---
+
+    #[test]
+    fn config_memory_limit_drives_runtime_policy() {
+        let mut config = test_config();
+        config.worker_memory_limit_mb = 1024;
+
+        let policy = resolve_runtime_policy(&config, None);
+
+        assert_eq!(policy.memory_max_bytes, 1024 * 1024 * 1024);
+        assert_eq!(policy.memory_high_bytes, 1024 * 1024 * 1024 * 3 / 4);
+    }
+
+    #[test]
+    fn config_build_limits_drive_build_policy() {
+        let mut config = test_config();
+        config.build_memory_limit_mb = 4096;
+        config.build_cpu_quota_us = 400_000;
+        config.build_timeout_secs = 1200;
+
+        let policy = resolve_build_policy(&config, None);
+
+        assert_eq!(policy.memory_max_bytes, 4096 * 1024 * 1024);
+        assert_eq!(policy.cpu_quota_us, 400_000);
+        assert_eq!(policy.build_timeout_secs, 1200);
+    }
+
+    // --- ResourceLimits conversion tests ---
+
+    #[test]
+    fn build_policy_resource_limits_use_75_pct_high_watermark() {
+        let policy = BuildPolicy {
+            memory_max_bytes: 1000,
+            cpu_quota_us: 100_000,
+            cpu_period_us: 100_000,
+            max_pids: 64,
+            build_timeout_secs: 300,
+        };
+        let limits = policy.to_resource_limits();
+
+        assert_eq!(limits.memory_high, 750); // 75% of 1000
+    }
+
+    #[test]
+    fn runtime_policy_resource_limits_preserve_explicit_high() {
+        let policy = RuntimePolicy {
+            memory_max_bytes: 1000,
+            memory_high_bytes: 800,
+            ..Default::default()
+        };
+        let limits = policy.to_resource_limits();
+
+        assert_eq!(limits.memory_max, 1000);
+        assert_eq!(limits.memory_high, 800);
+    }
+
+    // --- Enforcement mode tests ---
+
+    #[test]
+    fn enforcement_strict_from_config() {
+        let mut config = test_config();
+        config.resource_enforcement = "strict".into();
+        assert_eq!(
+            EnforcementMode::from_config(&config),
+            EnforcementMode::Strict
+        );
+    }
+
+    #[test]
+    fn enforcement_best_effort_from_config() {
+        let mut config = test_config();
+        config.resource_enforcement = "best-effort".into();
+        assert_eq!(
+            EnforcementMode::from_config(&config),
+            EnforcementMode::BestEffort
+        );
+    }
+
+    #[test]
+    fn enforcement_unknown_defaults_to_best_effort() {
+        let mut config = test_config();
+        config.resource_enforcement = "unknown-value".into();
+        assert_eq!(
+            EnforcementMode::from_config(&config),
+            EnforcementMode::BestEffort
+        );
+    }
+
+    // --- Error taxonomy tests ---
+
+    #[test]
+    fn pool_capacity_error_maps_to_conflict() {
+        let err: rift_engine::error::AppError = ResourceError::PoolCapacityExceeded {
+            active: 50,
+            max: 50,
+        }
+        .into();
+        assert!(matches!(err, rift_engine::error::AppError::Conflict(_)));
+    }
+
+    #[test]
+    fn concurrent_request_error_maps_to_rate_limited() {
+        let err: rift_engine::error::AppError = ResourceError::ConcurrentRequestLimitExceeded {
+            project_id: Uuid::new_v4(),
+            limit: 100,
+        }
+        .into();
+        assert!(matches!(err, rift_engine::error::AppError::RateLimited(_)));
+    }
+
+    #[test]
+    fn cgroup_errors_map_to_internal() {
+        let err: rift_engine::error::AppError = ResourceError::CgroupUnavailable.into();
+        assert!(matches!(err, rift_engine::error::AppError::Internal(_)));
+
+        let err: rift_engine::error::AppError = ResourceError::CgroupSetupFailed {
+            worker_id: Uuid::new_v4(),
+            detail: "permission denied".into(),
+        }
+        .into();
+        assert!(matches!(err, rift_engine::error::AppError::Internal(_)));
+
+        let err: rift_engine::error::AppError = ResourceError::CgroupAttachFailed {
+            worker_id: Uuid::new_v4(),
+            pid: 12345,
+            detail: "no such process".into(),
+        }
+        .into();
+        assert!(matches!(err, rift_engine::error::AppError::Internal(_)));
+    }
+
+    // --- Enforcement behavior tests ---
+
+    #[test]
+    fn enforce_cgroup_best_effort_succeeds_without_cgroup() {
+        // On macOS/CI where cgroups aren't available, best-effort should succeed
+        let worker_id = Uuid::new_v4();
+        let limits = rift_engine::runtime::pool::limits::ResourceLimits::default();
+        let result = rift_engine::runtime::policy::enforce_cgroup_limits(
+            &worker_id,
+            99999,
+            &limits,
+            EnforcementMode::BestEffort,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn enforce_cgroup_strict_fails_without_cgroup() {
+        // Only test this on macOS/CI where cgroups aren't available
+        if rift_engine::runtime::pool::limits::is_cgroup_v2_available() {
+            return; // Skip on Linux with cgroups
+        }
+        let worker_id = Uuid::new_v4();
+        let limits = rift_engine::runtime::pool::limits::ResourceLimits::default();
+        let result = rift_engine::runtime::policy::enforce_cgroup_limits(
+            &worker_id,
+            99999,
+            &limits,
+            EnforcementMode::Strict,
+        );
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), ResourceError::CgroupUnavailable);
+    }
+
+    #[test]
+    fn release_cgroup_is_idempotent() {
+        // Releasing a non-existent cgroup should not panic
+        let worker_id = Uuid::new_v4();
+        rift_engine::runtime::policy::release_cgroup(&worker_id);
+        rift_engine::runtime::policy::release_cgroup(&worker_id);
+    }
+
+    // --- Pool capacity enforcement tests ---
+
+    #[test]
+    fn resource_error_display_includes_details() {
+        let worker_id = Uuid::new_v4();
+        let err = ResourceError::CgroupSetupFailed {
+            worker_id,
+            detail: "permission denied".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(&worker_id.to_string()));
+        assert!(msg.contains("permission denied"));
+
+        let err = ResourceError::CgroupAttachFailed {
+            worker_id,
+            pid: 42,
+            detail: "no such process".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("42"));
+        assert!(msg.contains("no such process"));
+    }
+
+    // --- Serialization round-trip tests ---
+
+    #[test]
+    fn runtime_policy_serializes_and_deserializes() {
+        let policy = RuntimePolicy::default();
+        let json = serde_json::to_string(&policy).unwrap();
+        let deserialized: RuntimePolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(policy, deserialized);
+    }
+
+    #[test]
+    fn build_policy_serializes_and_deserializes() {
+        let policy = BuildPolicy::default();
+        let json = serde_json::to_string(&policy).unwrap();
+        let deserialized: BuildPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(policy, deserialized);
+    }
+
+    #[test]
+    fn project_overrides_serialize_with_null_fields() {
+        let overrides = ProjectPolicyOverrides {
+            memory_max_bytes: Some(256 * 1024 * 1024),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&overrides).unwrap();
+        let deserialized: ProjectPolicyOverrides = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.memory_max_bytes, Some(256 * 1024 * 1024));
+        assert!(deserialized.cpu_quota_us.is_none());
+    }
+}

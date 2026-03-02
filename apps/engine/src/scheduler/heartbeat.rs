@@ -44,8 +44,18 @@ pub fn spawn_heartbeat(
                 max_runtimes,
             };
 
-            if let Err(e) = state_store.send_heartbeat(&heartbeat).await {
-                tracing::warn!(error = %e, "heartbeat send failed");
+            match state_store.send_heartbeat(&heartbeat).await {
+                Ok(()) => {
+                    crate::metrics::HEARTBEAT_SEND
+                        .with_label_values(&["ok"])
+                        .inc();
+                }
+                Err(e) => {
+                    crate::metrics::HEARTBEAT_SEND
+                        .with_label_values(&["error"])
+                        .inc();
+                    tracing::warn!(error = %e, "heartbeat send failed");
+                }
             }
 
             tokio::time::sleep(HEARTBEAT_INTERVAL).await;

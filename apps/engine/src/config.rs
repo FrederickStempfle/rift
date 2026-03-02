@@ -183,6 +183,53 @@ pub struct Config {
     /// Maximum number of health-check attempts before declaring a runtime unhealthy.
     #[arg(long, env = "RIFT_HEALTHCHECK_ATTEMPTS", default_value_t = 50)]
     pub healthcheck_attempts: usize,
+
+    // --- Runtime Resource Governance (Phase 5) ---
+    /// CPU quota for worker processes in microseconds per 100ms period.
+    /// 100_000 = 100% of one core, 50_000 = 50%.
+    #[arg(long, env = "RIFT_WORKER_CPU_QUOTA_US", default_value_t = 100_000)]
+    pub worker_cpu_quota_us: u64,
+
+    /// Maximum number of PIDs per worker (prevents fork bombs).
+    #[arg(long, env = "RIFT_WORKER_MAX_PIDS", default_value_t = 64)]
+    pub worker_max_pids: u32,
+
+    /// Maximum number of open file descriptors per worker.
+    #[arg(long, env = "RIFT_WORKER_MAX_OPEN_FILES", default_value_t = 1024)]
+    pub worker_max_open_files: u32,
+
+    /// Per-request timeout budget in seconds.
+    #[arg(long, env = "RIFT_WORKER_REQUEST_TIMEOUT_SECS", default_value_t = 30)]
+    pub worker_request_timeout_secs: u64,
+
+    /// Maximum concurrent in-flight requests per project.
+    #[arg(
+        long,
+        env = "RIFT_WORKER_MAX_CONCURRENT_REQUESTS",
+        default_value_t = 100
+    )]
+    pub worker_max_concurrent_requests: u32,
+
+    /// Resource enforcement mode: "strict" (fail on setup error) or "best-effort" (warn and continue).
+    #[arg(long, env = "RIFT_RESOURCE_ENFORCEMENT", default_value = "best-effort")]
+    pub resource_enforcement: String,
+
+    // --- Build Resource Governance ---
+    /// Maximum memory per build process in MB.
+    #[arg(long, env = "RIFT_BUILD_MEMORY_LIMIT_MB", default_value_t = 2048)]
+    pub build_memory_limit_mb: u64,
+
+    /// CPU quota for build processes in microseconds per 100ms period.
+    #[arg(long, env = "RIFT_BUILD_CPU_QUOTA_US", default_value_t = 200_000)]
+    pub build_cpu_quota_us: u64,
+
+    /// Maximum number of PIDs per build process.
+    #[arg(long, env = "RIFT_BUILD_MAX_PIDS", default_value_t = 256)]
+    pub build_max_pids: u32,
+
+    /// Build timeout in seconds.
+    #[arg(long, env = "RIFT_BUILD_TIMEOUT_SECS", default_value_t = 600)]
+    pub build_timeout_secs: u64,
 }
 
 impl Config {

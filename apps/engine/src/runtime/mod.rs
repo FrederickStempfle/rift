@@ -3,9 +3,9 @@ pub mod function_registry;
 pub mod health;
 #[cfg(feature = "v8-isolate")]
 pub mod isolate;
-#[cfg(test)]
 pub mod mock_backend;
 pub mod namespace;
+pub mod policy;
 pub mod pool;
 pub mod process;
 pub mod scaler;

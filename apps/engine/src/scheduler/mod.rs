@@ -41,6 +41,7 @@ impl Scheduler {
 
     /// Choose the best worker for a new deployment and acquire its
     /// placement lease. Returns the worker ID on success.
+    #[tracing::instrument(skip(self), fields(%project_id, %deployment_id))]
     pub async fn place(&self, project_id: Uuid, deployment_id: Uuid) -> Result<String, AppError> {
         let workers = self.state_store.list_workers().await?;
         if workers.is_empty() {
@@ -67,10 +68,17 @@ impl Scheduler {
             .acquire_placement(project_id, &lease)
             .await?;
         if !acquired {
+            crate::metrics::SCHEDULER_PLACEMENT
+                .with_label_values(&["failed"])
+                .inc();
             return Err(AppError::Conflict(
                 "placement lease already held for project".into(),
             ));
         }
+
+        crate::metrics::SCHEDULER_PLACEMENT
+            .with_label_values(&["success"])
+            .inc();
 
         tracing::info!(
             project_id = %project_id,
@@ -103,10 +111,16 @@ impl Scheduler {
             .acquire_placement(project_id, &lease)
             .await?;
         if !acquired {
+            crate::metrics::SCHEDULER_PLACEMENT
+                .with_label_values(&["failed"])
+                .inc();
             return Err(AppError::Conflict(
                 "placement lease already held for project".into(),
             ));
         }
+        crate::metrics::SCHEDULER_PLACEMENT
+            .with_label_values(&["self_placed"])
+            .inc();
         Ok(self.worker_id.clone())
     }
 

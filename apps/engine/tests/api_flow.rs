@@ -96,6 +96,16 @@ impl TestServer {
             state_store: "local".into(),
             redis_url: "redis://127.0.0.1:6379".into(),
             worker_id: None,
+            worker_cpu_quota_us: 100_000,
+            worker_max_pids: 64,
+            worker_max_open_files: 1024,
+            worker_request_timeout_secs: 30,
+            worker_max_concurrent_requests: 100,
+            resource_enforcement: "best-effort".into(),
+            build_memory_limit_mb: 2048,
+            build_cpu_quota_us: 200_000,
+            build_max_pids: 256,
+            build_timeout_secs: 600,
         });
         let runtime_manager = RuntimeManager::new();
         let log_broadcaster = LogBroadcaster::new();

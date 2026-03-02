@@ -44,6 +44,7 @@ pub enum BeginOutcome {
 ///
 /// If `op_id` already exists, returns the prior state. Otherwise inserts
 /// a new row with status = 'running'.
+#[tracing::instrument(skip(pool), fields(%op_id, %project_id))]
 pub async fn begin_operation(
     pool: &PgPool,
     op_id: Uuid,
@@ -53,7 +54,19 @@ pub async fn begin_operation(
 ) -> Result<BeginOutcome, AppError> {
     // Check for existing operation first.
     if let Some(existing) = get_operation(pool, op_id).await? {
-        return classify_existing(existing, action, project_id, deployment_id);
+        let outcome = classify_existing(existing, action, project_id, deployment_id);
+        if let Ok(ref o) = outcome {
+            let label = match o {
+                BeginOutcome::Proceed => "proceed",
+                BeginOutcome::Completed(_) => "completed",
+                BeginOutcome::Failed(_) => "failed",
+                BeginOutcome::InProgress => "in_progress",
+            };
+            crate::metrics::OPERATION_OUTCOME
+                .with_label_values(&[label])
+                .inc();
+        }
+        return outcome;
     }
 
     // Insert new operation as running.
@@ -73,12 +86,27 @@ pub async fn begin_operation(
     .map_err(AppError::Db)?;
 
     if insert_result.rows_affected() == 1 {
+        crate::metrics::OPERATION_OUTCOME
+            .with_label_values(&["proceed"])
+            .inc();
         return Ok(BeginOutcome::Proceed);
     }
 
     // Lost the insert race — classify the existing row.
     if let Some(existing) = get_operation(pool, op_id).await? {
-        return classify_existing(existing, action, project_id, deployment_id);
+        let outcome = classify_existing(existing, action, project_id, deployment_id);
+        if let Ok(ref o) = outcome {
+            let label = match o {
+                BeginOutcome::Proceed => "proceed",
+                BeginOutcome::Completed(_) => "completed",
+                BeginOutcome::Failed(_) => "failed",
+                BeginOutcome::InProgress => "in_progress",
+            };
+            crate::metrics::OPERATION_OUTCOME
+                .with_label_values(&[label])
+                .inc();
+        }
+        return outcome;
     }
 
     Err(AppError::Internal(

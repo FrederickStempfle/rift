@@ -12,6 +12,7 @@ use rift_engine::{
     },
     runtime::{
         backend::{PoolBackend, ProcessBackend},
+        policy::{self, EnforcementMode},
         pool::{PoolConfig, WorkerPool},
         RuntimeManager,
     },
@@ -105,9 +106,16 @@ async fn main() -> anyhow::Result<()> {
                     deploy_root: config.deploy_root.clone().into(),
                     seccomp_enforce: config.seccomp_enforce,
                 };
-                let worker_pool = WorkerPool::new(pool_config, Some(pool.clone()))
-                    .await
-                    .context("failed to initialize worker pool")?;
+                let enforcement_mode = EnforcementMode::from_config(&config);
+                let default_policy = policy::resolve_runtime_policy(&config, None);
+                let worker_pool = WorkerPool::new(
+                    pool_config,
+                    Some(pool.clone()),
+                    enforcement_mode,
+                    default_policy,
+                )
+                .await
+                .context("failed to initialize worker pool")?;
                 worker_pool.spawn_health_monitor();
                 tracing::info!("runtime mode: pool (pre-warmed workers)");
                 Arc::new(PoolBackend::new(worker_pool, function_registry))

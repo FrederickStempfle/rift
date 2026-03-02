@@ -104,6 +104,7 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/metrics", get(metrics_handler))
         .route("/api/server-info", get(server_info))
         .nest("/api/users", users::routes())
         .route(
@@ -162,6 +163,23 @@ async fn server_info(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({
         "public_ip": state.public_ip.as_deref().unwrap_or(""),
     }))
+}
+
+async fn metrics_handler() -> (
+    StatusCode,
+    [(axum::http::header::HeaderName, &'static str); 1],
+    String,
+) {
+    // Update pool gauges before rendering
+    let body = crate::metrics::encode_metrics();
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
 }
 
 async fn fallback() -> (StatusCode, Json<serde_json::Value>) {

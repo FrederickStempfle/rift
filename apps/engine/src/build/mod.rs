@@ -17,7 +17,11 @@ use crate::{
         state_machine::DeploymentState,
         transition::{transition, transition_to_failed, transition_to_ready},
     },
-    runtime::{backend::RuntimeBackend, RuntimeKind, RuntimeLaunchSpec},
+    runtime::{
+        backend::RuntimeBackend,
+        policy::{self, BuildPolicy},
+        RuntimeKind, RuntimeLaunchSpec,
+    },
     ws::LogBroadcaster,
 };
 
@@ -40,6 +44,8 @@ pub struct BuildManager {
     deploy_root: PathBuf,
     concurrency: Arc<Semaphore>,
     log_broadcaster: LogBroadcaster,
+    /// Build-time resource policy (distinct from runtime policy).
+    build_policy: BuildPolicy,
     #[cfg(feature = "v8-isolate")]
     isolate_pool: Option<crate::runtime::isolate::IsolatePool>,
 }
@@ -64,9 +70,12 @@ impl BuildManager {
         #[cfg(feature = "v8-isolate")] isolate_pool: Option<crate::runtime::isolate::IsolatePool>,
     ) -> Self {
         let max_concurrent = config.build_concurrency.max(1);
+        let build_policy = policy::resolve_build_policy(&config, None);
         tracing::info!(
             concurrency = max_concurrent,
             cache_dir = %config.build_cache_dir,
+            build_timeout_secs = build_policy.build_timeout_secs,
+            build_memory_mb = build_policy.memory_max_bytes / (1024 * 1024),
             "build manager initialized"
         );
         Self {
@@ -77,11 +86,13 @@ impl BuildManager {
             deploy_root,
             concurrency: Arc::new(Semaphore::new(max_concurrent)),
             log_broadcaster,
+            build_policy,
             #[cfg(feature = "v8-isolate")]
             isolate_pool,
         }
     }
 
+    #[tracing::instrument(skip(self, project), fields(project_id = %project.id))]
     pub async fn enqueue_project_build(
         &self,
         project: Project,
@@ -98,16 +109,40 @@ impl BuildManager {
         .await?;
 
         let manager = self.clone();
+        let build_timeout = std::time::Duration::from_secs(manager.build_policy.build_timeout_secs);
         tokio::spawn(async move {
-            if let Err(error) = manager.run_build(project, deployment.id).await {
-                tracing::error!(deployment_id = %deployment.id, error = %error, "build failed");
+            let result =
+                tokio::time::timeout(build_timeout, manager.run_build(project, deployment.id))
+                    .await;
+            match result {
+                Ok(Err(error)) => {
+                    tracing::error!(deployment_id = %deployment.id, error = %error, "build failed");
+                    crate::metrics::DEPLOY_OUTCOME
+                        .with_label_values(&["failed"])
+                        .inc();
+                }
+                Err(_) => {
+                    tracing::error!(
+                        deployment_id = %deployment.id,
+                        timeout_secs = build_timeout.as_secs(),
+                        "build timed out"
+                    );
+                    crate::metrics::DEPLOY_OUTCOME
+                        .with_label_values(&["timeout"])
+                        .inc();
+                    let _ = transition_to_failed(&manager.pool, deployment.id, None).await;
+                }
+                Ok(Ok(())) => {}
             }
         });
 
         Ok(deployment)
     }
 
+    #[tracing::instrument(skip(self, project), fields(project_id = %project.id, %deployment_id))]
     async fn run_build(&self, project: Project, deployment_id: Uuid) -> Result<(), AppError> {
+        // Track build queue depth
+        crate::metrics::BUILD_QUEUE_DEPTH.inc();
         // Check if we need to wait for a build slot (backpressure logging)
         if self.concurrency.available_permits() == 0 {
             insert_and_broadcast_log(
@@ -128,6 +163,7 @@ impl BuildManager {
             .acquire_owned()
             .await
             .map_err(|error| AppError::Internal(format!("build queue failed: {error}")))?;
+        crate::metrics::BUILD_QUEUE_DEPTH.dec();
 
         fs::create_dir_all(&self.build_root)
             .await
@@ -971,12 +1007,17 @@ impl BuildManager {
         let total_ms = started_at.elapsed().as_millis();
         stage_timings.push(("total", total_ms));
 
-        // Compute per-stage deltas from cumulative timestamps
+        // Compute per-stage deltas from cumulative timestamps and emit metrics
         let mut timing_log = String::from("Deploy timing:");
         let mut prev: u128 = 0;
         for (stage, cumulative) in &stage_timings {
             let delta = cumulative.saturating_sub(prev);
             timing_log.push_str(&format!(" {stage}={delta}ms"));
+            if *stage != "total" {
+                crate::metrics::DEPLOY_STAGE_DURATION
+                    .with_label_values(&[stage])
+                    .observe(delta as f64 / 1000.0);
+            }
             prev = *cumulative;
         }
         tracing::info!(
@@ -994,6 +1035,12 @@ impl BuildManager {
         )
         .await?;
 
+        crate::metrics::DEPLOY_OUTCOME
+            .with_label_values(&["success"])
+            .inc();
+        crate::metrics::BUILD_DURATION
+            .with_label_values(&["success"])
+            .observe(total_ms as f64 / 1000.0);
         transition_to_ready(
             &self.pool,
             deployment_id,

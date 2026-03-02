@@ -5,6 +5,7 @@ pub mod db;
 pub mod error;
 pub mod git;
 pub mod lifecycle;
+pub mod metrics;
 pub mod proxy;
 pub mod runtime;
 pub mod scheduler;

@@ -52,6 +52,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 time = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
 libc = "0.2"
+prometheus = { version = "0.13", features = ["process"] }
 zeroize = "1"
 
 [dev-dependencies]

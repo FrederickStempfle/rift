@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::config::Config;
 use crate::db::{deployments, env_vars};
 use crate::error::AppError;
+use crate::runtime::policy::{EnforcementMode, RuntimePolicy};
 use crate::runtime::{RuntimeKind, RuntimeLaunchSpec};
 
 use self::ipc::wait_for_worker;
@@ -72,6 +73,10 @@ pub struct WorkerPool {
     seccomp: SeccompEnforcer,
     /// Database pool for persisting suspend/wake state transitions.
     db_pool: Option<sqlx::PgPool>,
+    /// Resource enforcement mode (strict vs best-effort).
+    enforcement_mode: EnforcementMode,
+    /// Default runtime policy for workers.
+    default_policy: RuntimePolicy,
 }
 
 impl WorkerPool {
@@ -79,9 +84,16 @@ impl WorkerPool {
     pub async fn new(
         config: PoolConfig,
         db_pool: Option<sqlx::PgPool>,
+        enforcement_mode: EnforcementMode,
+        default_policy: RuntimePolicy,
     ) -> Result<Arc<Self>, AppError> {
         // Initialize cgroup base directory if available
         if let Err(e) = limits::ensure_base_cgroup() {
+            if enforcement_mode == EnforcementMode::Strict {
+                return Err(AppError::Internal(format!(
+                    "cgroup setup required but failed: {e}"
+                )));
+            }
             tracing::warn!(error = %e, "cgroup setup failed, resource limits disabled");
         }
 
@@ -95,6 +107,8 @@ impl WorkerPool {
             suspended: Mutex::new(HashMap::new()),
             seccomp,
             db_pool,
+            enforcement_mode,
+            default_policy,
         });
 
         // Pre-warm workers in background
@@ -118,30 +132,22 @@ impl WorkerPool {
                     // Wait for the worker to become ready
                     match wait_for_worker(worker.port, 30).await {
                         Ok(()) => {
-                            // Apply cgroup resource limits if available
-                            if limits::is_cgroup_v2_available() {
-                                if let Some(pid) = worker.child.id() {
-                                    let resource_limits = limits::ResourceLimits {
-                                        memory_max: self.config.worker_memory_limit,
-                                        ..Default::default()
-                                    };
-                                    if let Err(e) =
-                                        limits::setup_cgroup(&worker.id, &resource_limits)
-                                    {
-                                        tracing::warn!(
-                                            worker_id = %worker.id,
-                                            error = %e,
-                                            "failed to setup cgroup"
-                                        );
-                                    } else if let Err(e) =
-                                        limits::add_process_to_cgroup(&worker.id, pid)
-                                    {
-                                        tracing::warn!(
-                                            worker_id = %worker.id,
-                                            error = %e,
-                                            "failed to add worker to cgroup"
-                                        );
-                                    }
+                            // Apply cgroup resource limits via policy enforcement
+                            if let Some(pid) = worker.child.id() {
+                                let resource_limits = self.default_policy.to_resource_limits();
+                                if let Err(e) = super::policy::enforce_cgroup_limits(
+                                    &worker.id,
+                                    pid,
+                                    &resource_limits,
+                                    self.enforcement_mode,
+                                ) {
+                                    tracing::error!(
+                                        worker_id = %worker.id,
+                                        error = %e,
+                                        "resource enforcement failed, killing worker"
+                                    );
+                                    worker.kill().await;
+                                    continue;
                                 }
                             }
 
@@ -222,11 +228,11 @@ impl WorkerPool {
             if !active.contains_key(&spec.project_id)
                 && active.len() >= self.config.max_active_workers
             {
-                return Err(AppError::Internal(format!(
-                    "pool at capacity ({}/{} active workers)",
-                    active.len(),
-                    self.config.max_active_workers
-                )));
+                return Err(super::policy::ResourceError::PoolCapacityExceeded {
+                    active: active.len(),
+                    max: self.config.max_active_workers,
+                }
+                .into());
             }
         }
 
@@ -306,7 +312,7 @@ impl WorkerPool {
         if let Some(mut assignment) = self.active.lock().await.remove(&project_id) {
             let worker_id = assignment.worker.id;
             assignment.worker.kill().await;
-            let _ = limits::teardown_cgroup(&worker_id);
+            super::policy::release_cgroup(&worker_id);
         }
         Ok(())
     }
@@ -347,7 +353,7 @@ impl WorkerPool {
 
             let worker_id = assignment.worker.id;
             assignment.worker.kill().await;
-            let _ = limits::teardown_cgroup(&worker_id);
+            super::policy::release_cgroup(&worker_id);
 
             // Persist to DB
             if let Some(ref db) = self.db_pool {
@@ -649,7 +655,7 @@ impl WorkerPool {
                     let mut active = pool.active.lock().await;
                     if let Some(assignment) = active.remove(&project_id) {
                         let worker_id = assignment.worker.id;
-                        let _ = limits::teardown_cgroup(&worker_id);
+                        super::policy::release_cgroup(&worker_id);
 
                         pool.suspended.lock().await.insert(
                             project_id,
@@ -681,7 +687,7 @@ impl WorkerPool {
                 "shutting down active worker"
             );
             assignment.worker.kill().await;
-            let _ = limits::teardown_cgroup(&assignment.worker.id);
+            super::policy::release_cgroup(&assignment.worker.id);
         }
         drop(active);
 
@@ -689,7 +695,7 @@ impl WorkerPool {
         let mut warm = self.warm.lock().await;
         for mut worker in warm.drain(..) {
             worker.kill().await;
-            let _ = limits::teardown_cgroup(&worker.id);
+            super::policy::release_cgroup(&worker.id);
         }
 
         tracing::info!("worker pool shutdown complete");
@@ -700,6 +706,12 @@ impl WorkerPool {
         let warm = self.warm.lock().await.len();
         let active = self.active.lock().await.len();
         let suspended = self.suspended.lock().await.len();
+
+        // Update Prometheus gauges
+        crate::metrics::POOL_WARM_WORKERS.set(warm as f64);
+        crate::metrics::POOL_ACTIVE_WORKERS.set(active as f64);
+        crate::metrics::POOL_SUSPENDED.set(suspended as f64);
+
         PoolStats {
             warm_workers: warm,
             active_workers: active,
