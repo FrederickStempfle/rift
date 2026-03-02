@@ -103,13 +103,19 @@ pub async fn create_project(
     }
 
     if let Some(branch) = &payload.branch {
-        validation::ensure_no_null_bytes(branch, "branch")?;
-        validation::ensure_max_len(branch, 255, "branch")?;
+        validation::validate_branch(branch)?;
     }
 
     if let Some(command) = &payload.build_command {
-        validation::ensure_no_null_bytes(command, "build command")?;
-        validation::ensure_max_len(command, 1024, "build command")?;
+        validation::validate_custom_command(command, "build command")?;
+    }
+
+    if let Some(command) = &payload.install_command {
+        validation::validate_custom_command(command, "install command")?;
+    }
+
+    if let Some(output_dir) = &payload.output_dir {
+        validation::validate_output_dir(output_dir)?;
     }
 
     let framework = payload.framework.unwrap_or_else(|| "unknown".to_owned());
@@ -250,6 +256,18 @@ pub async fn update_project(
     }
     if let Some(framework) = &payload.framework {
         ensure_framework(framework)?;
+    }
+    if let Some(branch) = &payload.branch {
+        validation::validate_branch(branch)?;
+    }
+    if let Some(command) = &payload.build_command {
+        validation::validate_custom_command(command, "build command")?;
+    }
+    if let Some(command) = &payload.install_command {
+        validation::validate_custom_command(command, "install command")?;
+    }
+    if let Some(output_dir) = &payload.output_dir {
+        validation::validate_output_dir(output_dir)?;
     }
 
     // If subdomain is changing, invalidate the old subdomain's routing cache.

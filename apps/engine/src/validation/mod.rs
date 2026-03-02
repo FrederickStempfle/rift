@@ -7,6 +7,11 @@ static PROJECT_NAME_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-z0-9-]{1,64}$").expect("project name regex must compile"));
 static SUBDOMAIN_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-z0-9-]{1,63}$").expect("subdomain regex must compile"));
+static BRANCH_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^[A-Za-z0-9._/-]{1,255}$").expect("branch regex must compile"));
+static OUTPUT_DIR_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^[A-Za-z0-9._/-]{1,255}$").expect("output dir regex must compile")
+});
 static DOMAIN_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$")
         .expect("domain regex must compile")
@@ -86,6 +91,68 @@ pub fn validate_domain(value: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+pub fn validate_branch(value: &str) -> Result<(), AppError> {
+    ensure_no_null_bytes(value, "branch")?;
+    ensure_max_len(value, 255, "branch")?;
+    if value.starts_with('-') {
+        return Err(AppError::BadRequest(
+            "branch must not start with '-'".into(),
+        ));
+    }
+    if value.contains("..") {
+        return Err(AppError::BadRequest(
+            "branch must not contain '..'".into(),
+        ));
+    }
+    if !BRANCH_RE.is_match(value) {
+        return Err(AppError::BadRequest(
+            "branch must match ^[A-Za-z0-9._/-]{1,255}$".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_output_dir(value: &str) -> Result<(), AppError> {
+    ensure_no_null_bytes(value, "output dir")?;
+    ensure_max_len(value, 255, "output dir")?;
+    if value.starts_with('/') {
+        return Err(AppError::BadRequest(
+            "output dir must be a relative path".into(),
+        ));
+    }
+    if value.split('/').any(|segment| segment == "..") {
+        return Err(AppError::BadRequest(
+            "output dir must not contain '..' path traversal".into(),
+        ));
+    }
+    if !OUTPUT_DIR_RE.is_match(value) {
+        return Err(AppError::BadRequest(
+            "output dir must match ^[A-Za-z0-9._/-]{1,255}$".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_custom_command(value: &str, field: &'static str) -> Result<(), AppError> {
+    ensure_no_null_bytes(value, field)?;
+    ensure_max_len(value, 1024, field)?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::BadRequest(format!("{field} must not be empty")));
+    }
+
+    // Shell metacharacters are blocked so custom commands cannot chain,
+    // redirect, or execute subshell expressions.
+    let forbidden = [';', '|', '&', '>', '<', '`', '$', '(', ')', '{', '}', '\n', '\r'];
+    if trimmed.chars().any(|c| forbidden.contains(&c)) {
+        return Err(AppError::BadRequest(format!(
+            "{field} contains forbidden shell metacharacters"
+        )));
+    }
+
+    Ok(())
+}
+
 pub fn validate_email(value: &str) -> Result<(), AppError> {
     ensure_no_null_bytes(value, "email")?;
     ensure_max_len(value, 320, "email")?;
@@ -136,6 +203,34 @@ mod tests {
     #[test]
     fn invalid_repo_url_fails() {
         assert!(validate_repo_url("git@github.com:org/repo").is_err());
+    }
+
+    #[test]
+    fn valid_branch_passes() {
+        assert!(validate_branch("feature/my-branch").is_ok());
+    }
+
+    #[test]
+    fn invalid_branch_fails() {
+        assert!(validate_branch("../../../etc/passwd").is_err());
+        assert!(validate_branch("-main").is_err());
+    }
+
+    #[test]
+    fn valid_output_dir_passes() {
+        assert!(validate_output_dir("apps/web/dist").is_ok());
+    }
+
+    #[test]
+    fn invalid_output_dir_fails() {
+        assert!(validate_output_dir("/tmp/dist").is_err());
+        assert!(validate_output_dir("../dist").is_err());
+    }
+
+    #[test]
+    fn custom_command_blocks_metacharacters() {
+        assert!(validate_custom_command("npm run build", "build command").is_ok());
+        assert!(validate_custom_command("npm run build; rm -rf /", "build command").is_err());
     }
 
     #[test]

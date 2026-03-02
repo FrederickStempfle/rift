@@ -6,6 +6,7 @@ pub mod analytics;
 pub mod audit;
 pub mod deployments;
 pub mod domains;
+pub mod edge;
 pub mod env_vars;
 pub mod firewall;
 pub mod models;

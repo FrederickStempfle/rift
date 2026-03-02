@@ -11,7 +11,7 @@ use super::{namespace, seccomp};
 /// Port range for deployed apps. Must NOT be exposed outside Docker — all
 /// traffic arrives through the hyper reverse proxy on port 8080.
 const PORT_RANGE_START: u16 = 10000;
-const PORT_RANGE_END: u16 = 10100;
+const PORT_RANGE_END: u16 = 20000;
 
 static NEXT_PORT: AtomicU16 = AtomicU16::new(PORT_RANGE_START);
 
@@ -22,7 +22,7 @@ pub fn allocate_port() -> Result<u16, AppError> {
             NEXT_PORT.store(PORT_RANGE_START, Ordering::Relaxed);
             continue;
         }
-        if TcpListener::bind(("0.0.0.0", port)).is_ok() {
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return Ok(port);
         }
     }

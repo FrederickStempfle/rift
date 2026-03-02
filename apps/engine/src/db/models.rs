@@ -73,6 +73,67 @@ pub struct Deployment {
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]
+pub struct Region {
+    pub id: Uuid,
+    pub name: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct EdgeNode {
+    pub id: Uuid,
+    pub region_id: Uuid,
+    pub addr: String,
+    pub status: String,
+    pub capacity: i32,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct DeployArtifact {
+    pub id: Uuid,
+    pub deployment_id: Uuid,
+    pub digest: String,
+    pub size_bytes: i64,
+    pub manifest_json: serde_json::Value,
+    pub signed_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct DeployRelease {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub deployment_id: Uuid,
+    pub artifact_id: Uuid,
+    pub version: i64,
+    pub state: String,
+    pub promoted_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct RouteBinding {
+    pub host: String,
+    pub project_id: Uuid,
+    pub release_id: Uuid,
+    pub version: i64,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct ReleaseRollout {
+    pub id: Uuid,
+    pub release_id: Uuid,
+    pub strategy: String,
+    pub percent: i32,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
 pub struct DeployLog {
     pub id: i64,
     pub deployment_id: Uuid,

@@ -92,6 +92,47 @@ pub struct Config {
     #[arg(long, env = "RIFT_WORKER_ID")]
     pub worker_id: Option<String>,
 
+    // --- Edge Control/Data Plane Configuration ---
+    /// Service role for boot-mode selection.
+    #[arg(long, env = "RIFT_ROLE", default_value = "control-plane")]
+    pub role: String,
+
+    /// Region identifier used by edge nodes and rollout state.
+    #[arg(long, env = "RIFT_REGION_ID", default_value = "global")]
+    pub region_id: String,
+
+    /// Node identifier for edge heartbeat and placement reporting.
+    #[arg(long, env = "RIFT_NODE_ID")]
+    pub node_id: Option<String>,
+
+    /// NATS JetStream URL for edge event propagation.
+    #[arg(long, env = "RIFT_JETSTREAM_URL", default_value = "nats://127.0.0.1:4222")]
+    pub jetstream_url: String,
+
+    /// S3-compatible artifact store endpoint.
+    #[arg(long, env = "RIFT_ARTIFACT_STORE_URL")]
+    pub artifact_store_url: Option<String>,
+
+    /// Artifact store bucket name.
+    #[arg(long, env = "RIFT_ARTIFACT_STORE_BUCKET", default_value = "rift-artifacts")]
+    pub artifact_store_bucket: String,
+
+    /// Ed25519 private key (PEM) for artifact signing. Control-plane only.
+    #[arg(long, env = "RIFT_ARTIFACT_SIGNING_PRIVATE_KEY")]
+    pub artifact_signing_private_key: Option<String>,
+
+    /// Ed25519 public key (PEM) for artifact verification. Edge-agent only.
+    #[arg(long, env = "RIFT_ARTIFACT_SIGNING_PUBLIC_KEY")]
+    pub artifact_signing_public_key: Option<String>,
+
+    /// Target p95 for route propagation in milliseconds.
+    #[arg(long, env = "RIFT_ROUTE_PROPAGATION_SLA_MS", default_value_t = 2000)]
+    pub route_propagation_sla_ms: u64,
+
+    /// Edge node heartbeat interval in milliseconds.
+    #[arg(long, env = "RIFT_EDGE_HEARTBEAT_INTERVAL_MS", default_value_t = 5000)]
+    pub edge_heartbeat_interval_ms: u64,
+
     // --- Worker Pool Configuration ---
     /// Runtime mode: "process" (legacy subprocess) or "pool" (pre-warmed worker pool).
     #[arg(long, env = "RIFT_RUNTIME_MODE", default_value = "process")]

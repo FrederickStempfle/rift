@@ -1,15 +1,16 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::get,
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
     api::{auth::AuthUser, AppState},
-    db::{deployments, domains, projects},
+    db::{deployments, domains, edge, projects},
     error::{AppError, AppResult},
     lifecycle::operations::{self, BeginOutcome},
 };
@@ -46,6 +47,15 @@ pub struct DeploymentResponse {
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub suspended_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PackageDeploymentResponse {
+    pub deployment_id: Uuid,
+    pub artifact_id: Uuid,
+    pub release_id: Uuid,
+    pub release_version: i64,
+    pub digest: String,
 }
 
 pub async fn list_deployments(
@@ -144,6 +154,66 @@ pub async fn create_deployment(
     Ok((
         StatusCode::CREATED,
         Json(DeploymentResponse::from_deployment(deployment, public_url)),
+    ))
+}
+
+pub async fn package_deployment(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(deployment_id): Path<Uuid>,
+) -> AppResult<(StatusCode, Json<PackageDeploymentResponse>)> {
+    let deployment = deployments::get_deployment_for_user(&state.pool, deployment_id, auth_user.user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("deployment not found".into()))?;
+    if deployment.status != "ready" && deployment.status != "suspended" {
+        return Err(AppError::Conflict(
+            "only ready/suspended deployments can be packaged".into(),
+        ));
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(deployment.id.as_bytes());
+    hasher.update(deployment.project_id.as_bytes());
+    hasher.update(deployment.branch.as_bytes());
+    hasher.update(deployment.commit_sha.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+
+    let manifest = serde_json::json!({
+        "deployment_id": deployment.id,
+        "project_id": deployment.project_id,
+        "commit_sha": deployment.commit_sha,
+        "branch": deployment.branch,
+        "status": deployment.status,
+        "url": deployment.url,
+        "port": deployment.port,
+    });
+
+    let artifact = edge::create_or_update_artifact(
+        &state.pool,
+        deployment.id,
+        &digest,
+        manifest.to_string().len() as i64,
+        &manifest,
+    )
+    .await?;
+
+    let release = edge::create_release_for_deployment(
+        &state.pool,
+        deployment.project_id,
+        deployment.id,
+        artifact.id,
+    )
+    .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(PackageDeploymentResponse {
+            deployment_id: deployment.id,
+            artifact_id: artifact.id,
+            release_id: release.id,
+            release_version: release.version,
+            digest,
+        }),
     ))
 }
 

@@ -194,6 +194,27 @@ impl WorkerPool {
             // Kill the failed worker — fire-and-forget since we're propagating the error.
             drop(worker.child.kill());
         })?;
+
+        // Apply the same resource enforcement as pre-warmed workers so
+        // on-demand paths can't bypass cgroup policy.
+        if let Some(pid) = worker.child.id() {
+            let resource_limits = self.default_policy.to_resource_limits();
+            if let Err(e) = super::policy::enforce_cgroup_limits(
+                &worker.id,
+                pid,
+                &resource_limits,
+                self.enforcement_mode,
+            ) {
+                tracing::error!(
+                    worker_id = %worker.id,
+                    error = %e,
+                    "resource enforcement failed for on-demand worker"
+                );
+                worker.kill().await;
+                return Err(e.into());
+            }
+        }
+
         Ok(worker)
     }
 

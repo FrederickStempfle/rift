@@ -39,10 +39,14 @@ pub mod auth;
 pub mod deployments;
 pub mod domains;
 pub mod env_vars;
+pub mod edge_nodes;
 pub mod firewall;
 pub mod logs;
 pub mod projects;
+pub mod regions;
+pub mod releases;
 pub mod runtime;
+pub mod routing;
 pub mod users;
 pub mod webhooks;
 
@@ -121,6 +125,14 @@ pub fn router(state: AppState) -> Router {
             "/api/deployments",
             get(deployments::list_deployments).post(deployments::create_deployment),
         )
+        .route(
+            "/api/deployments/{deployment_id}/package",
+            post(deployments::package_deployment),
+        )
+        .nest("/api/releases", releases::routes())
+        .nest("/api/regions", regions::routes())
+        .nest("/api/edge-nodes", edge_nodes::routes())
+        .nest("/api/routing", routing::routes())
         .nest("/api/env-vars", env_vars::routes())
         .nest("/api/domains", domains::routes())
         .nest("/api/firewall", firewall::routes())

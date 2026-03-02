@@ -2,6 +2,7 @@ pub mod api;
 pub mod build;
 pub mod config;
 pub mod db;
+pub mod edge;
 pub mod error;
 pub mod git;
 pub mod lifecycle;

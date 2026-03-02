@@ -348,7 +348,26 @@ async fn main() -> anyhow::Result<()> {
     let api_state = state.clone();
     let proxy_state = state;
 
-    tokio::try_join!(serve_api(api_state), proxy::serve(proxy_state))?;
+    match config.role.as_str() {
+        "edge-agent" => {
+            tracing::info!(
+                role = %config.role,
+                region = %config.region_id,
+                node_id = ?config.node_id,
+                "starting in edge-agent mode (proxy only)"
+            );
+            proxy::serve(proxy_state).await?;
+        }
+        _ => {
+            tracing::info!(
+                role = %config.role,
+                region = %config.region_id,
+                node_id = ?config.node_id,
+                "starting in control-plane mode (api + proxy)"
+            );
+            tokio::try_join!(serve_api(api_state), proxy::serve(proxy_state))?;
+        }
+    }
 
     Ok(())
 }

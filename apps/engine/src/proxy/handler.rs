@@ -1,6 +1,6 @@
 use std::{convert::Infallible, net::SocketAddr};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, header::HOST, HeaderMap, Request, Response, StatusCode, Uri};
 use hyper_util::client::legacy::Client;
@@ -15,6 +15,9 @@ use crate::{
 };
 
 type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Full<Bytes>>;
+
+const MAX_PROXY_BODY_BYTES: usize = 10 * 1024 * 1024;
+const UPSTREAM_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 const HOP_BY_HOP: &[&str] = &[
     "connection",
@@ -115,8 +118,14 @@ async fn route_and_forward(
                     tracing::info!(%project_id, duration_ms = %wake_start.elapsed().as_millis(), "cold start wake complete");
                     (url, true)
                 }
-                Ok(None) => return Err((StatusCode::SERVICE_UNAVAILABLE, pid)),
-                Err(_) => return Err((StatusCode::SERVICE_UNAVAILABLE, pid)),
+                Ok(None) => {
+                    tracing::warn!(%project_id, "wake requested but project is not suspended");
+                    return Err((StatusCode::SERVICE_UNAVAILABLE, pid));
+                }
+                Err(error) => {
+                    tracing::warn!(%project_id, error = %error, "wake failed");
+                    return Err((map_app_error(error), pid));
+                }
             }
         }
     };
@@ -135,11 +144,9 @@ async fn route_and_forward(
     let (parts, body) = req.into_parts();
 
     // Read body (bounded)
-    let body_bytes = body
-        .collect()
+    let body_bytes = collect_body_limited(body, StatusCode::BAD_REQUEST)
         .await
-        .map_err(|_| (StatusCode::BAD_REQUEST, pid))?
-        .to_bytes();
+        .map_err(|status| (status, pid))?;
 
     // Build upstream request
     let mut upstream = Request::builder()
@@ -176,9 +183,9 @@ async fn route_and_forward(
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, pid))?;
 
     // Forward
-    let upstream_resp = client
-        .request(upstream_req)
+    let upstream_resp = tokio::time::timeout(UPSTREAM_REQUEST_TIMEOUT, client.request(upstream_req))
         .await
+        .map_err(|_| (StatusCode::GATEWAY_TIMEOUT, pid))?
         .map_err(|_| (StatusCode::BAD_GATEWAY, pid))?;
 
     // Build response
@@ -193,12 +200,9 @@ async fn route_and_forward(
         response = response.header(name, value);
     }
 
-    let resp_bytes = upstream_resp
-        .into_body()
-        .collect()
+    let resp_bytes = collect_body_limited(upstream_resp.into_body(), StatusCode::BAD_GATEWAY)
         .await
-        .map_err(|_| (StatusCode::BAD_GATEWAY, pid))?
-        .to_bytes();
+        .map_err(|status| (status, pid))?;
 
     let resp = response
         .body(Full::new(resp_bytes))
@@ -311,11 +315,9 @@ async fn handle_isolate_invoke(
     let (parts, body) = req.into_parts();
 
     // Read body
-    let body_bytes = body
-        .collect()
+    let body_bytes = collect_body_limited(body, StatusCode::BAD_REQUEST)
         .await
-        .map_err(|_| (StatusCode::BAD_REQUEST, pid))?
-        .to_bytes();
+        .map_err(|status| (status, pid))?;
 
     // Build the full URL the handler expects
     let path_and_query = parts
@@ -393,6 +395,25 @@ fn map_app_error(error: AppError) -> StatusCode {
         AppError::Unauthorized(_) | AppError::Forbidden(_) => StatusCode::FORBIDDEN,
         AppError::Db(_) | AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+async fn collect_body_limited(
+    mut body: Incoming,
+    read_error_status: StatusCode,
+) -> Result<Bytes, StatusCode> {
+    let mut buffer = BytesMut::new();
+
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| read_error_status)?;
+        if let Ok(data) = frame.into_data() {
+            if buffer.len() + data.len() > MAX_PROXY_BODY_BYTES {
+                return Err(StatusCode::PAYLOAD_TOO_LARGE);
+            }
+            buffer.extend_from_slice(&data);
+        }
+    }
+
+    Ok(buffer.freeze())
 }
 
 #[cfg(test)]

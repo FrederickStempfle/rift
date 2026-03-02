@@ -22,6 +22,7 @@ use crate::{
         policy::{self, BuildPolicy},
         RuntimeKind, RuntimeLaunchSpec,
     },
+    validation,
     ws::LogBroadcaster,
 };
 
@@ -30,8 +31,8 @@ use self::{
     detect::{detect_build_plan, detect_output_dir, BuildOutput, PackageManager},
     functions::build_function_bundle,
     pipeline::{
-        elapsed_ms, insert_and_broadcast_log, read_git_metadata, run_command_and_log,
-        run_command_and_log_with_env,
+        elapsed_ms, insert_and_broadcast_log, read_git_metadata, run_argv_and_log,
+        run_argv_and_log_with_env, run_command_and_log_with_env, split_command_argv,
     },
 };
 
@@ -196,30 +197,35 @@ impl BuildManager {
             })?;
         }
 
-        // Inject GitHub token into clone URL for private repos
-        let clone_url = match users::find_user_by_id(&self.pool, project.user_id).await? {
-            Some(user) if user.github_token.is_some() => {
-                let token = user.github_token.unwrap();
-                project.repo_url.replace(
-                    "https://github.com/",
-                    &format!("https://x-access-token:{token}@github.com/"),
-                )
+        // Clone with explicit argv to avoid shell injection. If a GitHub token
+        // exists, provide it via env-backed credential helper (not in args/logs).
+        let mut clone_env: Vec<(String, String)> = Vec::new();
+        let mut clone_args = vec![
+            "clone".to_owned(),
+            "--depth".to_owned(),
+            "1".to_owned(),
+            "--branch".to_owned(),
+            project.branch.clone(),
+        ];
+        if let Some(user) = users::find_user_by_id(&self.pool, project.user_id).await? {
+            if let Some(token) = user.github_token {
+                clone_args.push("-c".to_owned());
+                clone_args.push("credential.helper=!f() { echo username=x-access-token; echo password=$RIFT_GITHUB_TOKEN; }; f".to_owned());
+                clone_env.push(("RIFT_GITHUB_TOKEN".to_owned(), token));
             }
-            _ => project.repo_url.clone(),
-        };
+        }
+        clone_args.push(project.repo_url.clone());
+        clone_args.push(workspace_dir.to_string_lossy().to_string());
 
-        run_command_and_log(
+        run_argv_and_log_with_env(
             &self.pool,
             &self.log_broadcaster,
             deployment_id,
             "build",
             &self.build_root,
-            &format!(
-                "git clone --depth 1 --branch '{}' '{}' '{}'",
-                project.branch,
-                clone_url,
-                workspace_dir.display()
-            ),
+            "git",
+            &clone_args,
+            &clone_env,
         )
         .await
         .inspect_err(|_| {
@@ -234,6 +240,9 @@ impl BuildManager {
         let (sha, message) = read_git_metadata(&workspace_dir).await?;
         deployments::update_source_metadata(&self.pool, deployment_id, &sha, message.as_deref())
             .await?;
+
+        let install_is_custom = project.install_command.is_some();
+        let build_is_custom = project.build_command.is_some();
 
         let plan = match detect_build_plan(&project, &workspace_dir) {
             Ok(plan) => plan,
@@ -369,16 +378,43 @@ impl BuildManager {
                 plan.install_command.clone()
             };
 
-            if let Err(error) = run_command_and_log_with_env(
-                &self.pool,
-                &self.log_broadcaster,
-                deployment_id,
-                "build",
-                &workspace_dir,
-                &install_cmd,
-                &install_env,
-            )
-            .await
+            let install_result = if install_is_custom {
+                if let Err(error) =
+                    validation::validate_custom_command(&install_cmd, "install command")
+                {
+                    Err(error)
+                } else {
+                    run_command_and_log_with_env(
+                        &self.pool,
+                        &self.log_broadcaster,
+                        deployment_id,
+                        "build",
+                        &workspace_dir,
+                        &install_cmd,
+                        &install_env,
+                    )
+                    .await
+                }
+            } else {
+                match split_command_argv(&install_cmd) {
+                    Ok((program, args)) => {
+                        run_argv_and_log_with_env(
+                            &self.pool,
+                            &self.log_broadcaster,
+                            deployment_id,
+                            "build",
+                            &workspace_dir,
+                            &program,
+                            &args,
+                            &install_env,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                }
+            };
+
+            if let Err(error) = install_result
             {
                 insert_and_broadcast_log(
                     &self.pool,
@@ -416,15 +452,18 @@ impl BuildManager {
                 PackageManager::Bun => None,
             };
             if let Some(cmd) = cache_clean {
-                let _ = run_command_and_log(
-                    &self.pool,
-                    &self.log_broadcaster,
-                    deployment_id,
-                    "build",
-                    &workspace_dir,
-                    cmd,
-                )
-                .await;
+                if let Ok((program, args)) = split_command_argv(cmd) {
+                    let _ = run_argv_and_log(
+                        &self.pool,
+                        &self.log_broadcaster,
+                        deployment_id,
+                        "build",
+                        &workspace_dir,
+                        &program,
+                        &args,
+                    )
+                    .await;
+                }
             }
         }
 
@@ -455,16 +494,42 @@ impl BuildManager {
             }
         }
 
-        if let Err(error) = run_command_and_log_with_env(
-            &self.pool,
-            &self.log_broadcaster,
-            deployment_id,
-            "build",
-            &workspace_dir,
-            &plan.build_command,
-            &user_env_vars,
-        )
-        .await
+        let build_result = if build_is_custom {
+            if let Err(error) = validation::validate_custom_command(&plan.build_command, "build command")
+            {
+                Err(error)
+            } else {
+                run_command_and_log_with_env(
+                    &self.pool,
+                    &self.log_broadcaster,
+                    deployment_id,
+                    "build",
+                    &workspace_dir,
+                    &plan.build_command,
+                    &user_env_vars,
+                )
+                .await
+            }
+        } else {
+            match split_command_argv(&plan.build_command) {
+                Ok((program, args)) => {
+                    run_argv_and_log_with_env(
+                        &self.pool,
+                        &self.log_broadcaster,
+                        deployment_id,
+                        "build",
+                        &workspace_dir,
+                        &program,
+                        &args,
+                        &user_env_vars,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            }
+        };
+
+        if let Err(error) = build_result
         {
             insert_and_broadcast_log(
                 &self.pool,
@@ -927,7 +992,16 @@ impl BuildManager {
 
         // Create immutable artifact directory with only runtime-required files.
         // Runtime processes execute from this read-only copy, not from the mutable workspace.
-        let copy_mode = self.config.artifact_copy_mode.parse::<CopyMode>().unwrap();
+        let copy_mode = self
+            .config
+            .artifact_copy_mode
+            .parse::<CopyMode>()
+            .map_err(|_| {
+                AppError::Internal(format!(
+                    "invalid RIFT_ARTIFACT_COPY_MODE '{}'",
+                    self.config.artifact_copy_mode
+                ))
+            })?;
         runtime_kind = create_immutable_artifact(&workspace_dir, runtime_kind, copy_mode).await;
 
         stage_timings.push(("artifact", started_at.elapsed().as_millis()));
