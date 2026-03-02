@@ -10,7 +10,8 @@ use crate::{
     api::AppState,
     db::{domains, projects},
     error::AppError,
-    proxy::analytics_collector::RequestEvent,
+    proxy::{analytics_collector::RequestEvent, routing_cache::CacheLookup},
+    state::RoutingEntry,
 };
 
 type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Full<Bytes>>;
@@ -194,23 +195,82 @@ async fn route_and_forward(
 }
 
 async fn resolve_project_id(state: &AppState, host: &str) -> Result<Option<Uuid>, AppError> {
+    // 1. Check the routing cache first (hot path — no DB hit).
+    match state.routing_cache.lookup(host).await {
+        CacheLookup::Hit(project_id) => return Ok(Some(project_id)),
+        CacheLookup::NegativeHit => return Ok(None),
+        CacheLookup::Miss => {}
+    }
+
+    // 2. Check distributed state store routing entries (multi-node).
+    if let Some(entry) = state.state_store.get_routing(host).await? {
+        state
+            .routing_cache
+            .insert(host.to_owned(), entry.project_id)
+            .await;
+        return Ok(Some(entry.project_id));
+    }
+
+    // 3. Cache miss — fall through to DB queries.
     if let Some(project_id) = domains::get_project_id_by_domain(&state.pool, host).await? {
+        state
+            .routing_cache
+            .insert(host.to_owned(), project_id)
+            .await;
+        sync_distributed_route(state, host, project_id).await;
         return Ok(Some(project_id));
     }
 
-    let suffix = format!(".{}", state.config.base_domain);
-    if let Some(subdomain) = host.strip_suffix(&suffix) {
-        return Ok(projects::get_project_by_subdomain(&state.pool, subdomain)
-            .await?
-            .map(|project| project.id));
+    if let Some(subdomain) = match_subdomain(host, &state.config.base_domain) {
+        if let Some(project) = projects::get_project_by_subdomain(&state.pool, subdomain).await? {
+            state
+                .routing_cache
+                .insert(host.to_owned(), project.id)
+                .await;
+            sync_distributed_route(state, host, project.id).await;
+            return Ok(Some(project.id));
+        }
     }
 
+    // 4. Not found — insert negative entry.
+    state.routing_cache.insert_negative(host.to_owned()).await;
     Ok(None)
+}
+
+async fn sync_distributed_route(state: &AppState, host: &str, project_id: Uuid) {
+    let entry = RoutingEntry {
+        host: host.to_owned(),
+        project_id,
+        deployment_id: state
+            .runtime_backend
+            .active_deployment_id(project_id)
+            .await
+            .unwrap_or_else(Uuid::nil),
+        worker_addr: state.config.proxy_addr(),
+        version: 1,
+    };
+
+    if let Err(e) = state.state_store.set_routing(&entry).await {
+        tracing::warn!(host = %host, error = %e, "failed to persist distributed route");
+        return;
+    }
+    if let Err(e) = state.state_store.publish_routing_update(&entry).await {
+        tracing::warn!(host = %host, error = %e, "failed to publish routing update");
+    }
 }
 
 fn extract_host(headers: &HeaderMap) -> Option<String> {
     let host = headers.get(HOST)?.to_str().ok()?.trim().to_lowercase();
     Some(host.split(':').next()?.to_owned())
+}
+
+/// Extract the subdomain from a host given a base domain suffix.
+///
+/// Returns `None` if the host does not end with `.{base_domain}` or
+/// if the subdomain portion is empty.
+pub(crate) fn match_subdomain<'a>(host: &'a str, base_domain: &str) -> Option<&'a str> {
+    let suffix = format!(".{base_domain}");
+    host.strip_suffix(&suffix).filter(|s| !s.is_empty())
 }
 
 fn error_response(status: StatusCode) -> Response<Full<Bytes>> {
@@ -292,7 +352,9 @@ async fn handle_isolate_invoke(
         })?;
 
     // Build hyper Response from IsolateResponse
-    let mut response = Response::builder().status(StatusCode::from_u16(isolate_resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
+    let mut response = Response::builder().status(
+        StatusCode::from_u16(isolate_resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+    );
     for (k, v) in &isolate_resp.headers {
         if let (Ok(name), Ok(val)) = (
             hyper::header::HeaderName::from_bytes(k.as_bytes()),
@@ -317,5 +379,74 @@ fn map_app_error(error: AppError) -> StatusCode {
         AppError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
         AppError::Unauthorized(_) | AppError::Forbidden(_) => StatusCode::FORBIDDEN,
         AppError::Db(_) | AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- extract_host tests ---
+
+    #[test]
+    fn extract_host_strips_port() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "example.com:8080".parse().unwrap());
+        assert_eq!(extract_host(&headers), Some("example.com".to_owned()));
+    }
+
+    #[test]
+    fn extract_host_lowercases() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "Example.COM".parse().unwrap());
+        assert_eq!(extract_host(&headers), Some("example.com".to_owned()));
+    }
+
+    #[test]
+    fn extract_host_none_on_missing() {
+        let headers = HeaderMap::new();
+        assert_eq!(extract_host(&headers), None);
+    }
+
+    #[test]
+    fn extract_host_no_port() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "mysite.rift.dev".parse().unwrap());
+        assert_eq!(extract_host(&headers), Some("mysite.rift.dev".to_owned()));
+    }
+
+    // --- match_subdomain tests ---
+
+    #[test]
+    fn match_subdomain_basic() {
+        assert_eq!(match_subdomain("myapp.rift.dev", "rift.dev"), Some("myapp"));
+    }
+
+    #[test]
+    fn match_subdomain_nested() {
+        assert_eq!(
+            match_subdomain("sub.myapp.rift.dev", "rift.dev"),
+            Some("sub.myapp")
+        );
+    }
+
+    #[test]
+    fn match_subdomain_exact_base_returns_none() {
+        assert_eq!(match_subdomain("rift.dev", "rift.dev"), None);
+    }
+
+    #[test]
+    fn match_subdomain_different_domain() {
+        assert_eq!(match_subdomain("myapp.example.com", "rift.dev"), None);
+    }
+
+    #[test]
+    fn match_subdomain_partial_suffix_mismatch() {
+        assert_eq!(match_subdomain("myapp.notrift.dev", "rift.dev"), None);
+    }
+
+    #[test]
+    fn match_subdomain_empty_host() {
+        assert_eq!(match_subdomain("", "rift.dev"), None);
     }
 }

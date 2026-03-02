@@ -103,7 +103,10 @@ mod function_routing {
             a_has_param.cmp(&b_has_param).then(a.cmp(b))
         });
 
-        assert_eq!(routes, vec!["/api/health", "/api/users/me", "/api/users/:id"]);
+        assert_eq!(
+            routes,
+            vec!["/api/health", "/api/users/me", "/api/users/:id"]
+        );
     }
 }
 
@@ -131,11 +134,7 @@ mod function_scanner {
         )
         .unwrap();
         // Test files should be skipped
-        fs::write(
-            functions_dir.join("api/hello.test.ts"),
-            r#"// test file"#,
-        )
-        .unwrap();
+        fs::write(functions_dir.join("api/hello.test.ts"), r#"// test file"#).unwrap();
         // Type definitions should be skipped
         fs::write(
             functions_dir.join("api/types.d.ts"),
@@ -267,19 +266,14 @@ mod sandbox_tests {
 
     #[test]
     fn seccomp_profile_is_valid_json() {
-        let parsed: serde_json::Value =
-            serde_json::from_str(sandbox::SECCOMP_PROFILE).unwrap();
-        assert_eq!(
-            parsed["defaultAction"].as_str().unwrap(),
-            "SCMP_ACT_ERRNO"
-        );
-        assert!(parsed["syscalls"].as_array().unwrap().len() > 0);
+        let parsed: serde_json::Value = serde_json::from_str(sandbox::SECCOMP_PROFILE).unwrap();
+        assert_eq!(parsed["defaultAction"].as_str().unwrap(), "SCMP_ACT_ERRNO");
+        assert!(!parsed["syscalls"].as_array().unwrap().is_empty());
     }
 
     #[test]
     fn seccomp_profile_allows_essential_syscalls() {
-        let parsed: serde_json::Value =
-            serde_json::from_str(sandbox::SECCOMP_PROFILE).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(sandbox::SECCOMP_PROFILE).unwrap();
         let syscalls = parsed["syscalls"][0]["names"]
             .as_array()
             .unwrap()
@@ -300,8 +294,7 @@ mod sandbox_tests {
 
     #[test]
     fn seccomp_profile_blocks_dangerous_syscalls() {
-        let parsed: serde_json::Value =
-            serde_json::from_str(sandbox::SECCOMP_PROFILE).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(sandbox::SECCOMP_PROFILE).unwrap();
         let allowed: Vec<&str> = parsed["syscalls"][0]["names"]
             .as_array()
             .unwrap()
@@ -342,11 +335,7 @@ mod combined_detection {
         // Create both functions output and combined entry
         let fn_dir = workspace.join("_rift_functions_output");
         fs::create_dir_all(fn_dir.join("bundles")).unwrap();
-        fs::write(
-            fn_dir.join("_rift_combined_entry.ts"),
-            "// combined entry",
-        )
-        .unwrap();
+        fs::write(fn_dir.join("_rift_combined_entry.ts"), "// combined entry").unwrap();
         fs::write(fn_dir.join("_entry.ts"), "// functions entry").unwrap();
 
         // The detect_runtime_kind logic is internal, but we can verify
@@ -373,9 +362,7 @@ mod combined_detection {
         assert!(!workspace
             .join("_rift_functions_output/_rift_combined_entry.ts")
             .exists());
-        assert!(workspace
-            .join("_rift_functions_output/bundles")
-            .is_dir());
+        assert!(workspace.join("_rift_functions_output/bundles").is_dir());
     }
 }
 
@@ -390,7 +377,7 @@ mod seccomp_enforcement {
         let enforcer = sandbox::SeccompEnforcer::init(temp.path(), false).unwrap();
         // On macOS, seccomp is not available, so profile_path should be None
         // On Linux, it would be Some
-        assert_eq!(enforcer.enforce, false);
+        assert!(!enforcer.enforce);
     }
 
     #[test]
@@ -425,8 +412,7 @@ mod seccomp_enforcement {
 
     #[test]
     fn seccomp_profile_contains_required_architectures() {
-        let parsed: serde_json::Value =
-            serde_json::from_str(sandbox::SECCOMP_PROFILE).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(sandbox::SECCOMP_PROFILE).unwrap();
         let archs = parsed["architectures"].as_array().unwrap();
         let arch_strs: Vec<&str> = archs.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(arch_strs.contains(&"SCMP_ARCH_X86_64"));
@@ -457,14 +443,21 @@ mod immutable_artifacts {
             "functions_dir": null,
         });
         let manifest_path = workspace.join("_rift_manifest.json");
-        fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
 
         // Verify manifest can be read back
         let content = fs::read_to_string(&manifest_path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed["version"].as_i64().unwrap(), 1);
         assert_eq!(parsed["runtime_type"].as_str().unwrap(), "static");
-        assert!(parsed["entry_point"].as_str().unwrap().contains("_entry.ts"));
+        assert!(parsed["entry_point"]
+            .as_str()
+            .unwrap()
+            .contains("_entry.ts"));
     }
 
     #[test]
@@ -550,17 +543,20 @@ mod deploy_speed {
     #[test]
     fn copy_mode_parses_correctly() {
         use rift_engine::build::CopyMode;
-        assert_eq!(CopyMode::from_str("auto"), CopyMode::Auto);
-        assert_eq!(CopyMode::from_str("reflink"), CopyMode::Reflink);
-        assert_eq!(CopyMode::from_str("recursive"), CopyMode::Recursive);
-        assert_eq!(CopyMode::from_str("unknown"), CopyMode::Auto); // default
+        assert_eq!("auto".parse::<CopyMode>().unwrap(), CopyMode::Auto);
+        assert_eq!("reflink".parse::<CopyMode>().unwrap(), CopyMode::Reflink);
+        assert_eq!(
+            "recursive".parse::<CopyMode>().unwrap(),
+            CopyMode::Recursive
+        );
+        assert_eq!("unknown".parse::<CopyMode>().unwrap(), CopyMode::Auto); // default
     }
 
     // --- Native cache env generation ---
 
     #[test]
     fn native_cache_env_npm() {
-        use rift_engine::build::{native_cache_env, detect::PackageManager};
+        use rift_engine::build::{detect::PackageManager, native_cache_env};
         let cache_dir = Path::new("/var/rift/cache");
         let envs = native_cache_env(cache_dir, &PackageManager::Npm);
         assert_eq!(envs.len(), 1);
@@ -570,7 +566,7 @@ mod deploy_speed {
 
     #[test]
     fn native_cache_env_pnpm() {
-        use rift_engine::build::{native_cache_env, detect::PackageManager};
+        use rift_engine::build::{detect::PackageManager, native_cache_env};
         let cache_dir = Path::new("/var/rift/cache");
         let envs = native_cache_env(cache_dir, &PackageManager::Pnpm);
         assert_eq!(envs.len(), 2);
@@ -581,7 +577,7 @@ mod deploy_speed {
 
     #[test]
     fn native_cache_env_yarn() {
-        use rift_engine::build::{native_cache_env, detect::PackageManager};
+        use rift_engine::build::{detect::PackageManager, native_cache_env};
         let cache_dir = Path::new("/var/rift/cache");
         let envs = native_cache_env(cache_dir, &PackageManager::Yarn);
         assert_eq!(envs.len(), 1);
@@ -592,28 +588,28 @@ mod deploy_speed {
 
     #[test]
     fn optimized_install_npm_default() {
-        use rift_engine::build::{optimized_install_command, detect::PackageManager};
+        use rift_engine::build::{detect::PackageManager, optimized_install_command};
         let cmd = optimized_install_command(&PackageManager::Npm, "npm install");
         assert_eq!(cmd, "npm ci --prefer-offline");
     }
 
     #[test]
     fn optimized_install_npm_custom_not_touched() {
-        use rift_engine::build::{optimized_install_command, detect::PackageManager};
+        use rift_engine::build::{detect::PackageManager, optimized_install_command};
         let cmd = optimized_install_command(&PackageManager::Npm, "npm ci --legacy-peer-deps");
         assert_eq!(cmd, "npm ci --legacy-peer-deps");
     }
 
     #[test]
     fn optimized_install_pnpm_default() {
-        use rift_engine::build::{optimized_install_command, detect::PackageManager};
+        use rift_engine::build::{detect::PackageManager, optimized_install_command};
         let cmd = optimized_install_command(&PackageManager::Pnpm, "pnpm install");
         assert_eq!(cmd, "pnpm install --frozen-lockfile --prefer-offline");
     }
 
     #[test]
     fn optimized_install_yarn_default() {
-        use rift_engine::build::{optimized_install_command, detect::PackageManager};
+        use rift_engine::build::{detect::PackageManager, optimized_install_command};
         let cmd = optimized_install_command(&PackageManager::Yarn, "yarn install");
         assert_eq!(cmd, "yarn install");
     }

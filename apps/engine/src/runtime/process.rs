@@ -97,7 +97,8 @@ pub fn spawn_deno_next(
     let server_js = if standalone_dir.join("server.js").exists() {
         standalone_dir.join("server.js")
     } else {
-        find_server_js_recursive(&standalone_dir).unwrap_or_else(|| standalone_dir.join("server.js"))
+        find_server_js_recursive(&standalone_dir)
+            .unwrap_or_else(|| standalone_dir.join("server.js"))
     };
     let server_dir = server_js.parent().unwrap_or(&standalone_dir);
 
@@ -275,11 +276,8 @@ pub fn spawn_global_dispatcher(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
 
-    cmd.spawn().map_err(|e| {
-        AppError::Internal(format!(
-            "failed to spawn global function dispatcher: {e}"
-        ))
-    })
+    cmd.spawn()
+        .map_err(|e| AppError::Internal(format!("failed to spawn global function dispatcher: {e}")))
 }
 
 /// Spawn a Node.js process to run an SSR server (Nuxt, Astro, SvelteKit, Remix).
@@ -295,9 +293,7 @@ pub fn spawn_node_server(
 ) -> Result<Child, AppError> {
     // Remix: entry exports handlers, needs remix-serve to wrap them
     let is_remix = dir.join("node_modules/.bin/remix-serve").exists()
-        && entry
-            .to_string_lossy()
-            .contains("build/server");
+        && entry.to_string_lossy().contains("build/server");
 
     let mut cmd = if is_remix {
         let mut c = Command::new("npx");

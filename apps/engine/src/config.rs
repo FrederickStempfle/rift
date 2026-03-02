@@ -79,8 +79,20 @@ pub struct Config {
     #[arg(long, env = "RIFT_HTTPS_PORT", default_value_t = 8443)]
     pub https_port: u16,
 
-    // --- Worker Pool Configuration ---
+    // --- Distributed State Configuration ---
+    /// State store backend: "local" (in-memory) or "redis".
+    #[arg(long, env = "RIFT_STATE_STORE", default_value = "local")]
+    pub state_store: String,
 
+    /// Redis URL (only used when state_store = "redis").
+    #[arg(long, env = "RIFT_REDIS_URL", default_value = "redis://127.0.0.1:6379")]
+    pub redis_url: String,
+
+    /// Unique worker ID for this engine instance. Auto-generated if not set.
+    #[arg(long, env = "RIFT_WORKER_ID")]
+    pub worker_id: Option<String>,
+
+    // --- Worker Pool Configuration ---
     /// Runtime mode: "process" (legacy subprocess) or "pool" (pre-warmed worker pool).
     #[arg(long, env = "RIFT_RUNTIME_MODE", default_value = "process")]
     pub runtime_mode: String,
@@ -110,7 +122,6 @@ pub struct Config {
     pub global_dispatcher_port: u16,
 
     // --- V8 Isolate Pool Configuration ---
-
     /// Function execution mode: "isolate" (in-process V8) or "deno" (subprocess dispatcher).
     #[arg(long, env = "RIFT_FUNCTION_MODE", default_value = "isolate")]
     pub function_mode: String,
@@ -128,7 +139,6 @@ pub struct Config {
     pub isolate_heap_limit_mb: usize,
 
     // --- Security Configuration ---
-
     /// Enforce seccomp BPF profile on worker processes.
     /// Default: true (production). Set to false for local development without seccomp support.
     #[arg(long, env = "RIFT_SECCOMP_ENFORCE", default_value_t = true)]
@@ -141,7 +151,6 @@ pub struct Config {
     pub namespace_isolate: bool,
 
     // --- Build Configuration ---
-
     /// Maximum number of concurrent builds. Set to 1 for serial builds.
     #[arg(long, env = "RIFT_BUILD_CONCURRENCY", default_value_t = 4)]
     pub build_concurrency: usize,
@@ -167,7 +176,6 @@ pub struct Config {
     pub artifact_copy_mode: String,
 
     // --- Health Check Configuration ---
-
     /// Milliseconds between health-check TCP probes during runtime startup.
     #[arg(long, env = "RIFT_HEALTHCHECK_INTERVAL_MS", default_value_t = 200)]
     pub healthcheck_interval_ms: u64,

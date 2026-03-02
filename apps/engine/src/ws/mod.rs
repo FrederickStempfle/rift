@@ -16,11 +16,17 @@ pub struct LogBroadcaster {
     channels: Arc<Mutex<HashMap<Uuid, tokio_broadcast::Sender<DeployLogMessage>>>>,
 }
 
-impl LogBroadcaster {
-    pub fn new() -> Self {
+impl Default for LogBroadcaster {
+    fn default() -> Self {
         Self {
             channels: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+}
+
+impl LogBroadcaster {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Send a log message to all subscribers of this deployment.

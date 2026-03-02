@@ -60,9 +60,8 @@ fn build_bpf_filter(profile_path: &Path) -> Result<BpfFilter, AppError> {
         ))
     })?;
 
-    let profile: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
-        AppError::Internal(format!("failed to parse seccomp profile: {e}"))
-    })?;
+    let profile: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| AppError::Internal(format!("failed to parse seccomp profile: {e}")))?;
 
     // Extract allowed syscall names
     let allowed_syscalls = extract_allowed_syscalls(&profile)?;
@@ -345,7 +344,13 @@ fn compile_bpf_program(allowed: &[u32]) -> Result<BpfFilter, AppError> {
 
     // Instruction 0: Load syscall number
     // BPF_LD | BPF_W | BPF_ABS, offset = 0 (nr field)
-    push(&mut program, BPF_LD | BPF_W | BPF_ABS, 0, 0, SECCOMP_DATA_NR_OFFSET);
+    push(
+        &mut program,
+        BPF_LD | BPF_W | BPF_ABS,
+        0,
+        0,
+        SECCOMP_DATA_NR_OFFSET,
+    );
 
     // Instructions 1..n: Compare against each allowed syscall
     // If match: jump to the ALLOW instruction (at offset n + 2 - current)
@@ -363,9 +368,7 @@ fn compile_bpf_program(allowed: &[u32]) -> Result<BpfFilter, AppError> {
     push(&mut program, BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ALLOW);
 
     if total_insns > u16::MAX as usize {
-        return Err(AppError::Internal(
-            "seccomp BPF program too large".into(),
-        ));
+        return Err(AppError::Internal("seccomp BPF program too large".into()));
     }
 
     Ok(BpfFilter {
@@ -438,10 +441,8 @@ mod tests {
 
     #[test]
     fn extract_allowed_from_profile() {
-        let profile: serde_json::Value = serde_json::from_str(
-            crate::runtime::pool::sandbox::SECCOMP_PROFILE,
-        )
-        .unwrap();
+        let profile: serde_json::Value =
+            serde_json::from_str(crate::runtime::pool::sandbox::SECCOMP_PROFILE).unwrap();
         let allowed = extract_allowed_syscalls(&profile).unwrap();
         assert!(allowed.contains(&"read".to_string()));
         assert!(allowed.contains(&"write".to_string()));
@@ -455,7 +456,12 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn resolve_common_syscalls() {
-        let names = vec!["read".into(), "write".into(), "close".into(), "nonexistent_syscall_xyz".into()];
+        let names = vec![
+            "read".into(),
+            "write".into(),
+            "close".into(),
+            "nonexistent_syscall_xyz".into(),
+        ];
         let numbers = resolve_syscall_numbers(&names);
         // Should resolve at least read, write, close
         assert!(numbers.len() >= 3);

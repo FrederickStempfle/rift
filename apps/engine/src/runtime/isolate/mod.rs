@@ -116,8 +116,7 @@ impl IsolatePool {
             let sanitized = route
                 .pattern
                 .trim_start_matches('/')
-                .replace('/', "_")
-                .replace(':', "_")
+                .replace(['/', ':'], "_")
                 .replace('*', "_star");
             let bundle_path = output_path.join(format!("bundles/{sanitized}.js"));
 
@@ -221,8 +220,8 @@ impl IsolatePool {
                 }
             }
 
-            let matched_route = matched
-                .ok_or_else(|| AppError::NotFound("no matching function route".into()))?;
+            let matched_route =
+                matched.ok_or_else(|| AppError::NotFound("no matching function route".into()))?;
 
             let bundle = project
                 .bundles
@@ -305,8 +304,7 @@ async fn execute_handler(
     });
 
     // Build the JS code that loads the bundle and invokes the handler
-    let headers_json =
-        serde_json::to_string(headers).unwrap_or_else(|_| "[]".to_string());
+    let headers_json = serde_json::to_string(headers).unwrap_or_else(|_| "[]".to_string());
     let body_expr = match &body {
         Some(b) => format!("new Uint8Array({:?})", b.as_ref()),
         None => "null".to_string(),
@@ -436,7 +434,7 @@ struct JsHandlerResponse {
 fn base64_encode_str(input: &str) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let input = input.as_bytes();
-    let mut result = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };

@@ -23,10 +23,10 @@ pub struct ResourceLimits {
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
-            memory_max: 512 * 1024 * 1024,     // 512 MB
-            memory_high: 384 * 1024 * 1024,     // 384 MB (throttle before OOM)
-            cpu_quota_us: 100_000,               // 100% of one core
-            cpu_period_us: 100_000,              // 100ms period
+            memory_max: 512 * 1024 * 1024,  // 512 MB
+            memory_high: 384 * 1024 * 1024, // 384 MB (throttle before OOM)
+            cpu_quota_us: 100_000,          // 100% of one core
+            cpu_period_us: 100_000,         // 100ms period
             max_pids: 64,
         }
     }
@@ -38,26 +38,17 @@ const CGROUP_BASE: &str = "/sys/fs/cgroup/rift/workers";
 ///
 /// Requires cgroup v2 unified hierarchy and write access to the cgroup fs.
 /// In Docker, mount the cgroup filesystem and grant SYS_ADMIN capability.
-pub fn setup_cgroup(
-    worker_id: &Uuid,
-    limits: &ResourceLimits,
-) -> Result<(), AppError> {
+pub fn setup_cgroup(worker_id: &Uuid, limits: &ResourceLimits) -> Result<(), AppError> {
     let cgroup_path = format!("{CGROUP_BASE}/{worker_id}");
 
     // Create cgroup directory
     std::fs::create_dir_all(&cgroup_path).map_err(|e| {
-        AppError::Internal(format!(
-            "failed to create cgroup at {cgroup_path}: {e}"
-        ))
+        AppError::Internal(format!("failed to create cgroup at {cgroup_path}: {e}"))
     })?;
 
     // Memory limits
     write_cgroup_file(&cgroup_path, "memory.max", &limits.memory_max.to_string())?;
-    write_cgroup_file(
-        &cgroup_path,
-        "memory.high",
-        &limits.memory_high.to_string(),
-    )?;
+    write_cgroup_file(&cgroup_path, "memory.high", &limits.memory_high.to_string())?;
 
     // CPU limits
     write_cgroup_file(
@@ -94,9 +85,7 @@ pub fn teardown_cgroup(worker_id: &Uuid) -> Result<(), AppError> {
     // Remove cgroup directory
     if Path::new(&cgroup_path).exists() {
         std::fs::remove_dir(&cgroup_path).map_err(|e| {
-            AppError::Internal(format!(
-                "failed to remove cgroup at {cgroup_path}: {e}"
-            ))
+            AppError::Internal(format!("failed to remove cgroup at {cgroup_path}: {e}"))
         })?;
     }
 
@@ -106,11 +95,7 @@ pub fn teardown_cgroup(worker_id: &Uuid) -> Result<(), AppError> {
 /// Read current memory usage of a worker's cgroup.
 pub fn read_memory_usage(worker_id: &Uuid) -> Option<u64> {
     let path = format!("{CGROUP_BASE}/{worker_id}/memory.current");
-    std::fs::read_to_string(path)
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
 /// Check if cgroup v2 is available on this system.
@@ -142,7 +127,6 @@ pub fn ensure_base_cgroup() -> Result<(), AppError> {
 
 fn write_cgroup_file(cgroup_path: &str, file: &str, value: &str) -> Result<(), AppError> {
     let path = format!("{cgroup_path}/{file}");
-    std::fs::write(&path, value).map_err(|e| {
-        AppError::Internal(format!("failed to write {path}: {e}"))
-    })
+    std::fs::write(&path, value)
+        .map_err(|e| AppError::Internal(format!("failed to write {path}: {e}")))
 }

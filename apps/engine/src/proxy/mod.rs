@@ -2,6 +2,8 @@ pub mod acme;
 pub mod analytics_collector;
 pub mod firewall_cache;
 pub mod handler;
+pub mod routing_cache;
+pub mod routing_subscriber;
 pub mod tls;
 
 use std::sync::Arc;

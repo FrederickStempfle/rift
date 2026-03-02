@@ -101,10 +101,7 @@ impl FunctionRegistry {
             .iter()
             .map(|r| {
                 let sanitized = sanitize_route_name(&r.pattern);
-                let worker_path = format!(
-                    "file://{}/_worker_{sanitized}.ts",
-                    output_dir
-                );
+                let worker_path = format!("file://{}/_worker_{sanitized}.ts", output_dir);
                 serde_json::json!({
                     "pattern": r.pattern,
                     "workerPath": worker_path,
@@ -123,20 +120,12 @@ impl FunctionRegistry {
             "envVars": env_map,
         });
 
-        let url = format!(
-            "http://127.0.0.1:{}/_rift/register",
-            self.dispatcher.port
-        );
+        let url = format!("http://127.0.0.1:{}/_rift/register", self.dispatcher.port);
 
         let client = reqwest::Client::new();
-        let resp = client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                AppError::Internal(format!("failed to register with global dispatcher: {e}"))
-            })?;
+        let resp = client.post(&url).json(&body).send().await.map_err(|e| {
+            AppError::Internal(format!("failed to register with global dispatcher: {e}"))
+        })?;
 
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -301,8 +290,7 @@ impl FunctionRegistry {
 fn sanitize_route_name(pattern: &str) -> String {
     pattern
         .trim_start_matches('/')
-        .replace('/', "_")
-        .replace(':', "_")
+        .replace(['/', ':'], "_")
         .replace('*', "_star")
 }
 

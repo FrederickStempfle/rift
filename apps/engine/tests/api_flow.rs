@@ -8,14 +8,16 @@ use rift_engine::{
     db,
     proxy::{
         acme::AcmeChallengeStore, analytics_collector::AnalyticsCollector,
-        firewall_cache::FirewallCache, tls::CertResolver,
+        firewall_cache::FirewallCache, routing_cache::RoutingCache, tls::CertResolver,
     },
     runtime::{backend::ProcessBackend, RuntimeManager},
+    scheduler::Scheduler,
     services::{
         audit::AuditLogger, auth::TokenService, password::PasswordService,
         rate_limit::AuthRateLimiters,
     },
     ssl::SslManager,
+    state::local::LocalStateStore,
     ws::LogBroadcaster,
 };
 use serde_json::json;
@@ -91,6 +93,9 @@ impl TestServer {
             artifact_copy_mode: "auto".into(),
             healthcheck_interval_ms: 200,
             healthcheck_attempts: 50,
+            state_store: "local".into(),
+            redis_url: "redis://127.0.0.1:6379".into(),
+            worker_id: None,
         });
         let runtime_manager = RuntimeManager::new();
         let log_broadcaster = LogBroadcaster::new();
@@ -118,6 +123,12 @@ impl TestServer {
             challenge_store.clone(),
         );
 
+        let state_store: Arc<dyn rift_engine::state::StateStore> = Arc::new(LocalStateStore::new());
+        let scheduler = Arc::new(Scheduler::new(
+            state_store.clone(),
+            "test-worker".to_string(),
+        ));
+
         let state = AppState {
             pool: pool.clone(),
             config: Arc::clone(&config),
@@ -139,6 +150,9 @@ impl TestServer {
             ssl_manager,
             challenge_store,
             cert_resolver,
+            routing_cache: RoutingCache::new(),
+            state_store,
+            scheduler,
             #[cfg(feature = "v8-isolate")]
             isolate_pool: None,
         };

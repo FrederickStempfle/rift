@@ -45,9 +45,10 @@ pub async fn op_rift_fetch(
         req = req.body(b);
     }
 
-    let resp = req.send().await.map_err(|e| {
-        deno_core::error::generic_error(format!("fetch failed: {e}"))
-    })?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| deno_core::error::generic_error(format!("fetch failed: {e}")))?;
 
     let status = resp.status().as_u16();
     let resp_headers: Vec<(String, String)> = resp

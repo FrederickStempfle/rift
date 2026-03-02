@@ -19,6 +19,7 @@ use crate::{
     },
     error::{AppError, AppResult},
     services::{audit::AuditEvent, github},
+    state::RoutingEntry,
     validation,
 };
 
@@ -173,6 +174,10 @@ pub async fn create_project(
         .await?
         .unwrap_or(project);
 
+    if let Some(subdomain) = project.subdomain.as_deref() {
+        upsert_distributed_route(&state, subdomain_host(&state, subdomain), project.id).await;
+    }
+
     Ok((
         StatusCode::CREATED,
         Json(build_project_response(&state, project).await?),
@@ -230,6 +235,10 @@ pub async fn update_project(
     Path(project_id): Path<Uuid>,
     Json(payload): Json<UpdateProjectRequest>,
 ) -> AppResult<Json<ProjectResponse>> {
+    let existing = projects::get_project_for_user(&state.pool, project_id, auth_user.user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("project not found".into()))?;
+
     if let Some(name) = &payload.name {
         validation::validate_project_name(name)?;
     }
@@ -242,6 +251,12 @@ pub async fn update_project(
     if let Some(framework) = &payload.framework {
         ensure_framework(framework)?;
     }
+
+    // If subdomain is changing, invalidate the old subdomain's routing cache.
+    if payload.subdomain.is_some() {
+        state.routing_cache.invalidate_project(project_id).await;
+    }
+    let requested_subdomain = payload.subdomain.clone();
 
     let updated = projects::update_project_for_user(
         &state.pool,
@@ -261,6 +276,28 @@ pub async fn update_project(
     .await?
     .ok_or_else(|| AppError::NotFound("project not found".into()))?;
 
+    if requested_subdomain.is_some() {
+        let old_host = existing
+            .subdomain
+            .as_deref()
+            .map(|subdomain| subdomain_host(&state, subdomain));
+        let new_host = updated
+            .subdomain
+            .as_deref()
+            .map(|subdomain| subdomain_host(&state, subdomain));
+
+        if old_host != new_host {
+            if let Some(host) = old_host {
+                state.routing_cache.invalidate_host(&host).await;
+                remove_distributed_route(&state, &host).await;
+            }
+            if let Some(host) = new_host {
+                state.routing_cache.invalidate_host(&host).await;
+                upsert_distributed_route(&state, host, updated.id).await;
+            }
+        }
+    }
+
     Ok(Json(build_project_response(&state, updated).await?))
 }
 
@@ -271,10 +308,11 @@ pub async fn delete_project(
     headers: HeaderMap,
     Path(project_id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
+    let project_before_delete =
+        projects::get_project_for_user(&state.pool, project_id, auth_user.user_id).await?;
+
     // Clean up GitHub webhook before deleting
-    if let Ok(Some(project)) =
-        projects::get_project_for_user(&state.pool, project_id, auth_user.user_id).await
-    {
+    if let Some(project) = project_before_delete.as_ref() {
         if let (Some(webhook_id), Some((owner, repo))) = (
             project.webhook_id,
             github::parse_owner_repo(&project.repo_url),
@@ -291,6 +329,16 @@ pub async fn delete_project(
         projects::delete_project_for_user(&state.pool, project_id, auth_user.user_id).await?;
     if !deleted {
         return Err(AppError::NotFound("project not found".into()));
+    }
+
+    // Invalidate all routing cache entries for this project.
+    state.routing_cache.invalidate_project(project_id).await;
+    if let Some(project) = project_before_delete {
+        if let Some(subdomain) = project.subdomain.as_deref() {
+            let host = subdomain_host(&state, subdomain);
+            state.routing_cache.invalidate_host(&host).await;
+            remove_distributed_route(&state, &host).await;
+        }
     }
 
     state
@@ -325,6 +373,52 @@ fn user_agent(headers: &HeaderMap) -> Option<String> {
         .get("user-agent")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
+}
+
+fn subdomain_host(state: &AppState, subdomain: &str) -> String {
+    format!("{subdomain}.{}", state.config.base_domain)
+}
+
+async fn upsert_distributed_route(state: &AppState, host: String, project_id: Uuid) {
+    let entry = RoutingEntry {
+        host: host.clone(),
+        project_id,
+        deployment_id: state
+            .runtime_backend
+            .active_deployment_id(project_id)
+            .await
+            .unwrap_or_else(Uuid::nil),
+        worker_addr: state.config.proxy_addr(),
+        version: 1,
+    };
+
+    if let Err(e) = state.state_store.set_routing(&entry).await {
+        tracing::warn!(host = %host, error = %e, "failed to set distributed route");
+        return;
+    }
+    if let Err(e) = state.state_store.publish_routing_update(&entry).await {
+        tracing::warn!(host = %host, error = %e, "failed to publish routing update");
+    }
+}
+
+async fn remove_distributed_route(state: &AppState, host: &str) {
+    if let Err(e) = state.state_store.remove_routing(host).await {
+        tracing::warn!(host = %host, error = %e, "failed to remove distributed route");
+    }
+    let entry = RoutingEntry {
+        host: host.to_owned(),
+        project_id: Uuid::nil(),
+        deployment_id: Uuid::nil(),
+        worker_addr: String::new(),
+        version: 1,
+    };
+    if let Err(e) = state.state_store.publish_routing_update(&entry).await {
+        tracing::warn!(
+            host = %host,
+            error = %e,
+            "failed to publish routing removal update"
+        );
+    }
 }
 
 async fn build_project_response(

@@ -70,11 +70,16 @@ pub struct WorkerPool {
     suspended: Mutex<HashMap<Uuid, SuspendedInfo>>,
     /// Seccomp enforcement state.
     seccomp: SeccompEnforcer,
+    /// Database pool for persisting suspend/wake state transitions.
+    db_pool: Option<sqlx::PgPool>,
 }
 
 impl WorkerPool {
     /// Create a new pool and pre-warm workers.
-    pub async fn new(config: PoolConfig) -> Result<Arc<Self>, AppError> {
+    pub async fn new(
+        config: PoolConfig,
+        db_pool: Option<sqlx::PgPool>,
+    ) -> Result<Arc<Self>, AppError> {
         // Initialize cgroup base directory if available
         if let Err(e) = limits::ensure_base_cgroup() {
             tracing::warn!(error = %e, "cgroup setup failed, resource limits disabled");
@@ -89,6 +94,7 @@ impl WorkerPool {
             active: Mutex::new(HashMap::new()),
             suspended: Mutex::new(HashMap::new()),
             seccomp,
+            db_pool,
         });
 
         // Pre-warm workers in background
@@ -119,13 +125,17 @@ impl WorkerPool {
                                         memory_max: self.config.worker_memory_limit,
                                         ..Default::default()
                                     };
-                                    if let Err(e) = limits::setup_cgroup(&worker.id, &resource_limits) {
+                                    if let Err(e) =
+                                        limits::setup_cgroup(&worker.id, &resource_limits)
+                                    {
                                         tracing::warn!(
                                             worker_id = %worker.id,
                                             error = %e,
                                             "failed to setup cgroup"
                                         );
-                                    } else if let Err(e) = limits::add_process_to_cgroup(&worker.id, pid) {
+                                    } else if let Err(e) =
+                                        limits::add_process_to_cgroup(&worker.id, pid)
+                                    {
                                         tracing::warn!(
                                             worker_id = %worker.id,
                                             error = %e,
@@ -174,10 +184,9 @@ impl WorkerPool {
         tracing::warn!("no warm workers available, spawning on demand");
         let seccomp_path = self.seccomp.profile_path.as_deref();
         let mut worker = Worker::spawn_warm(&self.config.loader_script, seccomp_path).await?;
-        wait_for_worker(worker.port, 40).await.map_err(|e| {
-            // Kill the failed worker
-            let _ = worker.child.kill();
-            e
+        wait_for_worker(worker.port, 40).await.inspect_err(|_| {
+            // Kill the failed worker — fire-and-forget since we're propagating the error.
+            drop(worker.child.kill());
         })?;
         Ok(worker)
     }
@@ -201,7 +210,10 @@ impl WorkerPool {
     }
 
     /// Deploy a new runtime: specialize a warm worker with the deployment's code.
-    pub async fn deploy(self: &Arc<Self>, spec: RuntimeLaunchSpec) -> Result<(String, u16), AppError> {
+    pub async fn deploy(
+        self: &Arc<Self>,
+        spec: RuntimeLaunchSpec,
+    ) -> Result<(String, u16), AppError> {
         // Enforce max_active_workers capacity limit.
         // An existing deployment for the same project is being replaced (not additive),
         // so only reject if the project is genuinely new and we're at capacity.
@@ -317,6 +329,48 @@ impl WorkerPool {
             .map(|a| a.deployment_id)
     }
 
+    /// Explicitly suspend a single project's runtime.
+    /// Returns `true` if the project was active and is now suspended.
+    pub async fn suspend_project(&self, project_id: Uuid) -> Result<bool, AppError> {
+        let mut active = self.active.lock().await;
+        if let Some(mut assignment) = active.remove(&project_id) {
+            self.suspended.lock().await.insert(
+                project_id,
+                SuspendedInfo {
+                    deployment_id: assignment.deployment_id,
+                    kind: assignment.kind.clone(),
+                    env_vars: assignment.env_vars.clone(),
+                    bundle_path: assignment.bundle_path.clone(),
+                },
+            );
+            drop(active);
+
+            let worker_id = assignment.worker.id;
+            assignment.worker.kill().await;
+            let _ = limits::teardown_cgroup(&worker_id);
+
+            // Persist to DB
+            if let Some(ref db) = self.db_pool {
+                if let Err(e) = deployments::mark_suspended(db, assignment.deployment_id).await {
+                    tracing::warn!(
+                        deployment_id = %assignment.deployment_id,
+                        error = %e,
+                        "failed to persist suspended state to DB"
+                    );
+                }
+            }
+
+            tracing::info!(
+                project_id = %project_id,
+                deployment_id = %assignment.deployment_id,
+                "explicitly suspended deployment (pool)"
+            );
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Record a request timestamp for scale-to-zero tracking.
     pub async fn touch(&self, project_id: Uuid) {
         if let Some(assignment) = self.active.lock().await.get_mut(&project_id) {
@@ -344,14 +398,26 @@ impl WorkerPool {
             "waking suspended deployment (pool)"
         );
 
+        let deployment_id = suspended.deployment_id;
         let (url, _) = self
             .deploy(RuntimeLaunchSpec {
                 project_id,
-                deployment_id: suspended.deployment_id,
+                deployment_id,
                 kind: suspended.kind,
                 env_vars: suspended.env_vars,
             })
             .await?;
+
+        // Persist wake to DB
+        if let Some(ref db) = self.db_pool {
+            if let Err(e) = deployments::mark_ready_from_suspended(db, deployment_id).await {
+                tracing::warn!(
+                    deployment_id = %deployment_id,
+                    error = %e,
+                    "failed to persist wake state to DB"
+                );
+            }
+        }
 
         Ok(Some(url))
     }
@@ -386,6 +452,19 @@ impl WorkerPool {
                 drop(active);
 
                 assignment.worker.kill().await;
+
+                // Persist to DB
+                if let Some(ref db) = self.db_pool {
+                    if let Err(e) = deployments::mark_suspended(db, assignment.deployment_id).await
+                    {
+                        tracing::warn!(
+                            deployment_id = %assignment.deployment_id,
+                            error = %e,
+                            "failed to persist suspended state to DB"
+                        );
+                    }
+                }
+
                 tracing::info!(
                     project_id = %project_id,
                     deployment_id = %assignment.deployment_id,
@@ -404,11 +483,7 @@ impl WorkerPool {
     }
 
     /// Restore deployments from database after restart.
-    pub async fn restore_deployments(
-        &self,
-        pool: &sqlx::PgPool,
-        config: &Config,
-    ) -> usize {
+    pub async fn restore_deployments(&self, pool: &sqlx::PgPool, config: &Config) -> usize {
         let ready = match deployments::list_latest_ready_per_project(pool).await {
             Ok(d) => d,
             Err(e) => {
@@ -428,8 +503,7 @@ impl WorkerPool {
         let mut restored = 0;
 
         for deployment in ready {
-            let workspace_dir =
-                PathBuf::from(&config.deploy_root).join(deployment.id.to_string());
+            let workspace_dir = PathBuf::from(&config.deploy_root).join(deployment.id.to_string());
             if !workspace_dir.exists() {
                 tracing::warn!(
                     deployment_id = %deployment.id,
@@ -475,6 +549,56 @@ impl WorkerPool {
             restored += 1;
         }
 
+        // Also restore suspended deployments
+        let suspended_list = match deployments::list_latest_suspended_per_project(pool).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to query suspended deployments for restore");
+                Vec::new()
+            }
+        };
+
+        if !suspended_list.is_empty() {
+            tracing::info!(
+                count = suspended_list.len(),
+                "restoring suspended deployments (pool)"
+            );
+        }
+
+        for deployment in suspended_list {
+            let workspace_dir = PathBuf::from(&config.deploy_root).join(deployment.id.to_string());
+            if !workspace_dir.exists() {
+                continue;
+            }
+
+            let kind = match detect_runtime_kind(&workspace_dir) {
+                Some(k) => k,
+                None => continue,
+            };
+
+            let user_env_vars =
+                env_vars::get_decrypted_env_vars(pool, deployment.project_id, &config.master_key)
+                    .await
+                    .unwrap_or_default();
+
+            self.suspended.lock().await.insert(
+                deployment.project_id,
+                SuspendedInfo {
+                    deployment_id: deployment.id,
+                    kind: kind.clone(),
+                    env_vars: user_env_vars,
+                    bundle_path: self.resolve_bundle_path(deployment.id, &kind),
+                },
+            );
+
+            tracing::info!(
+                deployment_id = %deployment.id,
+                project_id = %deployment.project_id,
+                "restored suspended deployment (pool)"
+            );
+            restored += 1;
+        }
+
         restored
     }
 
@@ -496,10 +620,7 @@ impl WorkerPool {
                     warm.retain_mut(|w| w.is_alive());
                     let removed = before - warm.len();
                     if removed > 0 {
-                        tracing::warn!(
-                            count = removed,
-                            "removed dead warm workers"
-                        );
+                        tracing::warn!(count = removed, "removed dead warm workers");
                     }
                 }
 
@@ -602,7 +723,10 @@ pub struct PoolStats {
 /// Detect runtime kind from the filesystem (same logic as RuntimeManager).
 fn detect_runtime_kind(workspace_dir: &std::path::Path) -> Option<RuntimeKind> {
     // Combined entry takes priority — it means functions + framework are wired together
-    if workspace_dir.join("_rift_functions_output/_rift_combined_entry.ts").exists() {
+    if workspace_dir
+        .join("_rift_functions_output/_rift_combined_entry.ts")
+        .exists()
+    {
         let fn_dir = workspace_dir.join("_rift_functions_output");
         return Some(RuntimeKind::Combined {
             entry: fn_dir.join("_rift_combined_entry.ts"),
@@ -636,7 +760,10 @@ fn detect_runtime_kind(workspace_dir: &std::path::Path) -> Option<RuntimeKind> {
             dir: workspace_dir.to_path_buf(),
             entry: workspace_dir.join("build/server/index.js"),
         })
-    } else if workspace_dir.join("_rift_functions_output/bundles").is_dir() {
+    } else if workspace_dir
+        .join("_rift_functions_output/bundles")
+        .is_dir()
+    {
         Some(RuntimeKind::Functions {
             dir: workspace_dir.join("_rift_functions_output"),
         })

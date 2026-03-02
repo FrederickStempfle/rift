@@ -32,11 +32,13 @@ impl AnalyticsCollector {
     }
 }
 
+type AnalyticsKey = (Uuid, chrono::DateTime<chrono::Utc>);
+type AnalyticsCounters = (i64, i64, i64, i64);
+
 async fn flush_loop(mut rx: mpsc::UnboundedReceiver<RequestEvent>, pool: PgPool) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
     // (project_id, hour_bucket) -> (requests, errors, total_ms, cold_starts)
-    let mut buffer: HashMap<(Uuid, chrono::DateTime<chrono::Utc>), (i64, i64, i64, i64)> =
-        HashMap::new();
+    let mut buffer: HashMap<AnalyticsKey, AnalyticsCounters> = HashMap::new();
 
     loop {
         interval.tick().await;
@@ -68,7 +70,13 @@ async fn flush_loop(mut rx: mpsc::UnboundedReceiver<RequestEvent>, pool: PgPool)
         let entries: Vec<_> = buffer.drain().collect();
         for ((project_id, bucket), (requests, errors, total_ms, cold_starts)) in entries {
             if let Err(e) = crate::db::analytics::upsert_hourly(
-                &pool, project_id, bucket, requests, errors, total_ms, cold_starts,
+                &pool,
+                project_id,
+                bucket,
+                requests,
+                errors,
+                total_ms,
+                cold_starts,
             )
             .await
             {

@@ -8,18 +8,20 @@ use rift_engine::{
     db,
     proxy::{
         self, acme::AcmeChallengeStore, analytics_collector::AnalyticsCollector,
-        firewall_cache::FirewallCache, tls::CertResolver,
+        firewall_cache::FirewallCache, routing_cache::RoutingCache, tls::CertResolver,
     },
     runtime::{
         backend::{PoolBackend, ProcessBackend},
         pool::{PoolConfig, WorkerPool},
         RuntimeManager,
     },
+    scheduler::{self, Scheduler},
     services::{
         audit::AuditLogger, auth::TokenService, password::PasswordService,
         rate_limit::AuthRateLimiters,
     },
     ssl::SslManager,
+    state,
     ws::LogBroadcaster,
 };
 
@@ -56,10 +58,10 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Configure health-check parameters
-    runtime_manager.set_healthcheck(
-        config.healthcheck_interval_ms,
-        config.healthcheck_attempts,
-    );
+    runtime_manager.set_healthcheck(config.healthcheck_interval_ms, config.healthcheck_attempts);
+
+    // Set DB pool for suspend/wake state persistence
+    runtime_manager.set_db_pool(pool.clone());
 
     // Configure namespace isolation (disabled by default inside Docker)
     runtime_manager.set_namespace_isolate(config.namespace_isolate);
@@ -103,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
                     deploy_root: config.deploy_root.clone().into(),
                     seccomp_enforce: config.seccomp_enforce,
                 };
-                let worker_pool = WorkerPool::new(pool_config)
+                let worker_pool = WorkerPool::new(pool_config, Some(pool.clone()))
                     .await
                     .context("failed to initialize worker pool")?;
                 worker_pool.spawn_health_monitor();
@@ -195,6 +197,48 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // --- Distributed state store + scheduler ---
+    let state_store: Arc<dyn state::StateStore> = match config.state_store.as_str() {
+        "redis" => {
+            let rs = state::redis_store::RedisStateStore::new(&config.redis_url)
+                .context("failed to connect to Redis state store")?;
+            tracing::info!(url = %config.redis_url, "state store: redis");
+            Arc::new(rs)
+        }
+        _ => {
+            tracing::info!("state store: local (in-memory)");
+            Arc::new(state::local::LocalStateStore::new())
+        }
+    };
+
+    let worker_id = config
+        .worker_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    tracing::info!(worker_id = %worker_id, "engine worker identity");
+
+    let scheduler = Arc::new(Scheduler::new(state_store.clone(), worker_id.clone()));
+
+    // Spawn background heartbeat
+    scheduler::heartbeat::spawn_heartbeat(
+        state_store.clone(),
+        runtime_backend.clone(),
+        worker_id,
+        config.pool_max_active as u32,
+    );
+
+    let routing_cache = RoutingCache::new();
+    routing_cache.spawn_evictor();
+    let subscriber_redis_url = if config.state_store == "redis" {
+        Some(config.redis_url.clone())
+    } else {
+        None
+    };
+    crate::proxy::routing_subscriber::spawn_routing_subscriber(
+        subscriber_redis_url,
+        routing_cache.clone(),
+    );
+
     let state = AppState {
         pool: pool.clone(),
         config: Arc::clone(&config),
@@ -211,15 +255,15 @@ async fn main() -> anyhow::Result<()> {
         ssl_manager: ssl_manager.clone(),
         challenge_store,
         cert_resolver,
+        routing_cache,
+        state_store,
+        scheduler,
         #[cfg(feature = "v8-isolate")]
         isolate_pool,
     };
 
     // Restore deployments that were running before the engine restarted
-    let restored = state
-        .runtime_backend
-        .restore(&state.pool, &config)
-        .await;
+    let restored = state.runtime_backend.restore(&state.pool, &config).await;
     if restored > 0 {
         tracing::info!(count = restored, "restored deployments from previous run");
     }
@@ -279,7 +323,10 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             if isolate_restored > 0 {
-                tracing::info!(count = isolate_restored, "restored function projects into V8 isolate pool");
+                tracing::info!(
+                    count = isolate_restored,
+                    "restored function projects into V8 isolate pool"
+                );
             }
         }
     }

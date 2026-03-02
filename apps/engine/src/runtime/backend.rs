@@ -49,6 +49,10 @@ pub trait RuntimeBackend: Send + Sync + 'static {
     /// Wake a suspended project. Returns the URL if successful, None if not suspended.
     async fn wake(&self, project_id: Uuid) -> Result<Option<String>, AppError>;
 
+    /// Explicitly suspend a single project's runtime.
+    /// Returns `true` if the project was active and is now suspended.
+    async fn suspend(&self, project_id: Uuid) -> Result<bool, AppError>;
+
     /// Suspend idle runtimes. Returns count of suspended.
     async fn suspend_idle(&self, threshold: Duration) -> usize;
 
@@ -109,6 +113,10 @@ impl RuntimeBackend for ProcessBackend {
         self.manager.wake(project_id).await
     }
 
+    async fn suspend(&self, project_id: Uuid) -> Result<bool, AppError> {
+        self.manager.suspend_project(project_id).await
+    }
+
     async fn suspend_idle(&self, threshold: Duration) -> usize {
         self.manager.suspend_idle(threshold).await
     }
@@ -122,6 +130,17 @@ impl RuntimeBackend for ProcessBackend {
 
     async fn restore(&self, pool: &PgPool, config: &Config) -> usize {
         self.manager.restore_deployments(pool, config).await
+    }
+
+    async fn pool_stats(&self) -> Option<PoolStats> {
+        let active = self.manager.active_count().await;
+        Some(PoolStats {
+            warm_workers: 0,
+            active_workers: active,
+            suspended_deployments: 0,
+            max_active: 0,
+            warm_target: 0,
+        })
     }
 }
 
@@ -149,19 +168,19 @@ impl RuntimeBackend for PoolBackend {
         if let RuntimeKind::Functions { ref dir } = spec.kind {
             if let Some(registry) = &self.function_registry {
                 let manifest_path = dir.join("_routes.json");
-                let routes: Vec<crate::build::functions::FunctionRoute> =
-                    if manifest_path.exists() {
-                        let content = tokio::fs::read_to_string(&manifest_path)
-                            .await
-                            .map_err(|e| {
-                                AppError::Internal(format!("failed to read _routes.json: {e}"))
-                            })?;
-                        serde_json::from_str(&content).map_err(|e| {
-                            AppError::Internal(format!("failed to parse _routes.json: {e}"))
-                        })?
-                    } else {
-                        Vec::new()
-                    };
+                let routes: Vec<crate::build::functions::FunctionRoute> = if manifest_path.exists()
+                {
+                    let content = tokio::fs::read_to_string(&manifest_path)
+                        .await
+                        .map_err(|e| {
+                            AppError::Internal(format!("failed to read _routes.json: {e}"))
+                        })?;
+                    serde_json::from_str(&content).map_err(|e| {
+                        AppError::Internal(format!("failed to parse _routes.json: {e}"))
+                    })?
+                } else {
+                    Vec::new()
+                };
 
                 let output_dir = dir.to_string_lossy().to_string();
                 let _ = registry.unregister(spec.project_id).await;
@@ -227,6 +246,10 @@ impl RuntimeBackend for PoolBackend {
 
     async fn wake(&self, project_id: Uuid) -> Result<Option<String>, AppError> {
         self.pool.wake(project_id).await
+    }
+
+    async fn suspend(&self, project_id: Uuid) -> Result<bool, AppError> {
+        self.pool.suspend_project(project_id).await
     }
 
     async fn suspend_idle(&self, threshold: Duration) -> usize {

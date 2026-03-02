@@ -19,7 +19,9 @@ pub enum BuildOutput {
     AstroSSR,
     SvelteKitSSR,
     RemixSSR,
-    Static { dir: String },
+    Static {
+        dir: String,
+    },
     /// Serverless functions only (rift/functions/ directory, no framework).
     Functions,
 }
@@ -237,9 +239,13 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
         })
         .ok_or_else(|| AppError::BadRequest("project repo has no build command".into()))?;
 
-    let all_deps = dependencies.iter().chain(dev_dependencies.iter()).copied().collect::<Vec<_>>();
+    let all_deps = dependencies
+        .iter()
+        .chain(dev_dependencies.iter())
+        .copied()
+        .collect::<Vec<_>>();
 
-    let looks_like_next = all_deps.iter().any(|dep| *dep == "next")
+    let looks_like_next = all_deps.contains(&"next")
         || workspace_dir.join("next.config.js").exists()
         || workspace_dir.join("next.config.ts").exists()
         || workspace_dir.join("next.config.mjs").exists();
@@ -254,7 +260,7 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
         });
     }
 
-    let looks_like_nuxt = all_deps.iter().any(|dep| *dep == "nuxt");
+    let looks_like_nuxt = all_deps.contains(&"nuxt");
 
     if looks_like_nuxt {
         return Ok(BuildPlan {
@@ -267,8 +273,8 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
     }
 
     // Astro with @astrojs/node adapter → SSR
-    let has_astro = all_deps.iter().any(|dep| *dep == "astro");
-    let has_astro_node = all_deps.iter().any(|dep| *dep == "@astrojs/node");
+    let has_astro = all_deps.contains(&"astro");
+    let has_astro_node = all_deps.contains(&"@astrojs/node");
     if has_astro && has_astro_node {
         return Ok(BuildPlan {
             framework: "astro".to_owned(),
@@ -291,8 +297,8 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
     }
 
     // SvelteKit with adapter-node → SSR
-    let has_sveltekit = all_deps.iter().any(|dep| *dep == "@sveltejs/kit");
-    let has_adapter_node = all_deps.iter().any(|dep| *dep == "@sveltejs/adapter-node");
+    let has_sveltekit = all_deps.contains(&"@sveltejs/kit");
+    let has_adapter_node = all_deps.contains(&"@sveltejs/adapter-node");
     if has_sveltekit && has_adapter_node {
         return Ok(BuildPlan {
             framework: "sveltekit".to_owned(),
@@ -305,7 +311,8 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
 
     // SvelteKit with platform-specific adapter → reject early
     if has_sveltekit {
-        if let Some(platform) = check_unsupported_adapter(&all_deps, UNSUPPORTED_SVELTEKIT_ADAPTERS) {
+        if let Some(platform) = check_unsupported_adapter(&all_deps, UNSUPPORTED_SVELTEKIT_ADAPTERS)
+        {
             return Err(AppError::BadRequest(format!(
                 "This project uses @sveltejs/adapter-{} which produces output that cannot be deployed here. \
                  Switch to @sveltejs/adapter-node for SSR or @sveltejs/adapter-static for static output.",
@@ -315,9 +322,9 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
     }
 
     // Remix → always SSR
-    let has_remix = all_deps
-        .iter()
-        .any(|dep| *dep == "@remix-run/dev" || *dep == "@remix-run/react" || *dep == "@react-router/dev");
+    let has_remix = all_deps.iter().any(|dep| {
+        *dep == "@remix-run/dev" || *dep == "@remix-run/react" || *dep == "@react-router/dev"
+    });
     if has_remix {
         return Ok(BuildPlan {
             framework: "remix".to_owned(),
@@ -331,7 +338,7 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
     // Detect framework from known web framework dependencies
     let framework = WEB_FRAMEWORKS
         .iter()
-        .find(|&&fw| all_deps.iter().any(|dep| *dep == fw))
+        .find(|&&fw| all_deps.contains(&fw))
         .map(|&fw| if fw == "next" { "nextjs" } else { fw }.to_owned())
         .unwrap_or_else(|| project.framework.clone());
 
@@ -339,7 +346,9 @@ pub fn detect_build_plan(project: &Project, workspace_dir: &Path) -> Result<Buil
     // If no framework was detected but functions exist, treat as functions-only project
     if crate::build::functions::has_functions(workspace_dir)
         && framework == project.framework
-        && !all_deps.iter().any(|dep| WEB_FRAMEWORKS.iter().any(|fw| dep == fw))
+        && !all_deps
+            .iter()
+            .any(|dep| WEB_FRAMEWORKS.iter().any(|fw| dep == fw))
     {
         return Ok(BuildPlan {
             framework: "functions".to_owned(),
@@ -512,9 +521,7 @@ fn find_deployable_app(workspace_dir: &Path) -> Option<WorkspaceApp> {
                 })
                 .collect();
 
-            let framework = WEB_FRAMEWORKS
-                .iter()
-                .find(|&&fw| all_deps.iter().any(|dep| *dep == fw));
+            let framework = WEB_FRAMEWORKS.iter().find(|&&fw| all_deps.contains(&fw));
 
             if let Some(&fw) = framework {
                 let dir_name_str = entry.file_name().to_string_lossy().to_string();
@@ -526,14 +533,13 @@ fn find_deployable_app(workspace_dir: &Path) -> Option<WorkspaceApp> {
 
                 let has_index_html = entry.path().join("index.html").exists();
 
-                let is_astro_ssr =
-                    fw == "astro" && all_deps.iter().any(|dep| *dep == "@astrojs/node");
-                let is_sveltekit_ssr = fw == "@sveltejs/kit"
-                    && all_deps.iter().any(|dep| *dep == "@sveltejs/adapter-node");
+                let is_astro_ssr = fw == "astro" && all_deps.contains(&"@astrojs/node");
+                let is_sveltekit_ssr =
+                    fw == "@sveltejs/kit" && all_deps.contains(&"@sveltejs/adapter-node");
                 let is_remix = fw == "@remix-run/dev"
-                    || all_deps.iter().any(|dep| {
-                        *dep == "@remix-run/react" || *dep == "@react-router/dev"
-                    });
+                    || all_deps
+                        .iter()
+                        .any(|dep| *dep == "@remix-run/react" || *dep == "@react-router/dev");
 
                 let unsupported_platform = if fw == "astro" && !is_astro_ssr {
                     check_unsupported_adapter(&all_deps, UNSUPPORTED_ASTRO_ADAPTERS)

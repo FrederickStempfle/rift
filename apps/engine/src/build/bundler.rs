@@ -85,20 +85,25 @@ pub async fn generate_pool_entry(
         RuntimeKind::NextDeno { dir } => {
             let standalone_dir = dir.join(".next/standalone");
             let (server_js, server_dir) = if standalone_dir.join("server.js").exists() {
-                ("server.js".to_string(), standalone_dir.to_string_lossy().to_string())
+                (
+                    "server.js".to_string(),
+                    standalone_dir.to_string_lossy().to_string(),
+                )
             } else {
                 // Find server.js in monorepo nested structure
-                find_server_js_in_standalone(&standalone_dir)
-                    .unwrap_or_else(|| ("server.js".to_string(), standalone_dir.to_string_lossy().to_string()))
+                find_server_js_in_standalone(&standalone_dir).unwrap_or_else(|| {
+                    (
+                        "server.js".to_string(),
+                        standalone_dir.to_string_lossy().to_string(),
+                    )
+                })
             };
 
             // Read the wrapper template and inject paths
             let wrapper_src = wrapper_dir.join("wrappers/next_wrapper.ts");
-            let mut content = fs::read_to_string(&wrapper_src).await.map_err(|e| {
-                AppError::Internal(format!(
-                    "failed to read next_wrapper.ts: {e}"
-                ))
-            })?;
+            let mut content = fs::read_to_string(&wrapper_src)
+                .await
+                .map_err(|e| AppError::Internal(format!("failed to read next_wrapper.ts: {e}")))?;
 
             // Replace the env var defaults with actual values
             content = content.replace(
@@ -110,11 +115,9 @@ pub async fn generate_pool_entry(
                 &format!(r#""{server_dir}""#),
             );
 
-            fs::write(&entry_path, content).await.map_err(|e| {
-                AppError::Internal(format!(
-                    "failed to write pool entry: {e}"
-                ))
-            })?;
+            fs::write(&entry_path, content)
+                .await
+                .map_err(|e| AppError::Internal(format!("failed to write pool entry: {e}")))?;
 
             Ok(entry_path)
         }
@@ -123,11 +126,9 @@ pub async fn generate_pool_entry(
                 && entry.to_string_lossy().contains("build/server");
 
             let wrapper_src = wrapper_dir.join("wrappers/node_wrapper.ts");
-            let mut content = fs::read_to_string(&wrapper_src).await.map_err(|e| {
-                AppError::Internal(format!(
-                    "failed to read node_wrapper.ts: {e}"
-                ))
-            })?;
+            let mut content = fs::read_to_string(&wrapper_src)
+                .await
+                .map_err(|e| AppError::Internal(format!("failed to read node_wrapper.ts: {e}")))?;
 
             let entry_str = entry.to_string_lossy().to_string();
             let dir_str = dir.to_string_lossy().to_string();
@@ -145,11 +146,9 @@ pub async fn generate_pool_entry(
                 if is_remix { "true" } else { "false" },
             );
 
-            fs::write(&entry_path, content).await.map_err(|e| {
-                AppError::Internal(format!(
-                    "failed to write pool entry: {e}"
-                ))
-            })?;
+            fs::write(&entry_path, content)
+                .await
+                .map_err(|e| AppError::Internal(format!("failed to write pool entry: {e}")))?;
 
             Ok(entry_path)
         }
@@ -157,9 +156,7 @@ pub async fn generate_pool_entry(
 }
 
 /// Find server.js path and directory within a standalone dir.
-fn find_server_js_in_standalone(
-    standalone_dir: &Path,
-) -> Option<(String, String)> {
+fn find_server_js_in_standalone(standalone_dir: &Path) -> Option<(String, String)> {
     let Ok(entries) = std::fs::read_dir(standalone_dir) else {
         return None;
     };
@@ -169,10 +166,7 @@ fn find_server_js_in_standalone(
         }
         let d1 = entry.path();
         if d1.join("server.js").exists() {
-            return Some((
-                "server.js".to_string(),
-                d1.to_string_lossy().to_string(),
-            ));
+            return Some(("server.js".to_string(), d1.to_string_lossy().to_string()));
         }
         let Ok(sub) = std::fs::read_dir(&d1) else {
             continue;
@@ -183,10 +177,7 @@ fn find_server_js_in_standalone(
             }
             let d2 = sub_entry.path();
             if d2.join("server.js").exists() {
-                return Some((
-                    "server.js".to_string(),
-                    d2.to_string_lossy().to_string(),
-                ));
+                return Some(("server.js".to_string(), d2.to_string_lossy().to_string()));
             }
         }
     }

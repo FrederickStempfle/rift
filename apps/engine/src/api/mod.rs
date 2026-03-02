@@ -21,14 +21,16 @@ use crate::{
     db::DbPool,
     proxy::{
         acme::AcmeChallengeStore, analytics_collector::AnalyticsCollector,
-        firewall_cache::FirewallCache, tls::CertResolver,
+        firewall_cache::FirewallCache, routing_cache::RoutingCache, tls::CertResolver,
     },
     runtime::backend::RuntimeBackend,
+    scheduler::Scheduler,
     services::{
         audit::AuditLogger, auth::TokenService, password::PasswordService,
         rate_limit::AuthRateLimiters,
     },
     ssl::SslManager,
+    state::StateStore,
     ws::LogBroadcaster,
 };
 
@@ -63,6 +65,12 @@ pub struct AppState {
     pub ssl_manager: SslManager,
     pub challenge_store: AcmeChallengeStore,
     pub cert_resolver: CertResolver,
+    /// Hot-path routing cache (host → project_id).
+    pub routing_cache: RoutingCache,
+    /// Distributed state store (local or Redis-backed).
+    pub state_store: Arc<dyn StateStore>,
+    /// Scheduler for placement decisions.
+    pub scheduler: Arc<Scheduler>,
     #[cfg(feature = "v8-isolate")]
     pub isolate_pool: Option<crate::runtime::isolate::IsolatePool>,
 }
@@ -119,6 +127,18 @@ pub fn router(state: AppState) -> Router {
         .route("/api/analytics", get(analytics::get_analytics))
         .route("/api/runtime/stats", get(runtime::get_runtime_stats))
         .route("/api/runtime/project", get(runtime::get_project_runtime))
+        .route(
+            "/api/projects/{project_id}/stop",
+            post(runtime::stop_project),
+        )
+        .route(
+            "/api/projects/{project_id}/suspend",
+            post(runtime::suspend_project),
+        )
+        .route(
+            "/api/projects/{project_id}/wake",
+            post(runtime::wake_project),
+        )
         .route("/api/logs", get(logs::list_logs))
         .route("/api/ws/logs", get(crate::ws::handler::ws_logs_handler))
         .layer(DefaultBodyLimit::max(1_048_576))

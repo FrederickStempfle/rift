@@ -12,6 +12,12 @@ pub struct CertResolver {
     certs: Arc<RwLock<HashMap<String, Arc<CertifiedKey>>>>,
 }
 
+impl Default for CertResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CertResolver {
     pub fn new() -> Self {
         Self {
@@ -112,11 +118,11 @@ impl ResolvesServerCert for CertResolver {
 pub fn generate_self_signed(base_domain: &str) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     use rcgen::{CertificateParams, DnType, KeyPair, SanType};
 
-    let mut params = CertificateParams::new(vec![
-        base_domain.to_owned(),
-        format!("*.{base_domain}"),
-    ])?;
-    params.distinguished_name.push(DnType::CommonName, base_domain);
+    let mut params =
+        CertificateParams::new(vec![base_domain.to_owned(), format!("*.{base_domain}")])?;
+    params
+        .distinguished_name
+        .push(DnType::CommonName, base_domain);
     params.subject_alt_names = vec![
         SanType::DnsName(base_domain.try_into()?),
         SanType::DnsName(format!("*.{base_domain}").try_into()?),
@@ -125,5 +131,8 @@ pub fn generate_self_signed(base_domain: &str) -> anyhow::Result<(Vec<u8>, Vec<u
     let key_pair = KeyPair::generate()?;
     let cert = params.self_signed(&key_pair)?;
 
-    Ok((cert.pem().into_bytes(), key_pair.serialize_pem().into_bytes()))
+    Ok((
+        cert.pem().into_bytes(),
+        key_pair.serialize_pem().into_bytes(),
+    ))
 }

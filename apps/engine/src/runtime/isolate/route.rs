@@ -2,7 +2,7 @@
 ///
 /// Supports exact segments (`/api/hello`), parameterized segments
 /// (`/api/users/:id`), and root (`/`).
-
+///
 /// Check if a route pattern matches a URL path.
 pub fn route_matches(pattern: &str, path: &str) -> bool {
     if pattern == "/" {
@@ -87,7 +87,10 @@ mod tests {
 
     #[test]
     fn nested_with_param() {
-        assert!(route_matches("/api/v1/users/:id/posts", "/api/v1/users/42/posts"));
+        assert!(route_matches(
+            "/api/v1/users/:id/posts",
+            "/api/v1/users/42/posts"
+        ));
     }
 
     #[test]

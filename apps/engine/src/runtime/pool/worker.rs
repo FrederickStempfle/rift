@@ -71,15 +71,18 @@ impl Worker {
             .stderr(std::process::Stdio::piped());
 
         let seccomp_applied = if let Some(profile_path) = seccomp_profile {
-            cmd.env("RIFT_SECCOMP_PROFILE", profile_path.to_string_lossy().as_ref());
+            cmd.env(
+                "RIFT_SECCOMP_PROFILE",
+                profile_path.to_string_lossy().as_ref(),
+            );
             true
         } else {
             false
         };
 
-        let child = cmd.spawn().map_err(|e| {
-            AppError::Internal(format!("failed to spawn warm worker: {e}"))
-        })?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| AppError::Internal(format!("failed to spawn warm worker: {e}")))?;
 
         Ok(Self {
             id,
@@ -119,10 +122,7 @@ impl Worker {
             .send()
             .await
             .map_err(|e| {
-                AppError::Internal(format!(
-                    "failed to specialize worker {}: {e}",
-                    self.id
-                ))
+                AppError::Internal(format!("failed to specialize worker {}: {e}", self.id))
             })?;
 
         if !resp.status().is_success() {

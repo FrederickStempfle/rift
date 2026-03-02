@@ -35,11 +35,7 @@ pub fn apply_namespace_isolation(cmd: &mut tokio::process::Command) -> Result<()
                 // won't work but the process can still run.
                 // Log via stderr since tracing isn't available in pre_exec.
                 let msg = format!("rift: unshare(CLONE_NEWPID|CLONE_NEWNS) failed: {err}\n");
-                let _ = libc::write(
-                    2,
-                    msg.as_ptr() as *const libc::c_void,
-                    msg.len(),
-                );
+                let _ = libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
                 // Continue without namespace isolation rather than failing
                 return Ok(());
             }

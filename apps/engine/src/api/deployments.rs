@@ -11,6 +11,7 @@ use crate::{
     api::{auth::AuthUser, AppState},
     db::{deployments, domains, projects},
     error::{AppError, AppResult},
+    lifecycle::operations::{self, BeginOutcome},
 };
 
 pub fn routes() -> Router<AppState> {
@@ -25,6 +26,9 @@ pub struct ListDeploymentsQuery {
 #[derive(Debug, Deserialize)]
 pub struct CreateDeploymentRequest {
     pub project_id: Uuid,
+    /// Optional idempotency key. If provided, replaying the same op_id
+    /// returns the prior result without re-executing the build.
+    pub op_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -41,6 +45,7 @@ pub struct DeploymentResponse {
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    pub suspended_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub async fn list_deployments(
@@ -72,10 +77,68 @@ pub async fn create_deployment(
             .await?
             .ok_or_else(|| AppError::NotFound("project not found".into()))?;
 
-    let deployment = state
+    let op_id = payload.op_id.unwrap_or_else(Uuid::new_v4);
+
+    // Idempotency: check if this op_id was already executed.
+    match operations::begin_operation(&state.pool, op_id, "deploy", project.id, None).await? {
+        BeginOutcome::Completed(op) => {
+            // Return the prior result without re-executing.
+            if let Some(deployment_id) = op.deployment_id {
+                if let Some(deployment) =
+                    deployments::get_deployment_by_id(&state.pool, deployment_id).await?
+                {
+                    let public_url = public_url_for_deployment(&state, &project).await?;
+                    return Ok((
+                        StatusCode::CREATED,
+                        Json(DeploymentResponse::from_deployment(deployment, public_url)),
+                    ));
+                }
+            }
+            // Fallback: op completed but deployment not found — return error from op.
+            return Err(AppError::Internal(
+                op.error
+                    .unwrap_or_else(|| "prior operation result unavailable".into()),
+            ));
+        }
+        BeginOutcome::Failed(op) => {
+            return Err(AppError::Conflict(
+                op.error
+                    .unwrap_or_else(|| "prior operation failed".to_owned()),
+            ));
+        }
+        BeginOutcome::InProgress => {
+            return Err(AppError::Conflict("operation already in progress".into()));
+        }
+        BeginOutcome::Proceed => {}
+    }
+
+    let deployment = match state
         .build_manager
         .enqueue_project_build(project.clone())
-        .await?;
+        .await
+    {
+        Ok(deployment) => {
+            operations::complete_operation(
+                &state.pool,
+                op_id,
+                serde_json::json!({ "deployment_id": deployment.id }),
+            )
+            .await?;
+            // Backfill the deployment_id on the operation row.
+            sqlx::query("UPDATE lifecycle_operations SET deployment_id = $2 WHERE op_id = $1")
+                .bind(op_id)
+                .bind(deployment.id)
+                .execute(&state.pool)
+                .await
+                .map_err(AppError::Db)?;
+            deployment
+        }
+        Err(e) => {
+            let _ = operations::fail_operation(&state.pool, op_id, &e.to_string()).await;
+            return Err(e);
+        }
+    };
+
     let public_url = public_url_for_deployment(&state, &project).await?;
 
     Ok((
@@ -113,6 +176,7 @@ impl DeploymentResponse {
             started_at: value.started_at,
             finished_at: value.finished_at,
             created_at: value.created_at,
+            suspended_at: value.suspended_at,
         }
     }
 }

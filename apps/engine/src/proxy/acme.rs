@@ -8,6 +8,12 @@ pub struct AcmeChallengeStore {
     challenges: Arc<RwLock<HashMap<String, String>>>,
 }
 
+impl Default for AcmeChallengeStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AcmeChallengeStore {
     pub fn new() -> Self {
         Self {

@@ -80,7 +80,7 @@ pub const SECCOMP_PROFILE: &str = r#"{
 /// - `pivot_root` / `chroot` — Root filesystem changes
 /// - `personality` — Change execution domain (could disable ASLR)
 /// - `userfaultfd` — User-space page fault handling (potential exploit vector)
-
+///
 /// Seccomp enforcement state for the worker pool.
 #[derive(Debug, Clone)]
 pub struct SeccompEnforcer {
@@ -142,9 +142,9 @@ impl SeccompEnforcer {
     /// Return Docker-compatible `--security-opt` argument for spawning contained processes,
     /// or None if seccomp is not available / not enforced.
     pub fn docker_security_opt(&self) -> Option<String> {
-        self.profile_path.as_ref().map(|p| {
-            format!("seccomp={}", p.display())
-        })
+        self.profile_path
+            .as_ref()
+            .map(|p| format!("seccomp={}", p.display()))
     }
 
     /// Check if seccomp should be applied to worker processes.
@@ -157,9 +157,7 @@ impl SeccompEnforcer {
 pub fn write_seccomp_profile(dir: &Path) -> Result<PathBuf, crate::error::AppError> {
     let profile_path = dir.join("rift-worker-seccomp.json");
     std::fs::write(&profile_path, SECCOMP_PROFILE).map_err(|e| {
-        crate::error::AppError::Internal(format!(
-            "failed to write seccomp profile: {e}"
-        ))
+        crate::error::AppError::Internal(format!("failed to write seccomp profile: {e}"))
     })?;
     Ok(profile_path)
 }

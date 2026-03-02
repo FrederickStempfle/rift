@@ -42,7 +42,8 @@ pub async fn create_deployment(
             port,
             started_at,
             finished_at,
-            created_at
+            created_at,
+            suspended_at
         "#,
     )
     .bind(input.project_id)
@@ -97,7 +98,8 @@ pub async fn get_deployment_for_user(
             d.port,
             d.started_at,
             d.finished_at,
-            d.created_at
+            d.created_at,
+            d.suspended_at
         FROM deployments d
         JOIN projects p ON p.id = d.project_id
         WHERE d.id = $1 AND p.user_id = $2
@@ -129,7 +131,8 @@ pub async fn list_deployments_for_project(
             d.port,
             d.started_at,
             d.finished_at,
-            d.created_at
+            d.created_at,
+            d.suspended_at
         FROM deployments d
         JOIN projects p ON p.id = d.project_id
         WHERE d.project_id = $1 AND p.user_id = $2
@@ -291,6 +294,36 @@ pub async fn list_logs_for_deployment(
     .map_err(AppError::Db)
 }
 
+pub async fn get_deployment_by_id(
+    pool: &PgPool,
+    deployment_id: Uuid,
+) -> Result<Option<Deployment>, AppError> {
+    sqlx::query_as::<_, Deployment>(
+        r#"
+        SELECT
+            id,
+            project_id,
+            commit_sha,
+            commit_message,
+            branch,
+            status::text AS status,
+            build_duration_ms,
+            url,
+            port,
+            started_at,
+            finished_at,
+            created_at,
+            suspended_at
+        FROM deployments
+        WHERE id = $1
+        "#,
+    )
+    .bind(deployment_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Db)
+}
+
 pub async fn latest_ready_deployment_for_project(
     pool: &PgPool,
     project_id: Uuid,
@@ -309,9 +342,43 @@ pub async fn latest_ready_deployment_for_project(
             port,
             started_at,
             finished_at,
-            created_at
+            created_at,
+            suspended_at
         FROM deployments
         WHERE project_id = $1 AND status = 'ready'
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Db)
+}
+
+pub async fn latest_ready_or_suspended_deployment_for_project(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Option<Deployment>, AppError> {
+    sqlx::query_as::<_, Deployment>(
+        r#"
+        SELECT
+            id,
+            project_id,
+            commit_sha,
+            commit_message,
+            branch,
+            status::text AS status,
+            build_duration_ms,
+            url,
+            port,
+            started_at,
+            finished_at,
+            created_at,
+            suspended_at
+        FROM deployments
+        WHERE project_id = $1
+          AND status IN ('ready', 'suspended')
         ORDER BY created_at DESC, id DESC
         LIMIT 1
         "#,
@@ -340,7 +407,8 @@ pub async fn latest_deployment_for_project(
             port,
             started_at,
             finished_at,
-            created_at
+            created_at,
+            suspended_at
         FROM deployments
         WHERE project_id = $1
         ORDER BY created_at DESC, id DESC
@@ -381,7 +449,7 @@ pub async fn list_latest_ready_per_project(pool: &PgPool) -> Result<Vec<Deployme
         SELECT DISTINCT ON (project_id)
             id, project_id, commit_sha, commit_message, branch,
             status::text AS status, build_duration_ms, url, port,
-            started_at, finished_at, created_at
+            started_at, finished_at, created_at, suspended_at
         FROM deployments
         WHERE status = 'ready'
         ORDER BY project_id, created_at DESC, id DESC
@@ -414,7 +482,8 @@ pub async fn list_latest_for_projects(
             port,
             started_at,
             finished_at,
-            created_at
+            created_at,
+            suspended_at
         FROM deployments
         WHERE project_id = ANY($1)
         ORDER BY project_id, created_at DESC, id DESC
@@ -437,7 +506,7 @@ pub async fn list_old_ready_deployments(
         SELECT
             id, project_id, commit_sha, commit_message, branch,
             status::text AS status, build_duration_ms, url, port,
-            started_at, finished_at, created_at
+            started_at, finished_at, created_at, suspended_at
         FROM deployments
         WHERE project_id = $1
           AND status = 'ready'
@@ -446,6 +515,63 @@ pub async fn list_old_ready_deployments(
     )
     .bind(project_id)
     .bind(current_deployment_id)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Db)
+}
+
+/// CAS: transition ready → suspended and set suspended_at.
+pub async fn mark_suspended(pool: &PgPool, deployment_id: Uuid) -> Result<bool, AppError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE deployments
+        SET status = 'suspended',
+            suspended_at = now()
+        WHERE id = $1 AND status = 'ready'
+        "#,
+    )
+    .bind(deployment_id)
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// CAS: transition suspended → ready and clear suspended_at.
+pub async fn mark_ready_from_suspended(
+    pool: &PgPool,
+    deployment_id: Uuid,
+) -> Result<bool, AppError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE deployments
+        SET status = 'ready',
+            suspended_at = NULL
+        WHERE id = $1 AND status = 'suspended'
+        "#,
+    )
+    .bind(deployment_id)
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Returns the latest suspended deployment per project (for restore on startup).
+pub async fn list_latest_suspended_per_project(pool: &PgPool) -> Result<Vec<Deployment>, AppError> {
+    sqlx::query_as::<_, Deployment>(
+        r#"
+        SELECT DISTINCT ON (project_id)
+            id, project_id, commit_sha, commit_message, branch,
+            status::text AS status, build_duration_ms, url, port,
+            started_at, finished_at, created_at, suspended_at
+        FROM deployments
+        WHERE status = 'suspended'
+        ORDER BY project_id, created_at DESC, id DESC
+        "#,
+    )
     .fetch_all(pool)
     .await
     .map_err(AppError::Db)

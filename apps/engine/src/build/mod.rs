@@ -13,6 +13,10 @@ use crate::{
     config::Config,
     db::{deployments, env_vars, models::Project, users},
     error::AppError,
+    lifecycle::{
+        state_machine::DeploymentState,
+        transition::{transition, transition_to_failed, transition_to_ready},
+    },
     runtime::{backend::RuntimeBackend, RuntimeKind, RuntimeLaunchSpec},
     ws::LogBroadcaster,
 };
@@ -115,7 +119,7 @@ impl BuildManager {
                 "build",
             )
             .await?;
-            deployments::update_status(&self.pool, deployment_id, "queued").await?;
+            // Deployment is already in queued state from creation.
         }
 
         let _permit = self
@@ -137,7 +141,17 @@ impl BuildManager {
         let started_at = Instant::now();
         let mut stage_timings: Vec<(&str, u128)> = Vec::new();
         deployments::set_started_at(&self.pool, deployment_id, Utc::now()).await?;
-        deployments::update_status(&self.pool, deployment_id, "cloning").await?;
+        if !transition(
+            &self.pool,
+            deployment_id,
+            DeploymentState::Queued,
+            DeploymentState::Cloning,
+        )
+        .await?
+        {
+            tracing::warn!(deployment_id = %deployment_id, "CAS transition queued→cloning failed — aborting build");
+            return Ok(());
+        }
 
         let workspace_dir = self.deploy_root.join(deployment_id.to_string());
         if workspace_dir.exists() {
@@ -176,8 +190,7 @@ impl BuildManager {
             let pool = self.pool.clone();
             tokio::spawn(async move {
                 let _ =
-                    deployments::mark_failed(&pool, deployment_id, Some(elapsed_ms(started_at)))
-                        .await;
+                    transition_to_failed(&pool, deployment_id, Some(elapsed_ms(started_at))).await;
             });
         })?;
         stage_timings.push(("clone", started_at.elapsed().as_millis()));
@@ -198,7 +211,7 @@ impl BuildManager {
                     "build",
                 )
                 .await?;
-                deployments::mark_failed(&self.pool, deployment_id, Some(elapsed_ms(started_at)))
+                transition_to_failed(&self.pool, deployment_id, Some(elapsed_ms(started_at)))
                     .await?;
                 return Err(error);
             }
@@ -232,7 +245,17 @@ impl BuildManager {
             .await?;
         }
 
-        deployments::update_status(&self.pool, deployment_id, "building").await?;
+        if !transition(
+            &self.pool,
+            deployment_id,
+            DeploymentState::Cloning,
+            DeploymentState::Building,
+        )
+        .await?
+        {
+            tracing::warn!(deployment_id = %deployment_id, "CAS transition cloning→building failed — aborting build");
+            return Ok(());
+        }
 
         // Dependency caching strategy:
         //   1. Point the package manager's native cache at a persistent directory
@@ -330,7 +353,7 @@ impl BuildManager {
                     "build",
                 )
                 .await?;
-                deployments::mark_failed(&self.pool, deployment_id, Some(elapsed_ms(started_at)))
+                transition_to_failed(&self.pool, deployment_id, Some(elapsed_ms(started_at)))
                     .await?;
                 return Err(error);
             }
@@ -416,13 +439,22 @@ impl BuildManager {
                 "build",
             )
             .await?;
-            deployments::mark_failed(&self.pool, deployment_id, Some(elapsed_ms(started_at)))
-                .await?;
+            transition_to_failed(&self.pool, deployment_id, Some(elapsed_ms(started_at))).await?;
             return Err(error);
         }
 
         stage_timings.push(("build", started_at.elapsed().as_millis()));
-        deployments::update_status(&self.pool, deployment_id, "deploying").await?;
+        if !transition(
+            &self.pool,
+            deployment_id,
+            DeploymentState::Building,
+            DeploymentState::Deploying,
+        )
+        .await?
+        {
+            tracing::warn!(deployment_id = %deployment_id, "CAS transition building→deploying failed — aborting build");
+            return Ok(());
+        }
         let mut runtime_kind = match plan.output {
             BuildOutput::Nuxt => {
                 // Find the Nuxt output directory (.output/server/index.mjs)
@@ -440,15 +472,13 @@ impl BuildManager {
                             "build",
                         )
                         .await?;
-                        deployments::mark_failed(
+                        transition_to_failed(
                             &self.pool,
                             deployment_id,
                             Some(elapsed_ms(started_at)),
                         )
                         .await?;
-                        return Err(AppError::Internal(
-                            "Nuxt server output not found".into(),
-                        ));
+                        return Err(AppError::Internal("Nuxt server output not found".into()));
                     }
                 };
 
@@ -485,7 +515,7 @@ impl BuildManager {
                             "build",
                         )
                         .await?;
-                        deployments::mark_failed(
+                        transition_to_failed(
                             &self.pool,
                             deployment_id,
                             Some(elapsed_ms(started_at)),
@@ -506,8 +536,7 @@ impl BuildManager {
                     standalone_dir.clone()
                 } else {
                     // Search for server.js in subdirectories
-                    find_server_js_dir(&standalone_dir)
-                        .unwrap_or_else(|| standalone_dir.clone())
+                    find_server_js_dir(&standalone_dir).unwrap_or_else(|| standalone_dir.clone())
                 };
 
                 let static_src = next_app_dir.join(".next/static");
@@ -524,8 +553,7 @@ impl BuildManager {
                 RuntimeKind::NextDeno { dir: next_app_dir }
             }
             BuildOutput::AstroSSR => {
-                let app_dir =
-                    find_ssr_entry(&workspace_dir, "dist/server/entry.mjs").await;
+                let app_dir = find_ssr_entry(&workspace_dir, "dist/server/entry.mjs").await;
                 let app_dir = match app_dir {
                     Some(dir) => dir,
                     None => {
@@ -538,15 +566,13 @@ impl BuildManager {
                             "build",
                         )
                         .await?;
-                        deployments::mark_failed(
+                        transition_to_failed(
                             &self.pool,
                             deployment_id,
                             Some(elapsed_ms(started_at)),
                         )
                         .await?;
-                        return Err(AppError::Internal(
-                            "Astro SSR output not found".into(),
-                        ));
+                        return Err(AppError::Internal("Astro SSR output not found".into()));
                     }
                 };
 
@@ -561,11 +587,13 @@ impl BuildManager {
                 )
                 .await?;
 
-                RuntimeKind::NodeServer { dir: app_dir, entry }
+                RuntimeKind::NodeServer {
+                    dir: app_dir,
+                    entry,
+                }
             }
             BuildOutput::SvelteKitSSR => {
-                let app_dir =
-                    find_ssr_entry(&workspace_dir, "build/index.js").await;
+                let app_dir = find_ssr_entry(&workspace_dir, "build/index.js").await;
                 let app_dir = match app_dir {
                     Some(dir) => dir,
                     None => {
@@ -578,15 +606,13 @@ impl BuildManager {
                             "build",
                         )
                         .await?;
-                        deployments::mark_failed(
+                        transition_to_failed(
                             &self.pool,
                             deployment_id,
                             Some(elapsed_ms(started_at)),
                         )
                         .await?;
-                        return Err(AppError::Internal(
-                            "SvelteKit SSR output not found".into(),
-                        ));
+                        return Err(AppError::Internal("SvelteKit SSR output not found".into()));
                     }
                 };
 
@@ -601,11 +627,13 @@ impl BuildManager {
                 )
                 .await?;
 
-                RuntimeKind::NodeServer { dir: app_dir, entry }
+                RuntimeKind::NodeServer {
+                    dir: app_dir,
+                    entry,
+                }
             }
             BuildOutput::RemixSSR => {
-                let app_dir =
-                    find_ssr_entry(&workspace_dir, "build/server/index.js").await;
+                let app_dir = find_ssr_entry(&workspace_dir, "build/server/index.js").await;
                 let app_dir = match app_dir {
                     Some(dir) => dir,
                     None => {
@@ -618,15 +646,13 @@ impl BuildManager {
                             "build",
                         )
                         .await?;
-                        deployments::mark_failed(
+                        transition_to_failed(
                             &self.pool,
                             deployment_id,
                             Some(elapsed_ms(started_at)),
                         )
                         .await?;
-                        return Err(AppError::Internal(
-                            "Remix server output not found".into(),
-                        ));
+                        return Err(AppError::Internal("Remix server output not found".into()));
                     }
                 };
 
@@ -641,7 +667,10 @@ impl BuildManager {
                 )
                 .await?;
 
-                RuntimeKind::NodeServer { dir: app_dir, entry }
+                RuntimeKind::NodeServer {
+                    dir: app_dir,
+                    entry,
+                }
             }
             BuildOutput::Static { .. } => {
                 let detected_dir = detect_output_dir(&project, &workspace_dir);
@@ -665,12 +694,8 @@ impl BuildManager {
                         "build",
                     )
                     .await?;
-                    deployments::mark_failed(
-                        &self.pool,
-                        deployment_id,
-                        Some(elapsed_ms(started_at)),
-                    )
-                    .await?;
+                    transition_to_failed(&self.pool, deployment_id, Some(elapsed_ms(started_at)))
+                        .await?;
                     return Err(AppError::Internal(
                         "build output directory not found".into(),
                     ));
@@ -711,15 +736,9 @@ impl BuildManager {
                         "build",
                     )
                     .await?;
-                    deployments::mark_failed(
-                        &self.pool,
-                        deployment_id,
-                        Some(elapsed_ms(started_at)),
-                    )
-                    .await?;
-                    return Err(AppError::Internal(
-                        "no function files found".into(),
-                    ));
+                    transition_to_failed(&self.pool, deployment_id, Some(elapsed_ms(started_at)))
+                        .await?;
+                    return Err(AppError::Internal("no function files found".into()));
                 }
 
                 insert_and_broadcast_log(
@@ -747,7 +766,9 @@ impl BuildManager {
         // Bundle serverless functions alongside the framework if rift/functions/ exists.
         // Each function gets its own Web Worker isolate; non-matching requests
         // fall through to the framework handler.
-        if functions::has_functions(&workspace_dir) && !matches!(plan.output, BuildOutput::Functions) {
+        if functions::has_functions(&workspace_dir)
+            && !matches!(plan.output, BuildOutput::Functions)
+        {
             let fn_output_dir = workspace_dir.join("_rift_functions_output");
             let template_dir = std::path::PathBuf::from(&self.config.worker_loader)
                 .parent()
@@ -789,11 +810,8 @@ impl BuildManager {
                         .await
                         {
                             Ok(combined_code) => {
-                                let combined_path =
-                                    fn_output_dir.join("_rift_combined_entry.ts");
-                                if let Err(e) =
-                                    fs::write(&combined_path, combined_code).await
-                                {
+                                let combined_path = fn_output_dir.join("_rift_combined_entry.ts");
+                                if let Err(e) = fs::write(&combined_path, combined_code).await {
                                     tracing::warn!(
                                         error = %e,
                                         "failed to write combined entry"
@@ -858,9 +876,7 @@ impl BuildManager {
                 .parent()
                 .unwrap_or(std::path::Path::new("/opt/rift/templates"))
                 .to_path_buf();
-            if let Err(e) =
-                generate_pool_entry(&runtime_kind, &workspace_dir, &wrapper_dir).await
-            {
+            if let Err(e) = generate_pool_entry(&runtime_kind, &workspace_dir, &wrapper_dir).await {
                 tracing::warn!(
                     error = %e,
                     "failed to generate pool entry, will use direct entry"
@@ -875,7 +891,7 @@ impl BuildManager {
 
         // Create immutable artifact directory with only runtime-required files.
         // Runtime processes execute from this read-only copy, not from the mutable workspace.
-        let copy_mode = CopyMode::from_str(&self.config.artifact_copy_mode);
+        let copy_mode = self.config.artifact_copy_mode.parse::<CopyMode>().unwrap();
         runtime_kind = create_immutable_artifact(&workspace_dir, runtime_kind, copy_mode).await;
 
         stage_timings.push(("artifact", started_at.elapsed().as_millis()));
@@ -909,7 +925,7 @@ impl BuildManager {
                     "runtime",
                 )
                 .await?;
-                deployments::mark_failed(&self.pool, deployment_id, Some(elapsed_ms(started_at)))
+                transition_to_failed(&self.pool, deployment_id, Some(elapsed_ms(started_at)))
                     .await?;
                 return Err(error);
             }
@@ -978,7 +994,7 @@ impl BuildManager {
         )
         .await?;
 
-        deployments::mark_ready(
+        transition_to_ready(
             &self.pool,
             deployment_id,
             &url,
@@ -1239,9 +1255,11 @@ async fn write_artifact_manifest(
     use crate::runtime::RuntimeKind;
 
     let (runtime_type, entry_point, functions_dir) = match kind {
-        RuntimeKind::StaticDeno { dir } => {
-            ("static", dir.join("_entry.ts").to_string_lossy().to_string(), None)
-        }
+        RuntimeKind::StaticDeno { dir } => (
+            "static",
+            dir.join("_entry.ts").to_string_lossy().to_string(),
+            None,
+        ),
         RuntimeKind::NextDeno { dir } => {
             let standalone = dir.join(".next/standalone");
             ("next", standalone.to_string_lossy().to_string(), None)
@@ -1249,12 +1267,19 @@ async fn write_artifact_manifest(
         RuntimeKind::NodeServer { entry, .. } => {
             ("node_ssr", entry.to_string_lossy().to_string(), None)
         }
-        RuntimeKind::Functions { dir } => {
-            ("functions", dir.join("_entry.ts").to_string_lossy().to_string(), Some(dir.to_string_lossy().to_string()))
-        }
-        RuntimeKind::Combined { entry, functions_dir } => {
-            ("combined", entry.to_string_lossy().to_string(), Some(functions_dir.to_string_lossy().to_string()))
-        }
+        RuntimeKind::Functions { dir } => (
+            "functions",
+            dir.join("_entry.ts").to_string_lossy().to_string(),
+            Some(dir.to_string_lossy().to_string()),
+        ),
+        RuntimeKind::Combined {
+            entry,
+            functions_dir,
+        } => (
+            "combined",
+            entry.to_string_lossy().to_string(),
+            Some(functions_dir.to_string_lossy().to_string()),
+        ),
     };
 
     let manifest = serde_json::json!({
@@ -1265,12 +1290,11 @@ async fn write_artifact_manifest(
     });
 
     let manifest_path = workspace_dir.join("_rift_manifest.json");
-    let content = serde_json::to_string_pretty(&manifest).map_err(|e| {
-        AppError::Internal(format!("failed to serialize manifest: {e}"))
-    })?;
-    fs::write(&manifest_path, content).await.map_err(|e| {
-        AppError::Internal(format!("failed to write manifest: {e}"))
-    })?;
+    let content = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| AppError::Internal(format!("failed to serialize manifest: {e}")))?;
+    fs::write(&manifest_path, content)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to write manifest: {e}")))?;
 
     Ok(())
 }
@@ -1306,14 +1330,19 @@ async fn copy_node_ssr_artifact(
 
     let node_modules_src = workspace_dir.join("node_modules");
     if node_modules_src.exists() {
-        copy_dir_with_mode(&node_modules_src, &artifact_dir.join("node_modules"), copy_mode).await?;
+        copy_dir_with_mode(
+            &node_modules_src,
+            &artifact_dir.join("node_modules"),
+            copy_mode,
+        )
+        .await?;
     }
 
     let pkg_json = workspace_dir.join("package.json");
     if pkg_json.exists() {
-        fs::copy(&pkg_json, &artifact_dir.join("package.json")).await.map_err(|e| {
-            AppError::Internal(format!("failed to copy package.json: {e}"))
-        })?;
+        fs::copy(&pkg_json, &artifact_dir.join("package.json"))
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to copy package.json: {e}")))?;
     }
 
     // Copy public/ if it exists (needed by Remix, sometimes SvelteKit)
@@ -1363,7 +1392,9 @@ async fn create_immutable_artifact(
             }
         }
         RuntimeKind::Functions { dir } => {
-            match copy_dir_with_mode(dir, &artifact_dir.join("_rift_functions_output"), copy_mode).await {
+            match copy_dir_with_mode(dir, &artifact_dir.join("_rift_functions_output"), copy_mode)
+                .await
+            {
                 Ok(()) => Some(RuntimeKind::Functions {
                     dir: artifact_dir.join("_rift_functions_output"),
                 }),
@@ -1373,7 +1404,10 @@ async fn create_immutable_artifact(
                 }
             }
         }
-        RuntimeKind::Combined { entry, functions_dir } => {
+        RuntimeKind::Combined {
+            entry,
+            functions_dir,
+        } => {
             let fn_artifact = artifact_dir.join("_rift_functions_output");
             match copy_dir_with_mode(functions_dir, &fn_artifact, copy_mode).await {
                 Ok(()) => {
@@ -1398,7 +1432,8 @@ async fn create_immutable_artifact(
             }
             let public_src = dir.join("public");
             if public_src.exists() {
-                let _ = copy_dir_with_mode(&public_src, &artifact_dir.join("public"), copy_mode).await;
+                let _ =
+                    copy_dir_with_mode(&public_src, &artifact_dir.join("public"), copy_mode).await;
             }
             let pool_entry = dir.join("_rift_pool_entry.ts");
             if pool_entry.exists() {
@@ -1451,11 +1486,13 @@ async fn set_dir_readonly(dir: &std::path::Path) -> Result<(), AppError> {
     }
     #[cfg(not(unix))]
     {
-        let mut perms = fs::metadata(dir).await
+        let mut perms = fs::metadata(dir)
+            .await
             .map_err(|e| AppError::Internal(format!("failed to read metadata: {e}")))?
             .permissions();
         perms.set_readonly(true);
-        fs::set_permissions(dir, perms).await
+        fs::set_permissions(dir, perms)
+            .await
             .map_err(|e| AppError::Internal(format!("failed to set readonly: {e}")))?;
     }
     Ok(())
@@ -1469,11 +1506,13 @@ async fn set_dir_writable(dir: &std::path::Path) -> Result<(), AppError> {
     }
     #[cfg(not(unix))]
     {
-        let mut perms = fs::metadata(dir).await
+        let mut perms = fs::metadata(dir)
+            .await
             .map_err(|e| AppError::Internal(format!("failed to read metadata: {e}")))?
             .permissions();
         perms.set_readonly(false);
-        fs::set_permissions(dir, perms).await
+        fs::set_permissions(dir, perms)
+            .await
             .map_err(|e| AppError::Internal(format!("failed to set writable: {e}")))?;
     }
     Ok(())
@@ -1485,27 +1524,38 @@ async fn set_permissions_recursive(dir: &std::path::Path, mode: u32) -> Result<(
 
     let perms = std::fs::Permissions::from_mode(mode);
     fs::set_permissions(dir, perms.clone()).await.map_err(|e| {
-        AppError::Internal(format!("failed to set permissions on {}: {e}", dir.display()))
+        AppError::Internal(format!(
+            "failed to set permissions on {}: {e}",
+            dir.display()
+        ))
     })?;
 
-    let mut entries = fs::read_dir(dir).await.map_err(|e| {
-        AppError::Internal(format!("failed to read dir {}: {e}", dir.display()))
-    })?;
+    let mut entries = fs::read_dir(dir)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to read dir {}: {e}", dir.display())))?;
 
-    while let Some(entry) = entries.next_entry().await.map_err(|e| {
-        AppError::Internal(format!("failed to read entry: {e}"))
-    })? {
-        let ft = entry.file_type().await.map_err(|e| {
-            AppError::Internal(format!("failed to get file type: {e}"))
-        })?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to read entry: {e}")))?
+    {
+        let ft = entry
+            .file_type()
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to get file type: {e}")))?;
         if ft.is_dir() {
             Box::pin(set_permissions_recursive(&entry.path(), mode)).await?;
         } else {
             let file_mode = if mode & 0o200 != 0 { 0o644 } else { 0o444 };
             let file_perms = std::fs::Permissions::from_mode(file_mode);
-            fs::set_permissions(entry.path(), file_perms).await.map_err(|e| {
-                AppError::Internal(format!("failed to set permissions on {}: {e}", entry.path().display()))
-            })?;
+            fs::set_permissions(entry.path(), file_perms)
+                .await
+                .map_err(|e| {
+                    AppError::Internal(format!(
+                        "failed to set permissions on {}: {e}",
+                        entry.path().display()
+                    ))
+                })?;
         }
     }
 
@@ -1519,8 +1569,12 @@ fn try_reflink_file(src: &std::path::Path, dst: &std::path::Path) -> bool {
     // FICLONE ioctl number
     const FICLONE: libc::c_ulong = 0x40049409;
 
-    let Ok(src_file) = std::fs::File::open(src) else { return false };
-    let Ok(dst_file) = std::fs::File::create(dst) else { return false };
+    let Ok(src_file) = std::fs::File::open(src) else {
+        return false;
+    };
+    let Ok(dst_file) = std::fs::File::create(dst) else {
+        return false;
+    };
 
     // Safety: FICLONE is a well-defined ioctl on btrfs/xfs/bcachefs.
     unsafe { libc::ioctl(dst_file.as_raw_fd(), FICLONE, src_file.as_raw_fd()) == 0 }
@@ -1530,10 +1584,15 @@ fn try_reflink_file(src: &std::path::Path, dst: &std::path::Path) -> bool {
 fn try_reflink_file(src: &std::path::Path, dst: &std::path::Path) -> bool {
     use std::ffi::CString;
     extern "C" {
-        fn clonefile(src: *const libc::c_char, dst: *const libc::c_char, flags: u32) -> libc::c_int;
+        fn clonefile(src: *const libc::c_char, dst: *const libc::c_char, flags: u32)
+            -> libc::c_int;
     }
-    let Ok(src_c) = CString::new(src.to_string_lossy().as_bytes()) else { return false };
-    let Ok(dst_c) = CString::new(dst.to_string_lossy().as_bytes()) else { return false };
+    let Ok(src_c) = CString::new(src.to_string_lossy().as_bytes()) else {
+        return false;
+    };
+    let Ok(dst_c) = CString::new(dst.to_string_lossy().as_bytes()) else {
+        return false;
+    };
     // Safety: clonefile is available on macOS 10.12+ (APFS).
     unsafe { clonefile(src_c.as_ptr(), dst_c.as_ptr(), 0) == 0 }
 }
@@ -1554,13 +1613,15 @@ pub enum CopyMode {
     Recursive,
 }
 
-impl CopyMode {
-    pub fn from_str(s: &str) -> Self {
-        match s {
+impl std::str::FromStr for CopyMode {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
             "reflink" => Self::Reflink,
             "recursive" => Self::Recursive,
             _ => Self::Auto,
-        }
+        })
     }
 }
 
@@ -1658,25 +1719,31 @@ async fn compute_cache_key(
 
 /// Return environment variables that configure the package manager's native
 /// cache to live inside `cache_dir`, making it persistent across builds.
-pub fn native_cache_env(
-    cache_dir: &std::path::Path,
-    pm: &PackageManager,
-) -> Vec<(String, String)> {
+pub fn native_cache_env(cache_dir: &std::path::Path, pm: &PackageManager) -> Vec<(String, String)> {
     let cache_root = cache_dir.join("native");
     match pm {
-        PackageManager::Npm => vec![
-            ("npm_config_cache".into(), cache_root.join("npm").to_string_lossy().into()),
-        ],
+        PackageManager::Npm => vec![(
+            "npm_config_cache".into(),
+            cache_root.join("npm").to_string_lossy().into(),
+        )],
         PackageManager::Pnpm => vec![
-            ("PNPM_HOME".into(), cache_root.join("pnpm").to_string_lossy().into()),
-            ("npm_config_store_dir".into(), cache_root.join("pnpm-store").to_string_lossy().into()),
+            (
+                "PNPM_HOME".into(),
+                cache_root.join("pnpm").to_string_lossy().into(),
+            ),
+            (
+                "npm_config_store_dir".into(),
+                cache_root.join("pnpm-store").to_string_lossy().into(),
+            ),
         ],
-        PackageManager::Yarn => vec![
-            ("YARN_CACHE_FOLDER".into(), cache_root.join("yarn").to_string_lossy().into()),
-        ],
-        PackageManager::Bun => vec![
-            ("BUN_INSTALL_CACHE_DIR".into(), cache_root.join("bun").to_string_lossy().into()),
-        ],
+        PackageManager::Yarn => vec![(
+            "YARN_CACHE_FOLDER".into(),
+            cache_root.join("yarn").to_string_lossy().into(),
+        )],
+        PackageManager::Bun => vec![(
+            "BUN_INSTALL_CACHE_DIR".into(),
+            cache_root.join("bun").to_string_lossy().into(),
+        )],
     }
 }
 
@@ -1743,9 +1810,9 @@ async fn save_dependency_cache(
         return Ok(());
     }
 
-    fs::create_dir_all(&target_dir).await.map_err(|e| {
-        AppError::Internal(format!("failed to create cache dir: {e}"))
-    })?;
+    fs::create_dir_all(&target_dir)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to create cache dir: {e}")))?;
 
     copy_dir_recursive(&source, &target).await?;
 
@@ -1753,9 +1820,17 @@ async fn save_dependency_cache(
     if let Ok(mut entries) = fs::read_dir(cache_dir).await {
         let mut dirs = Vec::new();
         while let Ok(Some(entry)) = entries.next_entry().await {
-            if entry.file_type().await.map(|ft| ft.is_dir()).unwrap_or(false) {
+            if entry
+                .file_type()
+                .await
+                .map(|ft| ft.is_dir())
+                .unwrap_or(false)
+            {
                 if let Ok(meta) = entry.metadata().await {
-                    dirs.push((entry.path(), meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)));
+                    dirs.push((
+                        entry.path(),
+                        meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                    ));
                 }
             }
         }

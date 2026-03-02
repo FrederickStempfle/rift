@@ -15,6 +15,7 @@ use crate::{
     db::domains::{self, DomainWithProject, NewDomain},
     error::{AppError, AppResult},
     services::audit::AuditEvent,
+    state::RoutingEntry,
     validation,
 };
 
@@ -124,6 +125,14 @@ pub async fn create_domain(
         })
         .await?;
 
+    // Invalidate routing cache for this domain.
+    state.routing_cache.invalidate_host(&domain.domain).await;
+    if let Some(project_id) = domain.project_id {
+        upsert_distributed_route(&state, domain.domain.clone(), project_id).await;
+    } else {
+        remove_distributed_route(&state, &domain.domain).await;
+    }
+
     Ok((StatusCode::CREATED, Json(DomainResponse::from(domain))))
 }
 
@@ -168,10 +177,22 @@ pub async fn delete_domain(
     headers: HeaderMap,
     Path(domain_id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
+    // Fetch domain name before deletion for cache invalidation.
+    let domain_record = domains::get_domain(&state.pool, domain_id, auth_user.user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("domain not found".into()))?;
+
     let deleted = domains::delete_domain(&state.pool, domain_id, auth_user.user_id).await?;
     if !deleted {
         return Err(AppError::NotFound("domain not found".into()));
     }
+
+    // Invalidate routing cache for this domain.
+    state
+        .routing_cache
+        .invalidate_host(&domain_record.domain)
+        .await;
+    remove_distributed_route(&state, &domain_record.domain).await;
 
     state
         .audit_logger
@@ -247,6 +268,14 @@ pub async fn assign_domain(
     };
 
     let domain = updated.ok_or_else(|| AppError::NotFound("domain not found".into()))?;
+
+    // Invalidate routing cache — domain's project mapping changed.
+    state.routing_cache.invalidate_host(&domain.domain).await;
+    if let Some(project_id) = domain.project_id {
+        upsert_distributed_route(&state, domain.domain.clone(), project_id).await;
+    } else {
+        remove_distributed_route(&state, &domain.domain).await;
+    }
 
     state
         .audit_logger
@@ -328,6 +357,48 @@ fn user_agent(headers: &HeaderMap) -> Option<String> {
         .get("user-agent")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
+}
+
+async fn upsert_distributed_route(state: &AppState, host: String, project_id: Uuid) {
+    let entry = RoutingEntry {
+        host: host.clone(),
+        project_id,
+        deployment_id: state
+            .runtime_backend
+            .active_deployment_id(project_id)
+            .await
+            .unwrap_or_else(Uuid::nil),
+        worker_addr: state.config.proxy_addr(),
+        version: 1,
+    };
+
+    if let Err(e) = state.state_store.set_routing(&entry).await {
+        tracing::warn!(host = %host, error = %e, "failed to set distributed route");
+        return;
+    }
+    if let Err(e) = state.state_store.publish_routing_update(&entry).await {
+        tracing::warn!(host = %host, error = %e, "failed to publish routing update");
+    }
+}
+
+async fn remove_distributed_route(state: &AppState, host: &str) {
+    if let Err(e) = state.state_store.remove_routing(host).await {
+        tracing::warn!(host = %host, error = %e, "failed to remove distributed route");
+    }
+    let entry = RoutingEntry {
+        host: host.to_owned(),
+        project_id: Uuid::nil(),
+        deployment_id: Uuid::nil(),
+        worker_addr: String::new(),
+        version: 1,
+    };
+    if let Err(e) = state.state_store.publish_routing_update(&entry).await {
+        tracing::warn!(
+            host = %host,
+            error = %e,
+            "failed to publish routing removal update"
+        );
+    }
 }
 
 impl From<crate::db::models::Domain> for DomainResponse {

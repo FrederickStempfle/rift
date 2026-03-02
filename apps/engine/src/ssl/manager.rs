@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -203,11 +203,7 @@ impl SslManager {
         Ok(())
     }
 
-    async fn get_or_create_account(
-        &self,
-        email: &str,
-        ssl_dir: &PathBuf,
-    ) -> anyhow::Result<Account> {
+    async fn get_or_create_account(&self, email: &str, ssl_dir: &Path) -> anyhow::Result<Account> {
         let account_path = ssl_dir.join("account.json");
         let acme_url = if self.config.acme_staging {
             LetsEncrypt::Staging.url()
@@ -233,7 +229,7 @@ impl SslManager {
             only_return_existing: false,
         };
 
-        let (account, credentials) = Account::create(&new_account, &acme_url, None)
+        let (account, credentials) = Account::create(&new_account, acme_url, None)
             .await
             .map_err(|e| anyhow::anyhow!("failed to create ACME account: {e}"))?;
 

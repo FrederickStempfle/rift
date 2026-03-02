@@ -44,7 +44,9 @@ pub async fn build_function_bundle(
     routes.sort_by(|a, b| {
         let a_has_param = a.pattern.contains(':');
         let b_has_param = b.pattern.contains(':');
-        a_has_param.cmp(&b_has_param).then(a.pattern.cmp(&b.pattern))
+        a_has_param
+            .cmp(&b_has_param)
+            .then(a.pattern.cmp(&b.pattern))
     });
 
     fs::create_dir_all(output_dir).await.map_err(|e| {
@@ -86,14 +88,11 @@ pub async fn build_function_bundle(
     generate_dispatcher_entry(&routes, output_dir, template_dir).await?;
 
     // Persist route manifest for restore after engine restart
-    let manifest = serde_json::to_string_pretty(&routes).map_err(|e| {
-        AppError::Internal(format!("failed to serialize routes manifest: {e}"))
-    })?;
+    let manifest = serde_json::to_string_pretty(&routes)
+        .map_err(|e| AppError::Internal(format!("failed to serialize routes manifest: {e}")))?;
     fs::write(output_dir.join("_routes.json"), manifest)
         .await
-        .map_err(|e| {
-            AppError::Internal(format!("failed to write _routes.json: {e}"))
-        })?;
+        .map_err(|e| AppError::Internal(format!("failed to write _routes.json: {e}")))?;
 
     Ok(routes)
 }
@@ -193,15 +192,11 @@ fn file_path_to_route_pattern(rel_path: &Path) -> String {
     let without_index = if without_ext == "index" {
         ""
     } else {
-        without_ext
-            .strip_suffix("/index")
-            .unwrap_or(without_ext)
+        without_ext.strip_suffix("/index").unwrap_or(without_ext)
     };
 
     // Convert [param] to :param for URLPattern
-    let pattern = without_index
-        .replace('[', ":")
-        .replace(']', "");
+    let pattern = without_index.replace('[', ":").replace(']', "");
 
     if pattern.is_empty() {
         "/".to_string()
@@ -215,8 +210,7 @@ fn file_path_to_route_pattern(rel_path: &Path) -> String {
 fn sanitize_route_name(pattern: &str) -> String {
     pattern
         .trim_start_matches('/')
-        .replace('/', "_")
-        .replace(':', "_")
+        .replace(['/', ':'], "_")
         .replace('*', "_star")
 }
 
@@ -271,7 +265,15 @@ async fn bundle_functions_with_esbuild(
     cmd_parts.extend(source_files.clone());
 
     let cmd = cmd_parts.join(" ");
-    run_command_and_log(pool, broadcaster, deployment_id, "build", workspace_dir, &cmd).await?;
+    run_command_and_log(
+        pool,
+        broadcaster,
+        deployment_id,
+        "build",
+        workspace_dir,
+        &cmd,
+    )
+    .await?;
 
     // esbuild names outputs based on the source filename (e.g. hello.js).
     // We need to rename them to match our sanitized route names.
@@ -314,9 +316,7 @@ async fn generate_worker_wrappers(
 ) -> Result<(), AppError> {
     let template_path = template_dir.join("function_worker.ts");
     let template = fs::read_to_string(&template_path).await.map_err(|e| {
-        AppError::Internal(format!(
-            "failed to read function_worker.ts template: {e}"
-        ))
+        AppError::Internal(format!("failed to read function_worker.ts template: {e}"))
     })?;
 
     for route in routes {
@@ -326,7 +326,8 @@ async fn generate_worker_wrappers(
             .to_string_lossy()
             .to_string();
 
-        let wrapper_code = template.replace("\"__BUNDLE_IMPORT__\"", &format!("\"file://{bundle_abs}\""));
+        let wrapper_code =
+            template.replace("\"__BUNDLE_IMPORT__\"", &format!("\"file://{bundle_abs}\""));
         let wrapper_path = output_dir.join(format!("_worker_{sanitized}.ts"));
 
         fs::write(&wrapper_path, wrapper_code).await.map_err(|e| {
@@ -379,9 +380,7 @@ async fn generate_dispatcher_entry(
 
     let entry_path = output_dir.join("_entry.ts");
     fs::write(&entry_path, dispatcher_code).await.map_err(|e| {
-        AppError::Internal(format!(
-            "failed to write function dispatcher entry: {e}"
-        ))
+        AppError::Internal(format!("failed to write function dispatcher entry: {e}"))
     })?;
 
     Ok(())
@@ -397,9 +396,7 @@ pub async fn generate_combined_entry(
 ) -> Result<String, AppError> {
     let template_path = template_dir.join("function_worker.ts");
     let worker_template = fs::read_to_string(&template_path).await.map_err(|e| {
-        AppError::Internal(format!(
-            "failed to read function_worker.ts template: {e}"
-        ))
+        AppError::Internal(format!("failed to read function_worker.ts template: {e}"))
     })?;
 
     // Generate worker wrappers for the combined entry
@@ -410,7 +407,8 @@ pub async fn generate_combined_entry(
             .to_string_lossy()
             .to_string();
 
-        let wrapper_code = worker_template.replace("\"__BUNDLE_IMPORT__\"", &format!("\"file://{bundle_abs}\""));
+        let wrapper_code =
+            worker_template.replace("\"__BUNDLE_IMPORT__\"", &format!("\"file://{bundle_abs}\""));
         let wrapper_path = output_dir.join(format!("_worker_{sanitized}.ts"));
 
         fs::write(&wrapper_path, wrapper_code).await.map_err(|e| {

@@ -3,6 +3,8 @@ pub mod function_registry;
 pub mod health;
 #[cfg(feature = "v8-isolate")]
 pub mod isolate;
+#[cfg(test)]
+pub mod mock_backend;
 pub mod namespace;
 pub mod pool;
 pub mod process;
@@ -24,7 +26,9 @@ use crate::{
 use self::{
     health::wait_for_port,
     pool::sandbox::SeccompEnforcer,
-    process::{allocate_port, spawn_deno_functions, spawn_deno_next, spawn_deno_static, spawn_node_server},
+    process::{
+        allocate_port, spawn_deno_functions, spawn_deno_next, spawn_deno_static, spawn_node_server,
+    },
 };
 
 #[derive(Clone, Debug)]
@@ -40,6 +44,8 @@ pub struct RuntimeManager {
     healthcheck_interval_ms: u64,
     /// Maximum number of health-check attempts.
     healthcheck_attempts: usize,
+    /// Database pool for persisting suspend/wake state transitions.
+    db_pool: Option<PgPool>,
 }
 
 #[derive(Debug)]
@@ -107,6 +113,7 @@ impl RuntimeManager {
             namespace_isolate: false,
             healthcheck_interval_ms: 200,
             healthcheck_attempts: 50,
+            db_pool: None,
         }
     }
 
@@ -159,6 +166,11 @@ impl RuntimeManager {
             .as_ref()
             .filter(|s| s.enforce)
             .and_then(|s| s.profile_path.as_deref())
+    }
+
+    /// Set the database pool for suspend/wake state persistence.
+    pub fn set_db_pool(&mut self, pool: PgPool) {
+        self.db_pool = Some(pool);
     }
 
     /// Set the function registry (called after global dispatcher starts).
@@ -224,18 +236,39 @@ impl RuntimeManager {
         let ns = self.namespace_isolate;
 
         let child = match &spec.kind {
-            RuntimeKind::StaticDeno { dir } => spawn_deno_static(dir, port, &spec.env_vars, seccomp_path, ns)?,
-            RuntimeKind::NextDeno { dir } => spawn_deno_next(dir, port, &spec.env_vars, seccomp_path, ns)?,
+            RuntimeKind::StaticDeno { dir } => {
+                spawn_deno_static(dir, port, &spec.env_vars, seccomp_path, ns)?
+            }
+            RuntimeKind::NextDeno { dir } => {
+                spawn_deno_next(dir, port, &spec.env_vars, seccomp_path, ns)?
+            }
             RuntimeKind::NodeServer { dir, entry } => {
                 spawn_node_server(dir, entry, port, &spec.env_vars, seccomp_path, ns)?
             }
-            RuntimeKind::Functions { dir } => spawn_deno_functions(dir, port, &spec.env_vars, seccomp_path, ns)?,
-            RuntimeKind::Combined { entry, functions_dir } => {
-                process::spawn_deno_combined(entry, functions_dir, port, &spec.env_vars, seccomp_path, ns)?
+            RuntimeKind::Functions { dir } => {
+                spawn_deno_functions(dir, port, &spec.env_vars, seccomp_path, ns)?
             }
+            RuntimeKind::Combined {
+                entry,
+                functions_dir,
+            } => process::spawn_deno_combined(
+                entry,
+                functions_dir,
+                port,
+                &spec.env_vars,
+                seccomp_path,
+                ns,
+            )?,
         };
 
-        if !wait_for_port("127.0.0.1", port, self.healthcheck_attempts, self.healthcheck_interval_ms).await {
+        if !wait_for_port(
+            "127.0.0.1",
+            port,
+            self.healthcheck_attempts,
+            self.healthcheck_interval_ms,
+        )
+        .await
+        {
             // New process failed health check — kill it, leave old running.
             let mut child = child;
             let _ = child.kill().await;
@@ -325,6 +358,49 @@ impl RuntimeManager {
             .map(|runtime| runtime.deployment_id)
     }
 
+    /// Return the number of currently active runtimes.
+    pub async fn active_count(&self) -> usize {
+        self.inner.lock().await.active.len()
+    }
+
+    /// Explicitly suspend a single project's runtime.
+    /// Returns `true` if the project was active and is now suspended.
+    pub async fn suspend_project(&self, project_id: Uuid) -> Result<bool, AppError> {
+        let mut state = self.inner.lock().await;
+        if let Some(runtime) = state.active.remove(&project_id) {
+            state.suspended.insert(
+                project_id,
+                SuspendedRuntime {
+                    deployment_id: runtime.deployment_id,
+                    kind: runtime.kind.clone(),
+                    env_vars: runtime.env_vars.clone(),
+                },
+            );
+            drop(state);
+            let _ = runtime.child.lock().await.kill().await;
+
+            // Persist to DB
+            if let Some(ref db) = self.db_pool {
+                if let Err(e) = deployments::mark_suspended(db, runtime.deployment_id).await {
+                    tracing::warn!(
+                        deployment_id = %runtime.deployment_id,
+                        error = %e,
+                        "failed to persist suspended state to DB"
+                    );
+                }
+            }
+
+            tracing::info!(
+                project_id = %project_id,
+                deployment_id = %runtime.deployment_id,
+                "explicitly suspended deployment"
+            );
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Record a request to a project, keeping it alive for scale-to-zero.
     pub async fn touch(&self, project_id: Uuid) {
         if let Some(runtime) = self.inner.lock().await.active.get_mut(&project_id) {
@@ -362,6 +438,19 @@ impl RuntimeManager {
             })
             .await?;
 
+        // Persist wake to DB
+        if let Some(ref db) = self.db_pool {
+            if let Err(e) =
+                deployments::mark_ready_from_suspended(db, suspended.deployment_id).await
+            {
+                tracing::warn!(
+                    deployment_id = %suspended.deployment_id,
+                    error = %e,
+                    "failed to persist wake state to DB"
+                );
+            }
+        }
+
         Ok(Some(url))
     }
 
@@ -397,6 +486,18 @@ impl RuntimeManager {
 
                 // Kill the process
                 let _ = runtime.child.lock().await.kill().await;
+
+                // Persist to DB
+                if let Some(ref db) = self.db_pool {
+                    if let Err(e) = deployments::mark_suspended(db, runtime.deployment_id).await {
+                        tracing::warn!(
+                            deployment_id = %runtime.deployment_id,
+                            error = %e,
+                            "failed to persist suspended state to DB"
+                        );
+                    }
+                }
+
                 tracing::info!(
                     project_id = %project_id,
                     deployment_id = %runtime.deployment_id,
@@ -445,7 +546,10 @@ impl RuntimeManager {
             }
 
             // Detect runtime kind from filesystem
-            let kind = if workspace_dir.join("_rift_functions_output/_rift_combined_entry.ts").exists() {
+            let kind = if workspace_dir
+                .join("_rift_functions_output/_rift_combined_entry.ts")
+                .exists()
+            {
                 let fn_dir = workspace_dir.join("_rift_functions_output");
                 RuntimeKind::Combined {
                     entry: fn_dir.join("_rift_combined_entry.ts"),
@@ -481,7 +585,10 @@ impl RuntimeManager {
                     dir: workspace_dir,
                     entry,
                 }
-            } else if workspace_dir.join("_rift_functions_output/bundles").is_dir() {
+            } else if workspace_dir
+                .join("_rift_functions_output/bundles")
+                .is_dir()
+            {
                 let fn_dir = workspace_dir.join("_rift_functions_output");
                 RuntimeKind::Functions { dir: fn_dir }
             } else if let Some(entry_dir) = find_entry_ts(&workspace_dir) {
@@ -507,9 +614,7 @@ impl RuntimeManager {
                     let routes: Vec<crate::build::functions::FunctionRoute> =
                         if manifest_path.exists() {
                             match tokio::fs::read_to_string(&manifest_path).await {
-                                Ok(content) => {
-                                    serde_json::from_str(&content).unwrap_or_default()
-                                }
+                                Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
                                 Err(_) => Vec::new(),
                             }
                         } else {
@@ -587,16 +692,109 @@ impl RuntimeManager {
             }
         }
 
+        // Also restore suspended deployments (insert into suspended map without starting)
+        let suspended_list = match deployments::list_latest_suspended_per_project(pool).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to query suspended deployments for restore");
+                Vec::new()
+            }
+        };
+
+        if !suspended_list.is_empty() {
+            tracing::info!(
+                count = suspended_list.len(),
+                "restoring suspended deployments"
+            );
+        }
+
+        for deployment in suspended_list {
+            let workspace_dir = PathBuf::from(&config.deploy_root).join(deployment.id.to_string());
+            if !workspace_dir.exists() {
+                continue;
+            }
+
+            let kind = if workspace_dir
+                .join("_rift_functions_output/_rift_combined_entry.ts")
+                .exists()
+            {
+                let fn_dir = workspace_dir.join("_rift_functions_output");
+                RuntimeKind::Combined {
+                    entry: fn_dir.join("_rift_combined_entry.ts"),
+                    functions_dir: fn_dir,
+                }
+            } else if workspace_dir.join(".next/standalone").exists() {
+                RuntimeKind::NextDeno {
+                    dir: workspace_dir.clone(),
+                }
+            } else if workspace_dir.join(".output/server/index.mjs").exists() {
+                RuntimeKind::NodeServer {
+                    dir: workspace_dir.clone(),
+                    entry: workspace_dir.join(".output/server/index.mjs"),
+                }
+            } else if workspace_dir.join("dist/server/entry.mjs").exists() {
+                RuntimeKind::NodeServer {
+                    dir: workspace_dir.clone(),
+                    entry: workspace_dir.join("dist/server/entry.mjs"),
+                }
+            } else if workspace_dir.join("build/index.js").exists()
+                && workspace_dir.join("build/handler.js").exists()
+            {
+                RuntimeKind::NodeServer {
+                    dir: workspace_dir.clone(),
+                    entry: workspace_dir.join("build/index.js"),
+                }
+            } else if workspace_dir.join("build/server/index.js").exists() {
+                RuntimeKind::NodeServer {
+                    dir: workspace_dir.clone(),
+                    entry: workspace_dir.join("build/server/index.js"),
+                }
+            } else if workspace_dir
+                .join("_rift_functions_output/bundles")
+                .is_dir()
+            {
+                RuntimeKind::Functions {
+                    dir: workspace_dir.join("_rift_functions_output"),
+                }
+            } else if let Some(entry_dir) = find_entry_ts(&workspace_dir) {
+                RuntimeKind::StaticDeno { dir: entry_dir }
+            } else {
+                continue;
+            };
+
+            let env =
+                env_vars::get_decrypted_env_vars(pool, deployment.project_id, &config.master_key)
+                    .await
+                    .unwrap_or_default();
+
+            let mut state = self.inner.lock().await;
+            state.suspended.insert(
+                deployment.project_id,
+                SuspendedRuntime {
+                    deployment_id: deployment.id,
+                    kind,
+                    env_vars: env,
+                },
+            );
+
+            tracing::info!(
+                deployment_id = %deployment.id,
+                project_id = %deployment.project_id,
+                "restored suspended deployment"
+            );
+            restored += 1;
+        }
+
         restored
     }
 }
 
 /// Find the directory containing `_entry.ts` for static site deployments.
-fn find_entry_ts(workspace_dir: &PathBuf) -> Option<PathBuf> {
+fn find_entry_ts(workspace_dir: &std::path::Path) -> Option<PathBuf> {
     // Check common build output locations
     for subdir in ["", "dist", "build", "out", "public", ".output/public"] {
         let dir = if subdir.is_empty() {
-            workspace_dir.clone()
+            workspace_dir.to_path_buf()
         } else {
             workspace_dir.join(subdir)
         };
