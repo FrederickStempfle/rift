@@ -197,55 +197,117 @@ impl BuildManager {
             })?;
         }
 
-        // Stable per-project build directory so compiler caches (webpack, SWC, Vite)
-        // remain valid across deployments. Workspace paths are embedded in cache keys,
-        // so using a consistent path (project ID, not deployment UUID) is essential.
-        // Lives in build_root (tmpfs); the immutable artifact is copied to workspace_dir
-        // (named volume) after the build so it survives container restarts.
-        let build_dir = PathBuf::from(&self.config.build_root)
-            .join(format!("b-{}", project.id));
-        if build_dir.exists() {
-            let _ = fs::remove_dir_all(&build_dir).await;
-        }
+        // Stable per-project build directory. Keeping it across deploys lets git
+        // update only changed files, preserving mtimes for the rest — which is
+        // what makes webpack's persistent cache actually hit on the next build.
+        // Lives in build_root (tmpfs); the immutable artifact is copied to the
+        // deployment dir (named volume) after the build so it survives restarts.
+        let build_dir = PathBuf::from(&self.config.build_root).join(format!("b-{}", project.id));
 
-        // Clone with explicit argv to avoid shell injection. If a GitHub token
-        // exists, provide it via env-backed credential helper (not in args/logs).
-        let mut clone_env: Vec<(String, String)> = Vec::new();
-        let mut clone_args = vec![
-            "clone".to_owned(),
-            "--depth".to_owned(),
-            "1".to_owned(),
-            "--branch".to_owned(),
-            project.branch.clone(),
-        ];
+        // Build credential args and env once; used by both clone and fetch paths.
+        let mut git_env: Vec<(String, String)> = Vec::new();
+        let mut credential_args: Vec<String> = Vec::new();
         if let Some(user) = users::find_user_by_id(&self.pool, project.user_id).await? {
             if let Some(token) = user.github_token {
-                clone_args.push("-c".to_owned());
-                clone_args.push("credential.helper=!f() { echo username=x-access-token; echo password=$RIFT_GITHUB_TOKEN; }; f".to_owned());
-                clone_env.push(("RIFT_GITHUB_TOKEN".to_owned(), token));
+                credential_args.push("-c".to_owned());
+                credential_args.push("credential.helper=!f() { echo username=x-access-token; echo password=$RIFT_GITHUB_TOKEN; }; f".to_owned());
+                git_env.push(("RIFT_GITHUB_TOKEN".to_owned(), token));
             }
         }
-        clone_args.push(project.repo_url.clone());
-        clone_args.push(build_dir.to_string_lossy().to_string());
 
-        run_argv_and_log_with_env(
-            &self.pool,
-            &self.log_broadcaster,
-            deployment_id,
-            "build",
-            &self.build_root,
-            "git",
-            &clone_args,
-            &clone_env,
-        )
-        .await
-        .inspect_err(|_| {
-            let pool = self.pool.clone();
-            tokio::spawn(async move {
-                let _ =
-                    transition_to_failed(&pool, deployment_id, Some(elapsed_ms(started_at))).await;
-            });
-        })?;
+        // Try incremental update first: git fetch + reset only touches files that
+        // actually changed, so webpack sees unchanged files with their old mtimes
+        // and can skip recompiling them (cache hit). Fall back to fresh clone on
+        // any error (first deploy, corrupted repo, branch change, etc.).
+        let incremental_ok = if build_dir.join(".git").exists() {
+            // Sync remote URL in case the project's repo changed.
+            let _ = run_argv_and_log(
+                &self.pool,
+                &self.log_broadcaster,
+                deployment_id,
+                "build",
+                &build_dir,
+                "git",
+                &["remote".to_owned(), "set-url".to_owned(), "origin".to_owned(), project.repo_url.clone()],
+            )
+            .await;
+
+            let mut fetch_args = credential_args.clone();
+            fetch_args.extend([
+                "fetch".to_owned(),
+                "--depth".to_owned(),
+                "1".to_owned(),
+                "origin".to_owned(),
+                project.branch.clone(),
+            ]);
+            let fetch_ok = run_argv_and_log_with_env(
+                &self.pool,
+                &self.log_broadcaster,
+                deployment_id,
+                "build",
+                &build_dir,
+                "git",
+                &fetch_args,
+                &git_env,
+            )
+            .await
+            .is_ok();
+
+            if fetch_ok {
+                run_argv_and_log(
+                    &self.pool,
+                    &self.log_broadcaster,
+                    deployment_id,
+                    "build",
+                    &build_dir,
+                    "git",
+                    &["reset".to_owned(), "--hard".to_owned(), "FETCH_HEAD".to_owned()],
+                )
+                .await
+                .is_ok()
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !incremental_ok {
+            // Fresh clone — happens on first deploy or after incremental failure.
+            if build_dir.exists() {
+                let _ = fs::remove_dir_all(&build_dir).await;
+            }
+            let mut clone_args = vec![
+                "clone".to_owned(),
+                "--depth".to_owned(),
+                "1".to_owned(),
+                "--branch".to_owned(),
+                project.branch.clone(),
+            ];
+            clone_args.extend(credential_args.clone());
+            clone_args.push(project.repo_url.clone());
+            clone_args.push(build_dir.to_string_lossy().to_string());
+
+            run_argv_and_log_with_env(
+                &self.pool,
+                &self.log_broadcaster,
+                deployment_id,
+                "build",
+                &self.build_root,
+                "git",
+                &clone_args,
+                &git_env,
+            )
+            .await
+            .inspect_err(|_| {
+                let pool = self.pool.clone();
+                tokio::spawn(async move {
+                    let _ =
+                        transition_to_failed(&pool, deployment_id, Some(elapsed_ms(started_at)))
+                            .await;
+                });
+            })?;
+        }
         stage_timings.push(("clone", started_at.elapsed().as_millis()));
 
         // Shadow workspace_dir with the stable build path for the entire build phase.
@@ -291,9 +353,25 @@ impl BuildManager {
 
         // Fetch env vars early so they're available during install & build
         let user_env_vars =
-            env_vars::get_decrypted_env_vars(&self.pool, project.id, &self.config.master_key)
+            match env_vars::get_decrypted_env_vars(&self.pool, project.id, &self.config.master_key)
                 .await
-                .unwrap_or_default();
+            {
+                Ok(vars) => vars,
+                Err(error) => {
+                    insert_and_broadcast_log(
+                        &self.pool,
+                        &self.log_broadcaster,
+                        deployment_id,
+                        "error",
+                        &format!("Failed to load environment variables: {error}"),
+                        "build",
+                    )
+                    .await?;
+                    transition_to_failed(&self.pool, deployment_id, Some(elapsed_ms(started_at)))
+                        .await?;
+                    return Err(error);
+                }
+            };
 
         if !user_env_vars.is_empty() {
             insert_and_broadcast_log(
@@ -434,8 +512,7 @@ impl BuildManager {
                 }
             };
 
-            if let Err(error) = install_result
-            {
+            if let Err(error) = install_result {
                 insert_and_broadcast_log(
                     &self.pool,
                     &self.log_broadcaster,
@@ -517,8 +594,7 @@ impl BuildManager {
         // Restore Next.js build cache for incremental compilation.
         // Keyed by project ID so each project has its own persistent cache.
         if cache_enabled && matches!(plan.output, BuildOutput::Next) {
-            let restored =
-                restore_next_build_caches(&cache_dir, project.id, &workspace_dir).await;
+            let restored = restore_next_build_caches(&cache_dir, project.id, &workspace_dir).await;
             if restored {
                 insert_and_broadcast_log(
                     &self.pool,
@@ -533,7 +609,8 @@ impl BuildManager {
         }
 
         let build_result = if build_is_custom {
-            if let Err(error) = validation::validate_custom_command(&plan.build_command, "build command")
+            if let Err(error) =
+                validation::validate_custom_command(&plan.build_command, "build command")
             {
                 Err(error)
             } else {
@@ -567,8 +644,7 @@ impl BuildManager {
             }
         };
 
-        if let Err(error) = build_result
-        {
+        if let Err(error) = build_result {
             insert_and_broadcast_log(
                 &self.pool,
                 &self.log_broadcaster,
@@ -1063,8 +1139,9 @@ impl BuildManager {
                     .is_ok()
             {
                 runtime_kind = remap_runtime_kind(runtime_kind, &artifact_built, &artifact_dest);
+                // Keep build_dir (workspace_dir here) alive in tmpfs for the next
+                // incremental git update — deleting it would force a fresh clone.
                 let _ = set_dir_writable(&artifact_built).await;
-                let _ = fs::remove_dir_all(&workspace_dir).await;
             }
         }
         // Restore workspace_dir to the deploy dir for any post-build code.
@@ -2012,37 +2089,19 @@ mod tests {
 
     #[test]
     fn install_command_respects_custom_override() {
-        let cmd = select_install_command(
-            &PackageManager::Npm,
-            "npm install",
-            true,
-            true,
-            true,
-        );
+        let cmd = select_install_command(&PackageManager::Npm, "npm install", true, true, true);
         assert_eq!(cmd, "npm install");
     }
 
     #[test]
     fn install_command_requires_lockfile_for_optimization() {
-        let cmd = select_install_command(
-            &PackageManager::Npm,
-            "npm install",
-            true,
-            false,
-            false,
-        );
+        let cmd = select_install_command(&PackageManager::Npm, "npm install", true, false, false);
         assert_eq!(cmd, "npm install");
     }
 
     #[test]
     fn install_command_optimizes_default_npm_with_lockfile() {
-        let cmd = select_install_command(
-            &PackageManager::Npm,
-            "npm install",
-            true,
-            false,
-            true,
-        );
+        let cmd = select_install_command(&PackageManager::Npm, "npm install", true, false, true);
         assert_eq!(cmd, "npm ci --prefer-offline");
     }
 }
@@ -2237,7 +2296,10 @@ fn remap_runtime_kind(
             entry: remap(entry),
         },
         RuntimeKind::Functions { dir } => RuntimeKind::Functions { dir: remap(dir) },
-        RuntimeKind::Combined { entry, functions_dir } => RuntimeKind::Combined {
+        RuntimeKind::Combined {
+            entry,
+            functions_dir,
+        } => RuntimeKind::Combined {
             entry: remap(entry),
             functions_dir: remap(functions_dir),
         },
