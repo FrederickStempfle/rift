@@ -13,6 +13,17 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - redis_data:/data
+
   engine:
     build:
       context: ..
@@ -20,10 +31,14 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     env_file:
       - ../.env
     environment:
       DATABASE_URL: postgres://rift:rift@db:5432/rift
+      RIFT_STATE_STORE: ${RIFT_STATE_STORE:-redis}
+      RIFT_REDIS_URL: ${RIFT_REDIS_URL:-redis://redis:6379}
     ports:
       - "3001:3001"
       - "80:8080"
@@ -80,5 +95,6 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
   deployments:
   ssl:
