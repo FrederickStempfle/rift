@@ -2069,7 +2069,7 @@ pub fn optimized_install_command(pm: &PackageManager, original: &str) -> String 
         }
         PackageManager::Pnpm => {
             if original == "pnpm install" {
-                "pnpm install --frozen-lockfile --prefer-offline".to_owned()
+                "pnpm install --no-frozen-lockfile --prefer-offline".to_owned()
             } else {
                 original.to_owned()
             }
