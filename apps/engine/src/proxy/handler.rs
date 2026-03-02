@@ -1,6 +1,7 @@
 use std::{
     convert::Infallible,
     net::{IpAddr, SocketAddr},
+    sync::Arc,
     time::Duration,
 };
 
@@ -8,7 +9,9 @@ use bytes::{Bytes, BytesMut};
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, header::HOST, HeaderMap, Request, Response, StatusCode, Uri};
 use hyper_util::client::legacy::Client;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 use crate::{
@@ -23,7 +26,6 @@ use crate::{
 type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Full<Bytes>>;
 
 const MAX_PROXY_BODY_BYTES: usize = 10 * 1024 * 1024;
-const UPSTREAM_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const PROXY_GLOBAL_LIMIT: u64 = 2000;
 const PROXY_GLOBAL_CHALLENGE: u64 = 1400;
 const PROXY_ROUTE_LIMIT: u64 = 600;
@@ -32,6 +34,7 @@ const PROXY_TOKEN_LIMIT: u64 = 900;
 const PROXY_TOKEN_CHALLENGE: u64 = 650;
 const PROXY_PROJECT_LIMIT: u64 = 700;
 const PROXY_PROJECT_CHALLENGE: u64 = 500;
+const CHALLENGE_VERIFY_PATH: &str = "/__rift/challenge/verify";
 
 const HOP_BY_HOP: &[&str] = &[
     "connection",
@@ -106,9 +109,23 @@ async fn route_and_forward(
     client: &HttpClient,
     state: &AppState,
 ) -> Result<(Response<Full<Bytes>>, Option<Uuid>, bool), RouteError> {
+    let _inflight_permit = acquire_proxy_inflight_permit(&state.proxy_inflight)
+        .map_err(|response| RouteError::Response(response, None))?;
+
+    if req.uri().path() == CHALLENGE_VERIFY_PATH {
+        let response = handle_challenge_verify(req, remote_addr, state).await;
+        return Ok((response, None, false));
+    }
+
     let host = extract_host(req.headers()).ok_or(RouteError::Status(StatusCode::BAD_REQUEST, None))?;
     let client_ip = remote_addr.ip();
     let path_bucket = route_bucket(req.uri().path());
+    let return_to = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/")
+        .to_owned();
     let trusted = state
         .abuse_guard
         .should_bypass_proxy_limits(client_ip, req.headers())
@@ -134,6 +151,7 @@ async fn route_and_forward(
                 ),
                 client_ip,
                 req.headers(),
+                &return_to,
             )
             .await
             .map_err(|e| RouteError::Status(map_app_error(e), None))?
@@ -162,6 +180,7 @@ async fn route_and_forward(
                 ),
                 client_ip,
                 req.headers(),
+                &return_to,
             )
             .await
             .map_err(|e| RouteError::Status(map_app_error(e), None))?
@@ -191,6 +210,7 @@ async fn route_and_forward(
                     },
                     client_ip,
                     req.headers(),
+                    &return_to,
                 )
                 .await
                 .map_err(|e| RouteError::Status(map_app_error(e), None))?
@@ -229,6 +249,7 @@ async fn route_and_forward(
                 ),
                 client_ip,
                 req.headers(),
+                &return_to,
             )
             .await
             .map_err(|e| RouteError::Status(map_app_error(e), pid))?
@@ -343,7 +364,9 @@ async fn route_and_forward(
         .map_err(|_| RouteError::Status(StatusCode::INTERNAL_SERVER_ERROR, pid))?;
 
     // Forward
-    let upstream_resp = tokio::time::timeout(UPSTREAM_REQUEST_TIMEOUT, client.request(upstream_req))
+    let upstream_timeout =
+        Duration::from_millis(state.config.proxy_upstream_timeout_ms.max(500));
+    let upstream_resp = tokio::time::timeout(upstream_timeout, client.request(upstream_req))
         .await
         .map_err(|_| RouteError::Status(StatusCode::GATEWAY_TIMEOUT, pid))?
         .map_err(|_| RouteError::Status(StatusCode::BAD_GATEWAY, pid))?;
@@ -455,6 +478,7 @@ async fn enforce_proxy_limit(
     limit: AbuseLimit,
     client_ip: IpAddr,
     headers: &HeaderMap,
+    return_to: &str,
 ) -> Result<Option<Response<Full<Bytes>>>, AppError> {
     match state.abuse_guard.enforce(limit).await? {
         AbuseDecision::Allow => Ok(None),
@@ -467,6 +491,7 @@ async fn enforce_proxy_limit(
             headers,
             retry_after_secs,
             &reason,
+            return_to,
         ))),
         AbuseDecision::Block {
             retry_after_secs,
@@ -487,14 +512,38 @@ fn proxy_challenge_response(
     headers: &HeaderMap,
     retry_after_secs: u64,
     reason: &str,
+    return_to: &str,
 ) -> Response<Full<Bytes>> {
-    let set_cookie = state.abuse_guard.build_challenge_set_cookie(
-        client_ip,
-        headers,
-        state.config.proxy_scheme == "https",
-    );
+    let return_to = sanitize_return_to(return_to);
+    let ticket = state
+        .abuse_guard
+        .issue_challenge_ticket(client_ip, headers, &return_to);
+    let reason_html = escape_html(reason);
+    let return_to_html = escape_html_attr(&return_to);
+    let ticket_html = escape_html_attr(&ticket);
+    let turnstile_html = if let Some(site_key) = turnstile_site_key(state) {
+        format!(
+            "<script src=\"https://challenges.cloudflare.com/turnstile/v0/api.js\" async defer></script>\
+<div class=\"cf-turnstile\" data-sitekey=\"{}\"></div>",
+            escape_html_attr(site_key)
+        )
+    } else {
+        "<label><input type=\"checkbox\" required> I confirm this request is human-originated</label>"
+            .to_owned()
+    };
     let body = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Verify</title></head><body><h1>Verification required</h1><p>{reason}</p><p>Retry in {retry_after_secs}s.</p><script>setTimeout(()=>location.reload(),1200);</script></body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+<title>Verification Required</title><style>body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#f5f7fb;padding:24px;color:#0f172a}}\
+.card{{max-width:560px;margin:8vh auto;background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:20px;box-shadow:0 8px 30px rgba(15,23,42,.08)}}\
+h1{{margin:0 0 10px;font-size:1.35rem}}p{{margin:.4rem 0;color:#334155}}button{{margin-top:12px;background:#0f172a;color:#fff;border:none;border-radius:8px;padding:.6rem 1rem;cursor:pointer}}\
+small{{display:block;color:#64748b;margin-top:8px}}</style></head><body>\
+<main class=\"card\"><h1>Verification required</h1><p>{reason_html}</p><p>Retry budget: {retry_after_secs}s</p>\
+<form method=\"post\" action=\"{CHALLENGE_VERIFY_PATH}\">\
+<input type=\"hidden\" name=\"ticket\" value=\"{ticket_html}\">\
+<input type=\"hidden\" name=\"return_to\" value=\"{return_to_html}\">\
+{turnstile_html}\
+<button type=\"submit\">Continue</button></form>\
+<small>Protected by Rift abuse controls.</small></main></body></html>"
     );
     Response::builder()
         .status(StatusCode::FORBIDDEN)
@@ -503,9 +552,90 @@ fn proxy_challenge_response(
         .header("retry-after", retry_after_secs.to_string())
         .header("x-rift-abuse-action", "challenge")
         .header("x-rift-challenge", "required")
-        .header("set-cookie", set_cookie)
         .body(Full::new(Bytes::from(body)))
         .unwrap_or_else(|_| error_response(StatusCode::FORBIDDEN))
+}
+
+async fn handle_challenge_verify(
+    req: Request<Incoming>,
+    remote_addr: SocketAddr,
+    state: &AppState,
+) -> Response<Full<Bytes>> {
+    if req.method() != hyper::Method::POST {
+        return proxy_abuse_response(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "challenge_method_not_allowed",
+            1,
+            "challenge verification must use POST",
+        );
+    }
+
+    let client_ip = remote_addr.ip();
+    let headers = req.headers().clone();
+    let (_, body) = req.into_parts();
+    let body_bytes = match collect_body_limited(body, StatusCode::BAD_REQUEST).await {
+        Ok(bytes) => bytes,
+        Err(status) => return error_response(status),
+    };
+    let form: std::collections::HashMap<String, String> =
+        url::form_urlencoded::parse(&body_bytes).into_owned().collect();
+    let return_to = sanitize_return_to(form.get("return_to").map(|s| s.as_str()).unwrap_or("/"));
+    let ticket = form.get("ticket").map(|s| s.as_str()).unwrap_or_default();
+
+    if ticket.is_empty()
+        || !state
+            .abuse_guard
+            .verify_challenge_ticket(client_ip, &headers, &return_to, ticket)
+    {
+        return proxy_challenge_response(
+            state,
+            client_ip,
+            &headers,
+            1,
+            "challenge verification failed",
+            &return_to,
+        );
+    }
+
+    if let Some(secret_key) = turnstile_secret_key(state) {
+        let token = form
+            .get("cf-turnstile-response")
+            .map(|s| s.trim())
+            .unwrap_or("");
+        if token.is_empty() {
+            return proxy_challenge_response(
+                state,
+                client_ip,
+                &headers,
+                1,
+                "captcha token is required",
+                &return_to,
+            );
+        }
+        if !verify_turnstile(secret_key, token, client_ip).await {
+            return proxy_challenge_response(
+                state,
+                client_ip,
+                &headers,
+                1,
+                "captcha verification failed",
+                &return_to,
+            );
+        }
+    }
+
+    let set_cookie =
+        state
+            .abuse_guard
+            .build_challenge_set_cookie(client_ip, &headers, state.config.proxy_scheme == "https");
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header("location", return_to)
+        .header("cache-control", "no-store")
+        .header("set-cookie", set_cookie)
+        .header("x-rift-abuse-action", "verified")
+        .body(Full::new(Bytes::new()))
+        .unwrap_or_else(|_| error_response(StatusCode::SEE_OTHER))
 }
 
 fn proxy_abuse_response(
@@ -521,6 +651,103 @@ fn proxy_abuse_response(
         .header("x-rift-challenge", "required")
         .body(Full::new(Bytes::from(reason.to_owned())))
         .unwrap_or_else(|_| error_response(status))
+}
+
+fn acquire_proxy_inflight_permit(
+    semaphore: &Arc<Semaphore>,
+) -> Result<OwnedSemaphorePermit, Response<Full<Bytes>>> {
+    semaphore
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| proxy_overload_response())
+}
+
+fn proxy_overload_response() -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header("retry-after", "1")
+        .header("x-rift-overload", "shed")
+        .body(Full::new(Bytes::from("proxy overloaded, retry soon")))
+        .unwrap_or_else(|_| error_response(StatusCode::SERVICE_UNAVAILABLE))
+}
+
+fn sanitize_return_to(input: &str) -> String {
+    if input.starts_with('/')
+        && !input.starts_with("//")
+        && !input.bytes().any(|b| b.is_ascii_control())
+    {
+        return input.to_owned();
+    }
+    "/".to_owned()
+}
+
+fn escape_html(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn escape_html_attr(input: &str) -> String {
+    escape_html(input)
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn turnstile_site_key(state: &AppState) -> Option<&str> {
+    match (
+        state.config.abuse_turnstile_site_key.as_deref(),
+        state.config.abuse_turnstile_secret_key.as_deref(),
+    ) {
+        (Some(site), Some(secret)) if !site.trim().is_empty() && !secret.trim().is_empty() => {
+            Some(site.trim())
+        }
+        _ => None,
+    }
+}
+
+fn turnstile_secret_key(state: &AppState) -> Option<&str> {
+    state
+        .config
+        .abuse_turnstile_secret_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+#[derive(Debug, Deserialize)]
+struct TurnstileResponse {
+    success: bool,
+}
+
+async fn verify_turnstile(secret_key: &str, token: &str, client_ip: IpAddr) -> bool {
+    let mut form = std::collections::HashMap::new();
+    form.insert("secret", secret_key.to_owned());
+    form.insert("response", token.to_owned());
+    form.insert("remoteip", client_ip.to_string());
+
+    let client = reqwest::Client::new();
+    let resp = match client
+        .post("https://challenges.cloudflare.com/turnstile/v0/siteverify")
+        .form(&form)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(error) => {
+            tracing::warn!(error = %error, "turnstile verification request failed");
+            return false;
+        }
+    };
+
+    match resp.json::<TurnstileResponse>().await {
+        Ok(body) => body.success,
+        Err(error) => {
+            tracing::warn!(error = %error, "turnstile verification decode failed");
+            false
+        }
+    }
 }
 
 fn route_bucket(path: &str) -> String {
@@ -755,5 +982,17 @@ mod tests {
     #[test]
     fn match_subdomain_empty_host() {
         assert_eq!(match_subdomain("", "rift.dev"), None);
+    }
+
+    #[test]
+    fn sanitize_return_to_accepts_internal_paths() {
+        assert_eq!(sanitize_return_to("/projects/demo"), "/projects/demo");
+        assert_eq!(sanitize_return_to("/projects/demo?tab=logs"), "/projects/demo?tab=logs");
+    }
+
+    #[test]
+    fn sanitize_return_to_rejects_external_targets() {
+        assert_eq!(sanitize_return_to("https://evil.tld"), "/");
+        assert_eq!(sanitize_return_to("//evil.tld"), "/");
     }
 }

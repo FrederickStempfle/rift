@@ -1,6 +1,7 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::Context;
+use tokio::sync::Semaphore;
 use rift_engine::{
     api::{self, AppState},
     build::BuildManager,
@@ -267,6 +268,7 @@ async fn main() -> anyhow::Result<()> {
         routing_cache,
         state_store,
         scheduler,
+        proxy_inflight: Arc::new(Semaphore::new(config.proxy_max_inflight.max(1))),
         #[cfg(feature = "v8-isolate")]
         isolate_pool,
     };

@@ -22,6 +22,7 @@ use rift_engine::{
 };
 use serde_json::json;
 use serial_test::serial;
+use tokio::sync::Semaphore;
 
 struct TestServer {
     base_url: String,
@@ -60,6 +61,10 @@ impl TestServer {
             api_port: 0,
             proxy_bind: "127.0.0.1".into(),
             proxy_port: 0,
+            proxy_upstream_timeout_ms: 30_000,
+            proxy_connect_timeout_ms: 3_000,
+            proxy_pool_max_idle_per_host: 32,
+            proxy_max_inflight: 2_000,
             base_domain: "localhost".into(),
             proxy_scheme: "http".into(),
             access_token_ttl_minutes: 15,
@@ -102,6 +107,13 @@ impl TestServer {
             abuse_challenge_ttl_secs: 900,
             abuse_bot_verify: false,
             abuse_bot_verify_cache_secs: 600,
+            abuse_challenge_min_solve_secs: 2,
+            abuse_max_retry_after_secs: 600,
+            abuse_ban_tier1_secs: 60,
+            abuse_ban_tier2_secs: 300,
+            abuse_ban_tier3_secs: 1800,
+            abuse_turnstile_site_key: None,
+            abuse_turnstile_secret_key: None,
             worker_id: None,
             role: "control-plane".into(),
             region_id: "test".into(),
@@ -181,6 +193,7 @@ impl TestServer {
             routing_cache: RoutingCache::new(),
             state_store,
             scheduler,
+            proxy_inflight: Arc::new(Semaphore::new(config.proxy_max_inflight)),
             #[cfg(feature = "v8-isolate")]
             isolate_pool: None,
         };

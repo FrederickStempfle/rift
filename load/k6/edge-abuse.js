@@ -2,8 +2,10 @@ import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { Counter, Rate } from 'k6/metrics';
 
-const TARGET_URL = __ENV.TARGET_URL || 'https://127.0.0.1';
+const TARGET_URL = __ENV.TARGET_URL || 'http://127.0.0.1';
 const TARGET_HOST = __ENV.TARGET_HOST || 'rift.atrainbots.com';
+const BYPASS_TOKEN = __ENV.BYPASS_TOKEN || '';
+const BYPASS_HEADER = __ENV.BYPASS_HEADER || 'x-rift-abuse-bypass';
 
 const rateLimited = new Rate('rate_limited_ratio');
 const hardBlocked = new Counter('hard_blocked_total');
@@ -40,12 +42,17 @@ export const options = {
 };
 
 function makeRequest(path) {
+  const headers = {
+    Host: TARGET_HOST,
+    'User-Agent': 'rift-load-gate/1.0',
+    Accept: 'text/html,application/json',
+  };
+  if (BYPASS_TOKEN) {
+    headers[BYPASS_HEADER] = BYPASS_TOKEN;
+  }
+
   const res = http.get(`${TARGET_URL}${path}`, {
-    headers: {
-      Host: TARGET_HOST,
-      'User-Agent': 'rift-load-gate/1.0',
-      Accept: 'text/html,application/json',
-    },
+    headers,
     redirects: 0,
     timeout: __ENV.REQUEST_TIMEOUT || '8s',
   });

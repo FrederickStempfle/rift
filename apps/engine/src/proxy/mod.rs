@@ -18,7 +18,7 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::{client::legacy::Client, rt::TokioExecutor, rt::TokioIo};
 
-use crate::api::AppState;
+use crate::{api::AppState, config::Config};
 
 pub async fn serve(state: AppState) -> anyhow::Result<()> {
     // Always run both HTTP and HTTPS listeners.
@@ -38,7 +38,7 @@ async fn serve_http(state: AppState) -> anyhow::Result<()> {
 
     tracing::info!(address = %bind_addr, "HTTP proxy server listening (ACME + redirect)");
 
-    let client = build_upstream_client();
+    let client = build_upstream_client(&state.config);
 
     loop {
         let (stream, remote_addr) = listener.accept().await?;
@@ -113,7 +113,7 @@ async fn serve_https(state: AppState) -> anyhow::Result<()> {
 
     tracing::info!(address = %bind_addr, "HTTPS proxy server listening");
 
-    let client = build_upstream_client();
+    let client = build_upstream_client(&state.config);
 
     loop {
         let (stream, remote_addr) = listener.accept().await?;
@@ -189,12 +189,14 @@ fn is_benign_connection_error(e: &hyper::Error) -> bool {
     false
 }
 
-fn build_upstream_client() -> Client<HttpConnector, Full<Bytes>> {
+fn build_upstream_client(config: &Config) -> Client<HttpConnector, Full<Bytes>> {
     let mut connector = HttpConnector::new();
-    connector.set_connect_timeout(Some(Duration::from_secs(3)));
+    connector.set_connect_timeout(Some(Duration::from_millis(
+        config.proxy_connect_timeout_ms.max(200),
+    )));
     connector.set_nodelay(true);
     Client::builder(TokioExecutor::new())
         .pool_idle_timeout(Duration::from_secs(60))
-        .pool_max_idle_per_host(10)
+        .pool_max_idle_per_host(config.proxy_pool_max_idle_per_host.max(1))
         .build(connector)
 }

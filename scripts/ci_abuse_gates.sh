@@ -8,6 +8,8 @@ echo "==> Abuse unit/integration tests"
 cargo test -p rift-engine services::abuse::tests::challenge_then_block_flow
 cargo test -p rift-engine services::abuse::tests::allowlist_and_bypass_token_are_trusted
 cargo test -p rift-engine services::abuse::tests::challenge_cookie_round_trip_validates
+cargo test -p rift-engine services::abuse::tests::challenge_ticket_round_trip_validates
+cargo test -p rift-engine services::abuse::tests::retry_after_is_capped_for_blocks
 cargo test -p rift-engine services::abuse::tests::redis_fallback_works_for_unreachable_backend
 
 if [[ -n "${TEST_REDIS_URL:-}" ]]; then

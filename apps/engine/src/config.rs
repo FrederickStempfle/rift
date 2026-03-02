@@ -31,6 +31,34 @@ pub struct Config {
     #[arg(long, env = "RIFT_PROXY_PORT", default_value_t = 8080)]
     pub proxy_port: u16,
 
+    /// Upstream request timeout in milliseconds for proxy forwarding.
+    #[arg(
+        long,
+        env = "RIFT_PROXY_UPSTREAM_TIMEOUT_MS",
+        default_value_t = 30_000
+    )]
+    pub proxy_upstream_timeout_ms: u64,
+
+    /// Upstream TCP connect timeout in milliseconds.
+    #[arg(
+        long,
+        env = "RIFT_PROXY_CONNECT_TIMEOUT_MS",
+        default_value_t = 3_000
+    )]
+    pub proxy_connect_timeout_ms: u64,
+
+    /// Maximum idle upstream connections per host in proxy pool.
+    #[arg(
+        long,
+        env = "RIFT_PROXY_POOL_MAX_IDLE_PER_HOST",
+        default_value_t = 128
+    )]
+    pub proxy_pool_max_idle_per_host: usize,
+
+    /// Maximum in-flight proxy requests before immediate overload shedding.
+    #[arg(long, env = "RIFT_PROXY_MAX_INFLIGHT", default_value_t = 4000)]
+    pub proxy_max_inflight: usize,
+
     /// The externally-visible port (after Docker port mapping). Defaults to proxy_port.
     #[arg(long, env = "RIFT_PUBLIC_PORT")]
     pub public_port: Option<u16>,
@@ -123,6 +151,46 @@ pub struct Config {
         default_value_t = 600
     )]
     pub abuse_bot_verify_cache_secs: u64,
+
+    /// Minimum solve time in seconds for abuse challenge verification.
+    #[arg(
+        long,
+        env = "RIFT_ABUSE_CHALLENGE_MIN_SOLVE_SECS",
+        default_value_t = 2
+    )]
+    pub abuse_challenge_min_solve_secs: u64,
+
+    /// Maximum retry-after header emitted by abuse controls.
+    #[arg(
+        long,
+        env = "RIFT_ABUSE_MAX_RETRY_AFTER_SECS",
+        default_value_t = 600
+    )]
+    pub abuse_max_retry_after_secs: u64,
+
+    /// Ban tier 1 duration in seconds (first strike beyond hard limit).
+    #[arg(long, env = "RIFT_ABUSE_BAN_TIER1_SECS", default_value_t = 60)]
+    pub abuse_ban_tier1_secs: u64,
+
+    /// Ban tier 2 duration in seconds.
+    #[arg(long, env = "RIFT_ABUSE_BAN_TIER2_SECS", default_value_t = 300)]
+    pub abuse_ban_tier2_secs: u64,
+
+    /// Ban tier 3 duration in seconds.
+    #[arg(
+        long,
+        env = "RIFT_ABUSE_BAN_TIER3_SECS",
+        default_value_t = 1_800
+    )]
+    pub abuse_ban_tier3_secs: u64,
+
+    /// Cloudflare Turnstile site key for challenge pages (optional).
+    #[arg(long, env = "RIFT_ABUSE_TURNSTILE_SITE_KEY")]
+    pub abuse_turnstile_site_key: Option<String>,
+
+    /// Cloudflare Turnstile secret key for challenge verification (optional).
+    #[arg(long, env = "RIFT_ABUSE_TURNSTILE_SECRET_KEY")]
+    pub abuse_turnstile_secret_key: Option<String>,
 
     /// Unique worker ID for this engine instance. Auto-generated if not set.
     #[arg(long, env = "RIFT_WORKER_ID")]

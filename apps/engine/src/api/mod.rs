@@ -7,6 +7,7 @@ use axum::{
     Json, Router,
 };
 use serde_json::json;
+use tokio::sync::Semaphore;
 use tower::ServiceBuilder;
 use tower_http::{
     cors::{Any, CorsLayer},
@@ -76,6 +77,8 @@ pub struct AppState {
     pub state_store: Arc<dyn StateStore>,
     /// Scheduler for placement decisions.
     pub scheduler: Arc<Scheduler>,
+    /// Global in-flight proxy limiter used for overload shedding.
+    pub proxy_inflight: Arc<Semaphore>,
     #[cfg(feature = "v8-isolate")]
     pub isolate_pool: Option<crate::runtime::isolate::IsolatePool>,
 }

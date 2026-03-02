@@ -163,6 +163,11 @@ struct AbuseSettings {
     bypass_header: String,
     bypass_token: Option<String>,
     challenge_ttl: Duration,
+    challenge_min_solve: Duration,
+    max_retry_after_secs: u64,
+    ban_tier1: Duration,
+    ban_tier2: Duration,
+    ban_tier3: Duration,
     bot_verify_enabled: bool,
     bot_verify_cache_ttl: Duration,
     limit_overrides: Vec<LimitOverride>,
@@ -255,6 +260,11 @@ impl AbuseGuard {
             bypass_header: DEFAULT_BYPASS_HEADER.to_owned(),
             bypass_token: None,
             challenge_ttl: Duration::from_secs(900),
+            challenge_min_solve: Duration::from_secs(2),
+            max_retry_after_secs: 600,
+            ban_tier1: Duration::from_secs(60),
+            ban_tier2: Duration::from_secs(300),
+            ban_tier3: Duration::from_secs(1800),
             bot_verify_enabled: false,
             bot_verify_cache_ttl: Duration::from_secs(600),
             limit_overrides: Vec::new(),
@@ -354,12 +364,73 @@ impl AbuseGuard {
         cookie
     }
 
+    pub fn issue_challenge_ticket(
+        &self,
+        client_ip: IpAddr,
+        headers: &HeaderMap,
+        return_to: &str,
+    ) -> String {
+        let issued_at = current_epoch_secs();
+        let ua_hash = user_agent_hash(headers);
+        let path_hash = challenge_path_hash(return_to);
+        let sig = self.sign_challenge_ticket(client_ip, &ua_hash, issued_at, &path_hash);
+        format!("{issued_at}:{path_hash}:{sig}")
+    }
+
+    pub fn verify_challenge_ticket(
+        &self,
+        client_ip: IpAddr,
+        headers: &HeaderMap,
+        return_to: &str,
+        ticket: &str,
+    ) -> bool {
+        let mut parts = ticket.split(':');
+        let Some(issued_at_raw) = parts.next() else {
+            return false;
+        };
+        let Some(path_hash) = parts.next() else {
+            return false;
+        };
+        let Some(sig) = parts.next() else {
+            return false;
+        };
+        if parts.next().is_some() {
+            return false;
+        }
+
+        let Ok(issued_at) = issued_at_raw.parse::<u64>() else {
+            return false;
+        };
+
+        let now = current_epoch_secs();
+        if issued_at > now {
+            return false;
+        }
+
+        let age = now.saturating_sub(issued_at);
+        if age < self.settings.challenge_min_solve.as_secs() {
+            return false;
+        }
+        if age > self.settings.challenge_ttl.as_secs().saturating_mul(2) {
+            return false;
+        }
+
+        let expected_hash = challenge_path_hash(return_to);
+        if !constant_time_eq(path_hash.as_bytes(), expected_hash.as_bytes()) {
+            return false;
+        }
+
+        let ua_hash = user_agent_hash(headers);
+        let expected_sig = self.sign_challenge_ticket(client_ip, &ua_hash, issued_at, path_hash);
+        constant_time_eq(expected_sig.as_bytes(), sig.as_bytes())
+    }
+
     pub async fn enforce(&self, limit: AbuseLimit) -> Result<AbuseDecision, AppError> {
         self.telemetry.checked_total.fetch_add(1, Ordering::Relaxed);
 
         if let Some(retry_after_secs) = self.ban_ttl_secs(&limit.actor_key).await {
             let decision = AbuseDecision::Block {
-                retry_after_secs,
+                retry_after_secs: self.clamp_retry_after(retry_after_secs),
                 reason: "temporary network ban active".to_owned(),
                 tier: "existing".to_owned(),
             };
@@ -377,7 +448,7 @@ impl AbuseGuard {
                 .incr_strike(&limit.actor_key)
                 .await
                 .map_err(|e| AppError::Internal(format!("abuse strike failed: {e}")))?;
-            let (ban_for, tier) = ban_tier(strikes);
+            let (ban_for, tier) = self.ban_tier(strikes);
 
             self.set_ban(&limit.actor_key, ban_for)
                 .await
@@ -385,7 +456,7 @@ impl AbuseGuard {
 
             metrics::ABUSE_BAN_TIER.with_label_values(&[tier]).inc();
             let decision = AbuseDecision::Block {
-                retry_after_secs: ban_for.as_secs(),
+                retry_after_secs: self.clamp_retry_after(ban_for.as_secs()),
                 reason: format!("rate limit exceeded for {}", limit.scope),
                 tier: tier.to_owned(),
             };
@@ -396,7 +467,7 @@ impl AbuseGuard {
         if let Some(challenge_after) = limit.challenge_after {
             if count > challenge_after {
                 let decision = AbuseDecision::Challenge {
-                    retry_after_secs: window_remaining.max(1),
+                    retry_after_secs: self.clamp_retry_after(window_remaining.max(1)),
                     reason: format!("challenge required for {}", limit.scope),
                 };
                 self.record(limit.scope, &decision).await;
@@ -523,6 +594,32 @@ impl AbuseGuard {
         hex::encode(bytes)
     }
 
+    fn sign_challenge_ticket(
+        &self,
+        client_ip: IpAddr,
+        ua_hash: &str,
+        issued_at: u64,
+        path_hash: &str,
+    ) -> String {
+        let mut mac = Hmac::<Sha256>::new_from_slice(&self.settings.challenge_secret)
+            .expect("HMAC accepts any key length");
+        mac.update(format!("{client_ip}|{ua_hash}|{issued_at}|{path_hash}|ticket").as_bytes());
+        let bytes = mac.finalize().into_bytes();
+        hex::encode(bytes)
+    }
+
+    fn clamp_retry_after(&self, seconds: u64) -> u64 {
+        seconds.max(1).min(self.settings.max_retry_after_secs.max(1))
+    }
+
+    fn ban_tier(&self, strikes: u64) -> (Duration, &'static str) {
+        match strikes {
+            0 | 1 => (self.settings.ban_tier1, "tier1"),
+            2 => (self.settings.ban_tier2, "tier2"),
+            _ => (self.settings.ban_tier3, "tier3"),
+        }
+    }
+
     async fn record(&self, scope: &str, decision: &AbuseDecision) {
         let action = match decision {
             AbuseDecision::Allow => {
@@ -646,12 +743,20 @@ impl AbuseSettings {
         let mut hasher = Sha256::new();
         hasher.update(config.master_key.as_bytes());
         hasher.update(b"rift-abuse-challenge");
+        let ban_tier1 = Duration::from_secs(config.abuse_ban_tier1_secs.max(1));
+        let ban_tier2 = Duration::from_secs(config.abuse_ban_tier2_secs.max(ban_tier1.as_secs()));
+        let ban_tier3 = Duration::from_secs(config.abuse_ban_tier3_secs.max(ban_tier2.as_secs()));
 
         Self {
             allowlist_cidrs,
             bypass_header,
             bypass_token: config.abuse_bypass_token.clone(),
             challenge_ttl: Duration::from_secs(config.abuse_challenge_ttl_secs.max(60)),
+            challenge_min_solve: Duration::from_secs(config.abuse_challenge_min_solve_secs.max(1)),
+            max_retry_after_secs: config.abuse_max_retry_after_secs.max(1),
+            ban_tier1,
+            ban_tier2,
+            ban_tier3,
             bot_verify_enabled: config.abuse_bot_verify,
             bot_verify_cache_ttl: Duration::from_secs(config.abuse_bot_verify_cache_secs.max(60)),
             limit_overrides,
@@ -891,14 +996,6 @@ async fn redis_incr_strike(client: &redis::Client, actor_key: &str) -> Result<u6
     Ok(count)
 }
 
-fn ban_tier(strikes: u64) -> (Duration, &'static str) {
-    match strikes {
-        0 | 1 => (Duration::from_secs(5 * 60), "5m"),
-        2 => (Duration::from_secs(30 * 60), "30m"),
-        _ => (Duration::from_secs(24 * 60 * 60), "24h"),
-    }
-}
-
 fn user_agent_hash(headers: &HeaderMap) -> String {
     let ua = headers
         .get(http::header::USER_AGENT)
@@ -913,11 +1010,22 @@ fn user_agent_hash(headers: &HeaderMap) -> String {
 }
 
 fn current_window(ttl: Duration) -> u64 {
-    let now = SystemTime::now()
+    let now = current_epoch_secs();
+    now / ttl.as_secs().max(1)
+}
+
+fn current_epoch_secs() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    now / ttl.as_secs().max(1)
+        .as_secs()
+}
+
+fn challenge_path_hash(path: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(path.as_bytes());
+    let digest = hasher.finalize();
+    hex::encode(&digest[..8])
 }
 
 fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -1104,6 +1212,11 @@ mod tests {
             bypass_header: "x-rift-abuse-bypass".to_owned(),
             bypass_token: Some("secret-token".to_owned()),
             challenge_ttl: Duration::from_secs(900),
+            challenge_min_solve: Duration::from_secs(1),
+            max_retry_after_secs: 60,
+            ban_tier1: Duration::from_secs(10),
+            ban_tier2: Duration::from_secs(20),
+            ban_tier3: Duration::from_secs(30),
             bot_verify_enabled: false,
             bot_verify_cache_ttl: Duration::from_secs(600),
             limit_overrides: Vec::new(),
@@ -1152,6 +1265,68 @@ mod tests {
     }
 
     #[test]
+    fn challenge_ticket_round_trip_validates() {
+        let guard = AbuseGuard::local_for_tests();
+        let ip: IpAddr = "203.0.113.12".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("Mozilla/5.0 Test"),
+        );
+
+        let path = "/projects/demo?tab=logs";
+        let now = current_epoch_secs();
+        let issued_at = now.saturating_sub(3);
+        let path_hash = challenge_path_hash(path);
+        let ua_hash = user_agent_hash(&headers);
+        let sig = guard.sign_challenge_ticket(ip, &ua_hash, issued_at, &path_hash);
+        let ticket = format!("{issued_at}:{path_hash}:{sig}");
+
+        assert!(guard.verify_challenge_ticket(ip, &headers, path, &ticket));
+        assert!(!guard.verify_challenge_ticket(ip, &headers, "/projects/other", &ticket));
+    }
+
+    #[tokio::test]
+    async fn retry_after_is_capped_for_blocks() {
+        let mut guard = AbuseGuard::local_for_tests();
+        let settings = AbuseSettings {
+            allowlist_cidrs: Vec::new(),
+            bypass_header: DEFAULT_BYPASS_HEADER.to_owned(),
+            bypass_token: None,
+            challenge_ttl: Duration::from_secs(900),
+            challenge_min_solve: Duration::from_secs(1),
+            max_retry_after_secs: 3,
+            ban_tier1: Duration::from_secs(600),
+            ban_tier2: Duration::from_secs(1_200),
+            ban_tier3: Duration::from_secs(1_800),
+            bot_verify_enabled: false,
+            bot_verify_cache_ttl: Duration::from_secs(600),
+            limit_overrides: Vec::new(),
+            challenge_secret: vec![3; 32],
+        };
+        guard.settings = Arc::new(settings);
+
+        let decision = guard
+            .enforce(AbuseLimit {
+                scope: "proxy.global_ip",
+                actor_key: "ip:198.51.100.4".to_owned(),
+                bucket_key: "scope:proxy.global_ip:cap".to_owned(),
+                limit: 0,
+                window: Duration::from_secs(30),
+                challenge_after: None,
+            })
+            .await
+            .unwrap();
+
+        match decision {
+            AbuseDecision::Block {
+                retry_after_secs, ..
+            } => assert_eq!(retry_after_secs, 3),
+            _ => panic!("expected block decision"),
+        }
+    }
+
+    #[test]
     fn project_override_wins_over_global_default() {
         let mut guard = AbuseGuard::local_for_tests();
         let project_id = Uuid::new_v4();
@@ -1160,6 +1335,11 @@ mod tests {
             bypass_header: DEFAULT_BYPASS_HEADER.to_owned(),
             bypass_token: None,
             challenge_ttl: Duration::from_secs(900),
+            challenge_min_solve: Duration::from_secs(1),
+            max_retry_after_secs: 60,
+            ban_tier1: Duration::from_secs(10),
+            ban_tier2: Duration::from_secs(20),
+            ban_tier3: Duration::from_secs(30),
             bot_verify_enabled: false,
             bot_verify_cache_ttl: Duration::from_secs(600),
             limit_overrides: vec![LimitOverride {

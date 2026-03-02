@@ -12,8 +12,10 @@ Optional environment variables:
 
 - `TEST_REDIS_URL`: enables Redis persistence test.
 - `RUN_LOAD_GATES=1`: enables `k6` load SLO gate.
-- `TARGET_URL`: load target URL for `k6` (default `https://127.0.0.1`).
+- `TARGET_URL`: load target URL for `k6` (default `http://127.0.0.1`).
 - `TARGET_HOST`: host header used in load tests.
+- `BYPASS_TOKEN`: optional trusted bypass token for synthetic load traffic.
+- `BYPASS_HEADER`: optional bypass header name (default `x-rift-abuse-bypass`).
 
 ## External Load Gate
 
