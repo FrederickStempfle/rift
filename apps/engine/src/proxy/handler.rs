@@ -38,6 +38,20 @@ pub async fn handle_request(
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     let start = std::time::Instant::now();
 
+    // Extract analytics metadata before forwarding (req headers will be consumed)
+    let analytics_path = req.uri().path().to_owned();
+    let analytics_referer = req
+        .headers()
+        .get(hyper::header::REFERER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|url| {
+            url.split("//")
+                .nth(1)
+                .and_then(|rest| rest.split('/').next())
+                .and_then(|host| host.split(':').next())
+                .map(|domain| domain.to_lowercase())
+        });
+
     let result = route_and_forward(req, remote_addr, &client, &state).await;
 
     let (status_code, project_id, cold_start) = match &result {
@@ -51,6 +65,8 @@ pub async fn handle_request(
             status: status_code,
             duration_ms: start.elapsed().as_millis() as u64,
             cold_start,
+            path: Some(analytics_path),
+            referer: analytics_referer,
         });
     }
 
