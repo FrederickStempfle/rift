@@ -661,27 +661,91 @@ fn proxy_challenge_response(
     let ticket_html = escape_html_attr(&ticket);
     let turnstile_html = if let Some(site_key) = turnstile_site_key(state) {
         format!(
-            "<script src=\"https://challenges.cloudflare.com/turnstile/v0/api.js\" async defer></script>\
-<div class=\"cf-turnstile\" data-sitekey=\"{}\"></div>",
+            "<div class=\"widget-wrap\">\
+<script src=\"https://challenges.cloudflare.com/turnstile/v0/api.js\" async defer></script>\
+<div class=\"cf-turnstile\" data-sitekey=\"{}\"></div></div>",
             escape_html_attr(site_key)
         )
     } else {
-        "<label><input type=\"checkbox\" required> I confirm this request is human-originated</label>"
+        "<label class=\"check-label\">\
+<input type=\"checkbox\" required>\
+<div><div class=\"check-text\">I confirm this request is human-initiated</div>\
+<div class=\"check-sub\">Automated tools and bots cannot proceed past this point</div></div>\
+</label>"
             .to_owned()
     };
     let body = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-<title>Verification Required</title><style>body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#f5f7fb;padding:24px;color:#0f172a}}\
-.card{{max-width:560px;margin:8vh auto;background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:20px;box-shadow:0 8px 30px rgba(15,23,42,.08)}}\
-h1{{margin:0 0 10px;font-size:1.35rem}}p{{margin:.4rem 0;color:#334155}}button{{margin-top:12px;background:#0f172a;color:#fff;border:none;border-radius:8px;padding:.6rem 1rem;cursor:pointer}}\
-small{{display:block;color:#64748b;margin-top:8px}}</style></head><body>\
-<main class=\"card\"><h1>Verification required</h1><p>{reason_html}</p><p>Retry budget: {retry_after_secs}s</p>\
+        "<!doctype html><html lang=\"en\"><head>\
+<meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+<title>Security Check</title>\
+<style>\
+@keyframes fadein{{from{{opacity:0;transform:translateY(8px)}}to{{opacity:1;transform:translateY(0)}}}}\
+@keyframes shrink{{from{{width:100%}}to{{width:0%}}}}\
+*,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}\
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:#f8fafc;min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:24px;color:#0f172a}}\
+.wrap{{width:100%;max-width:400px;animation:fadein .3s cubic-bezier(.16,1,.3,1) both}}\
+.brand{{display:flex;align-items:center;gap:7px;margin-bottom:24px;justify-content:center}}\
+.brand-pip{{width:6px;height:6px;background:#0f172a;border-radius:50%}}\
+.brand-label{{font-size:.6875rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:#94a3b8}}\
+.card{{background:#fff;border:1px solid #e2e8f0;border-radius:20px;padding:36px;box-shadow:0 4px 6px -2px rgba(15,23,42,.04),0 16px 48px -8px rgba(15,23,42,.1)}}\
+.icon-ring{{width:48px;height:48px;background:linear-gradient(145deg,#f0f9ff,#e0f2fe);border:1px solid #bae6fd;border-radius:13px;display:flex;align-items:center;justify-content:center;margin-bottom:22px}}\
+h1{{font-size:1.125rem;font-weight:700;letter-spacing:-.025em;color:#0f172a;margin-bottom:8px}}\
+.sub{{font-size:.875rem;color:#64748b;line-height:1.65;margin-bottom:22px}}\
+.reason-box{{display:flex;align-items:flex-start;gap:10px;background:#f8fafc;border:1px solid #f1f5f9;border-left:3px solid #cbd5e1;border-radius:8px;padding:11px 13px;font-size:.8125rem;color:#475569;line-height:1.5;margin-bottom:20px}}\
+.timer-row{{display:flex;align-items:center;gap:7px;font-size:.75rem;color:#94a3b8;margin-bottom:22px}}\
+.bar-track{{flex:1;height:2px;background:#f1f5f9;border-radius:99px;overflow:hidden}}\
+.bar-fill{{height:100%;width:100%;background:#e2e8f0;border-radius:99px;animation:shrink {retry_after_secs}s linear forwards}}\
+.check-label{{display:flex;align-items:flex-start;gap:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:16px;cursor:pointer;transition:border-color .15s,background .15s;margin-bottom:16px;-webkit-user-select:none;user-select:none}}\
+.check-label:hover{{border-color:#cbd5e1}}\
+.check-label input[type=checkbox]{{margin-top:2px;width:15px;height:15px;flex-shrink:0;accent-color:#0f172a;cursor:pointer}}\
+.check-text{{font-size:.875rem;color:#334155;line-height:1.5}}\
+.check-sub{{font-size:.75rem;color:#94a3b8;margin-top:3px}}\
+.widget-wrap{{margin-bottom:16px}}\
+button[type=submit]{{width:100%;background:#0f172a;color:#fff;border:none;border-radius:12px;padding:13px 18px;font-size:.9375rem;font-weight:600;letter-spacing:-.015em;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;transition:background .15s,transform .1s;margin-top:2px}}\
+button[type=submit]:hover{{background:#1e293b}}\
+button[type=submit]:active{{transform:scale(.98)}}\
+.footer{{margin-top:20px;display:flex;align-items:center;justify-content:center;gap:5px;font-size:.6875rem;color:#cbd5e1;letter-spacing:.02em}}\
+</style></head>\
+<body><div class=\"wrap\">\
+<div class=\"brand\"><div class=\"brand-pip\"></div><span class=\"brand-label\">Rift Security</span></div>\
+<div class=\"card\">\
+<div class=\"icon-ring\">\
+<svg width=\"22\" height=\"22\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#38bdf8\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\
+<path d=\"M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z\"/><polyline points=\"9 12 11 14 15 10\"/>\
+</svg>\
+</div>\
+<h1>Verify you&#8217;re human</h1>\
+<p class=\"sub\">An automated check flagged this request. Complete the step below to continue.</p>\
+<div class=\"reason-box\">\
+<svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#94a3b8\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" style=\"flex-shrink:0;margin-top:1px\">\
+<circle cx=\"12\" cy=\"12\" r=\"10\"/><line x1=\"12\" y1=\"8\" x2=\"12\" y2=\"12\"/><line x1=\"12\" y1=\"16\" x2=\"12.01\" y2=\"16\"/>\
+</svg>\
+<span>{reason_html}</span>\
+</div>\
+<div class=\"timer-row\">\
+<svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\
+<circle cx=\"12\" cy=\"12\" r=\"10\"/><polyline points=\"12 6 12 12 16 14\"/>\
+</svg>\
+<span>{retry_after_secs}s window</span>\
+<div class=\"bar-track\"><div class=\"bar-fill\"></div></div>\
+</div>\
 <form method=\"post\" action=\"{CHALLENGE_VERIFY_PATH}\">\
 <input type=\"hidden\" name=\"ticket\" value=\"{ticket_html}\">\
 <input type=\"hidden\" name=\"return_to\" value=\"{return_to_html}\">\
 {turnstile_html}\
-<button type=\"submit\">Continue</button></form>\
-<small>Protected by Rift abuse controls.</small></main></body></html>"
+<button type=\"submit\">Continue\
+<svg width=\"15\" height=\"15\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\
+<path d=\"M5 12h14M12 5l7 7-7 7\"/>\
+</svg>\
+</button>\
+</form>\
+<div class=\"footer\">\
+<svg width=\"11\" height=\"11\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\
+<rect x=\"3\" y=\"11\" width=\"18\" height=\"11\" rx=\"2\"/><path d=\"M7 11V7a5 5 0 0 1 10 0v4\"/>\
+</svg>\
+Protected by Rift\
+</div></div></div></body></html>"
     );
     Response::builder()
         .status(StatusCode::FORBIDDEN)
