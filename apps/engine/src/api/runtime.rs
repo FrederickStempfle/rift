@@ -51,6 +51,13 @@ pub async fn get_runtime_stats(
     }))
 }
 
+pub async fn get_abuse_stats(
+    State(state): State<AppState>,
+    _auth_user: AuthUser,
+) -> AppResult<Json<crate::services::abuse::AbuseSnapshot>> {
+    Ok(Json(state.abuse_guard.snapshot().await))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ProjectRuntimeQuery {
     pub project_id: Uuid,

@@ -1,5 +1,7 @@
+use std::{net::SocketAddr, time::Duration};
+
 use axum::{
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::StatusCode,
     routing::{get, post},
     Json, Router,
@@ -11,6 +13,7 @@ use crate::{
     api::{auth::AuthUser, AppState},
     db::{domains, edge, projects},
     error::{AppError, AppResult},
+    services::abuse::{AbuseDecision, AbuseLimit},
     state::RoutingEntry,
 };
 
@@ -59,9 +62,23 @@ pub async fn list_releases(
 
 pub async fn promote_release(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     auth_user: AuthUser,
     Path(release_id): Path<Uuid>,
 ) -> AppResult<Json<ReleaseResponse>> {
+    enforce_abuse_limit(
+        &state,
+        AbuseLimit::per_ip(
+            "api.release.promote.ip",
+            addr.ip(),
+            "promote",
+            40,
+            Duration::from_secs(30 * 60),
+            Some(25),
+        ),
+    )
+    .await?;
+
     let release = edge::get_release_for_user(&state.pool, release_id, auth_user.user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("release not found".into()))?;
@@ -94,9 +111,23 @@ pub async fn promote_release(
 
 pub async fn rollback_release(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     auth_user: AuthUser,
     Path(release_id): Path<Uuid>,
 ) -> AppResult<(StatusCode, Json<ReleaseResponse>)> {
+    enforce_abuse_limit(
+        &state,
+        AbuseLimit::per_ip(
+            "api.release.rollback.ip",
+            addr.ip(),
+            "rollback",
+            30,
+            Duration::from_secs(30 * 60),
+            Some(20),
+        ),
+    )
+    .await?;
+
     let release = edge::get_release_for_user(&state.pool, release_id, auth_user.user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("release not found".into()))?;
@@ -141,5 +172,24 @@ impl ReleaseResponse {
             promoted_at: value.promoted_at,
             created_at: value.created_at,
         }
+    }
+}
+
+async fn enforce_abuse_limit(state: &AppState, limit: AbuseLimit) -> AppResult<()> {
+    match state.abuse_guard.enforce(limit).await? {
+        AbuseDecision::Allow => Ok(()),
+        AbuseDecision::Challenge {
+            retry_after_secs,
+            reason,
+        } => Err(AppError::RateLimited(format!(
+            "{reason}; retry in {retry_after_secs}s"
+        ))),
+        AbuseDecision::Block {
+            retry_after_secs,
+            reason,
+            tier: _,
+        } => Err(AppError::RateLimited(format!(
+            "{reason}; retry in {retry_after_secs}s"
+        ))),
     }
 }

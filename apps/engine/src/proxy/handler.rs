@@ -1,9 +1,10 @@
-use std::{convert::Infallible, net::SocketAddr};
+use std::{convert::Infallible, net::SocketAddr, time::Duration};
 
 use bytes::{Bytes, BytesMut};
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, header::HOST, HeaderMap, Request, Response, StatusCode, Uri};
 use hyper_util::client::legacy::Client;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
@@ -11,6 +12,7 @@ use crate::{
     db::{domains, projects},
     error::AppError,
     proxy::{analytics_collector::RequestEvent, routing_cache::CacheLookup},
+    services::abuse::{AbuseDecision, AbuseLimit},
     state::RoutingEntry,
 };
 
@@ -18,6 +20,12 @@ type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Ful
 
 const MAX_PROXY_BODY_BYTES: usize = 10 * 1024 * 1024;
 const UPSTREAM_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const PROXY_GLOBAL_LIMIT: u64 = 2000;
+const PROXY_GLOBAL_CHALLENGE: u64 = 1400;
+const PROXY_ROUTE_LIMIT: u64 = 600;
+const PROXY_ROUTE_CHALLENGE: u64 = 420;
+const PROXY_TOKEN_LIMIT: u64 = 900;
+const PROXY_TOKEN_CHALLENGE: u64 = 650;
 
 const HOP_BY_HOP: &[&str] = &[
     "connection",
@@ -29,6 +37,11 @@ const HOP_BY_HOP: &[&str] = &[
     "transfer-encoding",
     "upgrade",
 ];
+
+enum RouteError {
+    Status(StatusCode, Option<Uuid>),
+    Response(Response<Full<Bytes>>, Option<Uuid>),
+}
 
 pub async fn handle_request(
     req: Request<Incoming>,
@@ -56,7 +69,8 @@ pub async fn handle_request(
 
     let (status_code, project_id, cold_start) = match &result {
         Ok((resp, pid, cs)) => (resp.status().as_u16(), *pid, *cs),
-        Err((sc, pid)) => (sc.as_u16(), *pid, false),
+        Err(RouteError::Status(sc, pid)) => (sc.as_u16(), *pid, false),
+        Err(RouteError::Response(resp, pid)) => (resp.status().as_u16(), *pid, false),
     };
 
     if let Some(pid) = project_id {
@@ -72,7 +86,8 @@ pub async fn handle_request(
 
     match result {
         Ok((resp, _, _)) => Ok(resp),
-        Err((sc, _)) => Ok(error_response(sc)),
+        Err(RouteError::Status(sc, _)) => Ok(error_response(sc)),
+        Err(RouteError::Response(resp, _)) => Ok(resp),
     }
 }
 
@@ -84,13 +99,68 @@ async fn route_and_forward(
     remote_addr: SocketAddr,
     client: &HttpClient,
     state: &AppState,
-) -> Result<(Response<Full<Bytes>>, Option<Uuid>, bool), (StatusCode, Option<Uuid>)> {
-    let host = extract_host(req.headers()).ok_or((StatusCode::BAD_REQUEST, None))?;
+) -> Result<(Response<Full<Bytes>>, Option<Uuid>, bool), RouteError> {
+    let host = extract_host(req.headers()).ok_or(RouteError::Status(StatusCode::BAD_REQUEST, None))?;
+    let client_ip = remote_addr.ip();
+    let path_bucket = route_bucket(req.uri().path());
+
+    if let Some(response) = enforce_proxy_limit(
+        state,
+        AbuseLimit::per_ip(
+            "proxy.global_ip",
+            client_ip,
+            "global",
+            PROXY_GLOBAL_LIMIT,
+            Duration::from_secs(10),
+            Some(PROXY_GLOBAL_CHALLENGE),
+        ),
+    )
+    .await
+    .map_err(|e| RouteError::Status(map_app_error(e), None))?
+    {
+        return Err(RouteError::Response(response, None));
+    }
+
+    if let Some(response) = enforce_proxy_limit(
+        state,
+        AbuseLimit::per_ip(
+            "proxy.route_ip",
+            client_ip,
+            format!("route:{host}:{path_bucket}"),
+            PROXY_ROUTE_LIMIT,
+            Duration::from_secs(10),
+            Some(PROXY_ROUTE_CHALLENGE),
+        ),
+    )
+    .await
+    .map_err(|e| RouteError::Status(map_app_error(e), None))?
+    {
+        return Err(RouteError::Response(response, None));
+    }
+
+    if let Some(token_fingerprint) = bearer_fingerprint(req.headers()) {
+        if let Some(response) = enforce_proxy_limit(
+            state,
+            AbuseLimit {
+                scope: "proxy.token",
+                actor_key: format!("token:{token_fingerprint}"),
+                bucket_key: format!("scope:proxy.token:token:{token_fingerprint}"),
+                limit: PROXY_TOKEN_LIMIT,
+                window: Duration::from_secs(10),
+                challenge_after: Some(PROXY_TOKEN_CHALLENGE),
+            },
+        )
+        .await
+        .map_err(|e| RouteError::Status(map_app_error(e), None))?
+        {
+            return Err(RouteError::Response(response, None));
+        }
+    }
 
     let project_id = resolve_project_id(state, &host)
         .await
-        .map_err(|e| (map_app_error(e), None))?
-        .ok_or((StatusCode::NOT_FOUND, None))?;
+        .map_err(|e| RouteError::Status(map_app_error(e), None))?
+        .ok_or(RouteError::Status(StatusCode::NOT_FOUND, None))?;
 
     let pid = Some(project_id);
 
@@ -99,9 +169,9 @@ async fn route_and_forward(
         .firewall_cache
         .is_allowed(&state.pool, project_id, remote_addr.ip())
         .await
-        .map_err(|e| (map_app_error(e), pid))?;
+        .map_err(|e| RouteError::Status(map_app_error(e), pid))?;
     if !allowed {
-        return Err((StatusCode::FORBIDDEN, pid));
+        return Err(RouteError::Status(StatusCode::FORBIDDEN, pid));
     }
 
     // V8 isolate pool: handle function-only projects directly (no HTTP hop)
@@ -136,11 +206,11 @@ async fn route_and_forward(
                 }
                 Ok(None) => {
                     tracing::warn!(%project_id, "wake requested but project is not suspended");
-                    return Err((StatusCode::SERVICE_UNAVAILABLE, pid));
+                    return Err(RouteError::Status(StatusCode::SERVICE_UNAVAILABLE, pid));
                 }
                 Err(error) => {
                     tracing::warn!(%project_id, error = %error, "wake failed");
-                    return Err((map_app_error(error), pid));
+                    return Err(RouteError::Status(map_app_error(error), pid));
                 }
             }
         }
@@ -154,7 +224,7 @@ async fn route_and_forward(
         .unwrap_or("/");
     let target_url: Uri = format!("{target_base}{path_and_query}")
         .parse()
-        .map_err(|_| (StatusCode::BAD_REQUEST, pid))?;
+        .map_err(|_| RouteError::Status(StatusCode::BAD_REQUEST, pid))?;
 
     // Decompose request
     let (parts, body) = req.into_parts();
@@ -162,7 +232,7 @@ async fn route_and_forward(
     // Read body (bounded)
     let body_bytes = collect_body_limited(body, StatusCode::BAD_REQUEST)
         .await
-        .map_err(|status| (status, pid))?;
+        .map_err(|status| RouteError::Status(status, pid))?;
 
     // Build upstream request
     let mut upstream = Request::builder()
@@ -196,13 +266,13 @@ async fn route_and_forward(
 
     let upstream_req = upstream
         .body(Full::new(body_bytes))
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, pid))?;
+        .map_err(|_| RouteError::Status(StatusCode::INTERNAL_SERVER_ERROR, pid))?;
 
     // Forward
     let upstream_resp = tokio::time::timeout(UPSTREAM_REQUEST_TIMEOUT, client.request(upstream_req))
         .await
-        .map_err(|_| (StatusCode::GATEWAY_TIMEOUT, pid))?
-        .map_err(|_| (StatusCode::BAD_GATEWAY, pid))?;
+        .map_err(|_| RouteError::Status(StatusCode::GATEWAY_TIMEOUT, pid))?
+        .map_err(|_| RouteError::Status(StatusCode::BAD_GATEWAY, pid))?;
 
     // Build response
     let status = upstream_resp.status();
@@ -218,11 +288,11 @@ async fn route_and_forward(
 
     let resp_bytes = collect_body_limited(upstream_resp.into_body(), StatusCode::BAD_GATEWAY)
         .await
-        .map_err(|status| (status, pid))?;
+        .map_err(|status| RouteError::Status(status, pid))?;
 
     let resp = response
         .body(Full::new(resp_bytes))
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, pid))?;
+        .map_err(|_| RouteError::Status(StatusCode::INTERNAL_SERVER_ERROR, pid))?;
 
     Ok((resp, pid, cold_start))
 }
@@ -306,6 +376,89 @@ pub(crate) fn match_subdomain<'a>(host: &'a str, base_domain: &str) -> Option<&'
     host.strip_suffix(&suffix).filter(|s| !s.is_empty())
 }
 
+async fn enforce_proxy_limit(
+    state: &AppState,
+    limit: AbuseLimit,
+) -> Result<Option<Response<Full<Bytes>>>, AppError> {
+    match state.abuse_guard.enforce(limit).await? {
+        AbuseDecision::Allow => Ok(None),
+        AbuseDecision::Challenge {
+            retry_after_secs,
+            reason,
+        } => Ok(Some(proxy_abuse_response(
+            StatusCode::FORBIDDEN,
+            "challenge",
+            retry_after_secs,
+            &reason,
+        ))),
+        AbuseDecision::Block {
+            retry_after_secs,
+            reason,
+            tier: _,
+        } => Ok(Some(proxy_abuse_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "block",
+            retry_after_secs,
+            &reason,
+        ))),
+    }
+}
+
+fn proxy_abuse_response(
+    status: StatusCode,
+    action: &str,
+    retry_after_secs: u64,
+    reason: &str,
+) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(status)
+        .header("retry-after", retry_after_secs.to_string())
+        .header("x-rift-abuse-action", action)
+        .header("x-rift-challenge", "required")
+        .body(Full::new(Bytes::from(reason.to_owned())))
+        .unwrap_or_else(|_| error_response(status))
+}
+
+fn route_bucket(path: &str) -> String {
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).take(2).collect();
+    if segments.is_empty() {
+        return "root".to_owned();
+    }
+    segments
+        .iter()
+        .map(|segment| normalize_segment(segment))
+        .collect::<Vec<String>>()
+        .join("/")
+}
+
+fn normalize_segment(segment: &str) -> String {
+    if segment.len() > 32 {
+        return ":var".to_owned();
+    }
+    if segment.chars().all(|c| c.is_ascii_digit()) {
+        return ":id".to_owned();
+    }
+    if segment.contains('-')
+        && segment.chars().filter(|c| *c == '-').count() >= 2
+        && segment.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+    {
+        return ":uuid".to_owned();
+    }
+    segment.to_owned()
+}
+
+fn bearer_fingerprint(headers: &HeaderMap) -> Option<String> {
+    let token = headers
+        .get(hyper::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    let digest = hasher.finalize();
+    Some(hex::encode(&digest[..8]))
+}
+
 fn error_response(status: StatusCode) -> Response<Full<Bytes>> {
     Response::builder()
         .status(status)
@@ -324,7 +477,7 @@ async fn handle_isolate_invoke(
     project_id: Uuid,
     host: &str,
     state: &AppState,
-) -> Result<(Response<Full<Bytes>>, Option<Uuid>, bool), (StatusCode, Option<Uuid>)> {
+) -> Result<(Response<Full<Bytes>>, Option<Uuid>, bool), RouteError> {
     let pid = Some(project_id);
 
     // Decompose request
@@ -333,7 +486,7 @@ async fn handle_isolate_invoke(
     // Read body
     let body_bytes = collect_body_limited(body, StatusCode::BAD_REQUEST)
         .await
-        .map_err(|status| (status, pid))?;
+        .map_err(|status| RouteError::Status(status, pid))?;
 
     // Build the full URL the handler expects
     let path_and_query = parts
@@ -379,7 +532,7 @@ async fn handle_isolate_invoke(
         .await
         .map_err(|e| {
             tracing::error!(error = %e, project_id = %project_id, "isolate invoke failed");
-            (map_app_error(e), pid)
+            RouteError::Status(map_app_error(e), pid)
         })?;
 
     // Build hyper Response from IsolateResponse
@@ -397,7 +550,7 @@ async fn handle_isolate_invoke(
 
     let resp = response
         .body(Full::new(isolate_resp.body))
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, pid))?;
+        .map_err(|_| RouteError::Status(StatusCode::INTERNAL_SERVER_ERROR, pid))?;
 
     Ok((resp, pid, false))
 }

@@ -1,5 +1,7 @@
+use std::{net::SocketAddr, time::Duration};
+
 use axum::{
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::StatusCode,
     routing::get,
     Json, Router,
@@ -13,6 +15,7 @@ use crate::{
     db::{deployments, domains, edge, projects},
     error::{AppError, AppResult},
     lifecycle::operations::{self, BeginOutcome},
+    services::abuse::{AbuseDecision, AbuseLimit},
 };
 
 pub fn routes() -> Router<AppState> {
@@ -79,9 +82,35 @@ pub async fn list_deployments(
 
 pub async fn create_deployment(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     auth_user: AuthUser,
     Json(payload): Json<CreateDeploymentRequest>,
 ) -> AppResult<(StatusCode, Json<DeploymentResponse>)> {
+    enforce_abuse_limit(
+        &state,
+        AbuseLimit::per_ip(
+            "api.deploy.create.ip",
+            addr.ip(),
+            "deploy",
+            45,
+            Duration::from_secs(10 * 60),
+            Some(30),
+        ),
+    )
+    .await?;
+    enforce_abuse_limit(
+        &state,
+        AbuseLimit {
+            scope: "api.deploy.create.user",
+            actor_key: format!("user:{}", auth_user.user_id),
+            bucket_key: format!("scope:api.deploy.create.user:user:{}", auth_user.user_id),
+            limit: 20,
+            window: Duration::from_secs(10 * 60),
+            challenge_after: Some(12),
+        },
+    )
+    .await?;
+
     let project =
         projects::get_project_for_user(&state.pool, payload.project_id, auth_user.user_id)
             .await?
@@ -159,9 +188,23 @@ pub async fn create_deployment(
 
 pub async fn package_deployment(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     auth_user: AuthUser,
     Path(deployment_id): Path<Uuid>,
 ) -> AppResult<(StatusCode, Json<PackageDeploymentResponse>)> {
+    enforce_abuse_limit(
+        &state,
+        AbuseLimit::per_ip(
+            "api.deploy.package.ip",
+            addr.ip(),
+            "package",
+            60,
+            Duration::from_secs(60 * 60),
+            Some(40),
+        ),
+    )
+    .await?;
+
     let deployment = deployments::get_deployment_for_user(&state.pool, deployment_id, auth_user.user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("deployment not found".into()))?;
@@ -248,5 +291,24 @@ impl DeploymentResponse {
             created_at: value.created_at,
             suspended_at: value.suspended_at,
         }
+    }
+}
+
+async fn enforce_abuse_limit(state: &AppState, limit: AbuseLimit) -> AppResult<()> {
+    match state.abuse_guard.enforce(limit).await? {
+        AbuseDecision::Allow => Ok(()),
+        AbuseDecision::Challenge {
+            retry_after_secs,
+            reason,
+        } => Err(AppError::RateLimited(format!(
+            "{reason}; retry in {retry_after_secs}s"
+        ))),
+        AbuseDecision::Block {
+            retry_after_secs,
+            reason,
+            tier: _,
+        } => Err(AppError::RateLimited(format!(
+            "{reason}; retry in {retry_after_secs}s"
+        ))),
     }
 }

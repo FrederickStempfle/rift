@@ -1755,6 +1755,15 @@ pub async fn copy_dir_with_mode(
     dst: &std::path::Path,
     mode: CopyMode,
 ) -> Result<(), AppError> {
+    let skip_child = if dst.starts_with(src) {
+        dst.strip_prefix(src)
+            .ok()
+            .and_then(|relative| relative.components().next())
+            .map(|component| component.as_os_str().to_owned())
+    } else {
+        None
+    };
+
     fs::create_dir_all(dst)
         .await
         .map_err(|e| AppError::Internal(format!("failed to create dir {}: {e}", dst.display())))?;
@@ -1770,6 +1779,11 @@ pub async fn copy_dir_with_mode(
             .file_type()
             .await
             .map_err(|e| AppError::Internal(format!("failed to get file type: {e}")))?;
+        if let Some(skip_name) = &skip_child {
+            if entry.file_name() == *skip_name {
+                continue;
+            }
+        }
         let dest_path = dst.join(entry.file_name());
 
         if file_type.is_dir() {

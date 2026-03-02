@@ -17,6 +17,7 @@ use crate::{
     api::{auth::AuthUser, AppState},
     db::{refresh_tokens, users},
     error::{AppError, AppResult},
+    services::abuse::{AbuseDecision, AbuseLimit},
     services::audit::AuditEvent,
     validation,
 };
@@ -103,17 +104,18 @@ pub async fn register(
     jar: CookieJar,
     Json(payload): Json<RegisterRequest>,
 ) -> AppResult<(StatusCode, CookieJar, Json<AuthResponse>)> {
-    let ip_key = addr.ip().to_string();
-    let allowed = state
-        .auth_rate_limiters
-        .register_by_ip
-        .check_and_increment(&ip_key, 3, Duration::from_secs(3600))
-        .await;
-    if !allowed {
-        return Err(AppError::RateLimited(
-            "register rate limit exceeded; try again later".into(),
-        ));
-    }
+    enforce_abuse_limit(
+        &state,
+        AbuseLimit::per_ip(
+            "api.auth.register",
+            addr.ip(),
+            "register",
+            12,
+            Duration::from_secs(60 * 60),
+            Some(6),
+        ),
+    )
+    .await?;
 
     let email = payload.email.trim().to_ascii_lowercase();
     validation::validate_email(&email)?;
@@ -156,16 +158,30 @@ pub async fn login(
     validation::validate_email(&email)?;
     validation::validate_password(&payload.password)?;
 
-    let allowed = state
-        .auth_rate_limiters
-        .login_by_email
-        .check_and_increment(&email, 5, Duration::from_secs(15 * 60))
-        .await;
-    if !allowed {
-        return Err(AppError::RateLimited(
-            "login rate limit exceeded; try again later".into(),
-        ));
-    }
+    enforce_abuse_limit(
+        &state,
+        AbuseLimit::per_ip(
+            "api.auth.login.ip",
+            addr.ip(),
+            "login",
+            30,
+            Duration::from_secs(15 * 60),
+            Some(18),
+        ),
+    )
+    .await?;
+    enforce_abuse_limit(
+        &state,
+        AbuseLimit {
+            scope: "api.auth.login.email",
+            actor_key: format!("ip:{}", addr.ip()),
+            bucket_key: format!("scope:api.auth.login.email:email:{email}"),
+            limit: 8,
+            window: Duration::from_secs(15 * 60),
+            challenge_after: Some(5),
+        },
+    )
+    .await?;
 
     let maybe_user = users::find_user_by_email(&state.pool, &email).await?;
     let verified = state.password_service.verify_or_dummy(
@@ -420,6 +436,25 @@ fn hash_email(email: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(email.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+async fn enforce_abuse_limit(state: &AppState, limit: AbuseLimit) -> AppResult<()> {
+    match state.abuse_guard.enforce(limit).await? {
+        AbuseDecision::Allow => Ok(()),
+        AbuseDecision::Challenge {
+            retry_after_secs,
+            reason,
+        } => Err(AppError::RateLimited(format!(
+            "{reason}; retry in {retry_after_secs}s"
+        ))),
+        AbuseDecision::Block {
+            retry_after_secs,
+            reason,
+            tier: _,
+        } => Err(AppError::RateLimited(format!(
+            "{reason}; retry in {retry_after_secs}s"
+        ))),
+    }
 }
 
 #[derive(Debug)]

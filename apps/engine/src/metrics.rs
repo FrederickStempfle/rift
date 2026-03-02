@@ -170,6 +170,26 @@ pub static WORKER_MEM_FREE: Lazy<GaugeVec> = Lazy::new(|| {
     .expect("metric registration failed")
 });
 
+// --- Abuse controls ---
+
+pub static ABUSE_DECISION: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "rift_abuse_decision_total",
+        "Abuse guard decisions by scope and action",
+        &["scope", "action"]
+    )
+    .expect("metric registration failed")
+});
+
+pub static ABUSE_BAN_TIER: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "rift_abuse_ban_tier_total",
+        "Number of bans applied per escalation tier",
+        &["tier"]
+    )
+    .expect("metric registration failed")
+});
+
 /// Render all registered metrics in Prometheus text format.
 pub fn encode_metrics() -> String {
     let encoder = TextEncoder::new();
@@ -206,6 +226,10 @@ mod tests {
         BUILD_DURATION.with_label_values(&["success"]).observe(30.0);
         BUILD_QUEUE_DEPTH.set(1.0);
         HEARTBEAT_SEND.with_label_values(&["ok"]).inc();
+        ABUSE_DECISION
+            .with_label_values(&["proxy.global_ip", "allow"])
+            .inc();
+        ABUSE_BAN_TIER.with_label_values(&["5m"]).inc();
 
         let output = encode_metrics();
         assert!(!output.is_empty());
@@ -214,6 +238,7 @@ mod tests {
         assert!(output.contains("rift_routing_cache_result_total"));
         assert!(output.contains("rift_pool_warm_workers"));
         assert!(output.contains("rift_build_duration_seconds"));
+        assert!(output.contains("rift_abuse_decision_total"));
     }
 
     #[test]

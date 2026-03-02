@@ -26,7 +26,7 @@ use crate::{
     runtime::backend::RuntimeBackend,
     scheduler::Scheduler,
     services::{
-        audit::AuditLogger, auth::TokenService, password::PasswordService,
+        abuse::AbuseGuard, audit::AuditLogger, auth::TokenService, password::PasswordService,
         rate_limit::AuthRateLimiters,
     },
     ssl::SslManager,
@@ -57,6 +57,7 @@ pub struct AppState {
     pub token_service: TokenService,
     pub password_service: PasswordService,
     pub auth_rate_limiters: AuthRateLimiters,
+    pub abuse_guard: AbuseGuard,
     pub audit_logger: AuditLogger,
     /// The runtime backend (process-based or pool-based).
     pub runtime_backend: Arc<dyn RuntimeBackend>,
@@ -139,6 +140,7 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/webhooks", webhooks::routes())
         .route("/api/analytics", get(analytics::get_analytics))
         .route("/api/runtime/stats", get(runtime::get_runtime_stats))
+        .route("/api/runtime/abuse", get(runtime::get_abuse_stats))
         .route("/api/runtime/project", get(runtime::get_project_runtime))
         .route(
             "/api/projects/{project_id}/stop",

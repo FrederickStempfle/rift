@@ -7,8 +7,9 @@ mkdir -p /var/rift/builds /var/rift/deployments /var/rift/ssl /var/rift/cache
 # These are best-effort — some may fail in unprivileged containers
 apply_sysctl() {
   local key="$1" val="$2"
-  if [ -f "/proc/sys/${key//./\/}" ]; then
-    echo "$val" > "/proc/sys/${key//./\/}" 2>/dev/null || true
+  local path="/proc/sys/${key//./\/}"
+  if [ -w "$path" ]; then
+    printf '%s' "$val" > "$path" 2>/dev/null || true
   fi
 }
 
@@ -71,6 +72,12 @@ if command -v iptables >/dev/null 2>&1; then
 
   # Allow HTTPS proxy port (8443)
   iptables -A INPUT -p tcp --dport 8443 -j ACCEPT 2>/dev/null || true
+
+  # Drop obvious L4 floods before app-layer rate limits.
+  iptables -A INPUT -p tcp --syn --dport 8080 -m connlimit --connlimit-above 200 --connlimit-mask 32 -j DROP 2>/dev/null || true
+  iptables -A INPUT -p tcp --syn --dport 8443 -m connlimit --connlimit-above 200 --connlimit-mask 32 -j DROP 2>/dev/null || true
+  iptables -A INPUT -p tcp --dport 8080 -m hashlimit --hashlimit-name rift_http --hashlimit-above 1000/second --hashlimit-burst 2000 --hashlimit-mode srcip --hashlimit-srcmask 32 -j DROP 2>/dev/null || true
+  iptables -A INPUT -p tcp --dport 8443 -m hashlimit --hashlimit-name rift_https --hashlimit-above 1000/second --hashlimit-burst 2000 --hashlimit-mode srcip --hashlimit-srcmask 32 -j DROP 2>/dev/null || true
 
   # Allow worker port range (10000-10100) only from localhost
   iptables -A INPUT -p tcp --dport 10000:10100 -s 127.0.0.0/8 -j ACCEPT 2>/dev/null || true

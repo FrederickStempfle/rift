@@ -13,7 +13,7 @@ use rift_engine::{
     runtime::{backend::ProcessBackend, RuntimeManager},
     scheduler::Scheduler,
     services::{
-        audit::AuditLogger, auth::TokenService, password::PasswordService,
+        abuse::AbuseGuard, audit::AuditLogger, auth::TokenService, password::PasswordService,
         rate_limit::AuthRateLimiters,
     },
     ssl::SslManager,
@@ -160,6 +160,7 @@ impl TestServer {
             )?,
             password_service: PasswordService::new()?,
             auth_rate_limiters: AuthRateLimiters::new(),
+            abuse_guard: AbuseGuard::new(&config),
             audit_logger: AuditLogger::new(pool),
             runtime_backend,
             build_manager,

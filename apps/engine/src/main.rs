@@ -18,7 +18,7 @@ use rift_engine::{
     },
     scheduler::{self, Scheduler},
     services::{
-        audit::AuditLogger, auth::TokenService, password::PasswordService,
+        abuse::AbuseGuard, audit::AuditLogger, auth::TokenService, password::PasswordService,
         rate_limit::AuthRateLimiters,
     },
     ssl::SslManager,
@@ -253,6 +253,7 @@ async fn main() -> anyhow::Result<()> {
         token_service,
         password_service,
         auth_rate_limiters: AuthRateLimiters::new(),
+        abuse_guard: AbuseGuard::new(&config),
         audit_logger: AuditLogger::new(pool),
         runtime_backend: runtime_backend.clone(),
         build_manager,
