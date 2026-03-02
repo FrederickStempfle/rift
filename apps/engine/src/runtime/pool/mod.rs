@@ -755,54 +755,65 @@ pub struct PoolStats {
 
 /// Detect runtime kind from the filesystem (same logic as RuntimeManager).
 fn detect_runtime_kind(workspace_dir: &std::path::Path) -> Option<RuntimeKind> {
+    // First try legacy workspace-root layouts.
+    if let Some(kind) = detect_runtime_kind_in_dir(workspace_dir) {
+        return Some(kind);
+    }
+
+    // Newer builds may only persist immutable runtime artifacts.
+    let artifact_dir = workspace_dir.join("_rift_artifact");
+    if artifact_dir.exists() {
+        return detect_runtime_kind_in_dir(&artifact_dir);
+    }
+
+    None
+}
+
+fn detect_runtime_kind_in_dir(base_dir: &std::path::Path) -> Option<RuntimeKind> {
     // Combined entry takes priority — it means functions + framework are wired together
-    if workspace_dir
+    if base_dir
         .join("_rift_functions_output/_rift_combined_entry.ts")
         .exists()
     {
-        let fn_dir = workspace_dir.join("_rift_functions_output");
+        let fn_dir = base_dir.join("_rift_functions_output");
         return Some(RuntimeKind::Combined {
             entry: fn_dir.join("_rift_combined_entry.ts"),
             functions_dir: fn_dir,
         });
     }
 
-    if workspace_dir.join(".next/standalone").exists() {
+    if base_dir.join(".next/standalone").exists() {
         Some(RuntimeKind::NextDeno {
-            dir: workspace_dir.to_path_buf(),
+            dir: base_dir.to_path_buf(),
         })
-    } else if workspace_dir.join(".output/server/index.mjs").exists() {
+    } else if base_dir.join(".output/server/index.mjs").exists() {
         Some(RuntimeKind::NodeServer {
-            dir: workspace_dir.to_path_buf(),
-            entry: workspace_dir.join(".output/server/index.mjs"),
+            dir: base_dir.to_path_buf(),
+            entry: base_dir.join(".output/server/index.mjs"),
         })
-    } else if workspace_dir.join("dist/server/entry.mjs").exists() {
+    } else if base_dir.join("dist/server/entry.mjs").exists() {
         Some(RuntimeKind::NodeServer {
-            dir: workspace_dir.to_path_buf(),
-            entry: workspace_dir.join("dist/server/entry.mjs"),
+            dir: base_dir.to_path_buf(),
+            entry: base_dir.join("dist/server/entry.mjs"),
         })
-    } else if workspace_dir.join("build/index.js").exists()
-        && workspace_dir.join("build/handler.js").exists()
+    } else if base_dir.join("build/index.js").exists() && base_dir.join("build/handler.js").exists()
     {
         Some(RuntimeKind::NodeServer {
-            dir: workspace_dir.to_path_buf(),
-            entry: workspace_dir.join("build/index.js"),
+            dir: base_dir.to_path_buf(),
+            entry: base_dir.join("build/index.js"),
         })
-    } else if workspace_dir.join("build/server/index.js").exists() {
+    } else if base_dir.join("build/server/index.js").exists() {
         Some(RuntimeKind::NodeServer {
-            dir: workspace_dir.to_path_buf(),
-            entry: workspace_dir.join("build/server/index.js"),
+            dir: base_dir.to_path_buf(),
+            entry: base_dir.join("build/server/index.js"),
         })
-    } else if workspace_dir
-        .join("_rift_functions_output/bundles")
-        .is_dir()
-    {
+    } else if base_dir.join("_rift_functions_output/bundles").is_dir() {
         Some(RuntimeKind::Functions {
-            dir: workspace_dir.join("_rift_functions_output"),
+            dir: base_dir.join("_rift_functions_output"),
         })
-    } else if find_entry_ts(workspace_dir).is_some() {
+    } else if find_entry_ts(base_dir).is_some() {
         Some(RuntimeKind::StaticDeno {
-            dir: find_entry_ts(workspace_dir).unwrap(),
+            dir: find_entry_ts(base_dir).unwrap(),
         })
     } else {
         None
