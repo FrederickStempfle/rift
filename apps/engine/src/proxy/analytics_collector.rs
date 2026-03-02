@@ -29,9 +29,14 @@ pub struct AnalyticsCollector {
 }
 
 impl AnalyticsCollector {
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: PgPool, access_log_retention_days: u16, cleanup_interval_secs: u64) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(flush_loop(rx, pool));
+        tokio::spawn(flush_loop(
+            rx,
+            pool,
+            access_log_retention_days,
+            std::time::Duration::from_secs(cleanup_interval_secs.max(30)),
+        ));
         Self { tx }
     }
 
@@ -50,8 +55,14 @@ type ReferrerKey = (Uuid, chrono::DateTime<chrono::Utc>, String);
 type PathKey = (Uuid, chrono::DateTime<chrono::Utc>, String);
 type PathCounters = (i64, i64, i64);
 
-async fn flush_loop(mut rx: mpsc::UnboundedReceiver<RequestEvent>, pool: PgPool) {
+async fn flush_loop(
+    mut rx: mpsc::UnboundedReceiver<RequestEvent>,
+    pool: PgPool,
+    access_log_retention_days: u16,
+    cleanup_interval: std::time::Duration,
+) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+    let mut last_cleanup_at = std::time::Instant::now();
     // (project_id, hour_bucket) -> (requests, errors, total_ms, cold_starts)
     let mut buffer: HashMap<AnalyticsKey, AnalyticsCounters> = HashMap::new();
     let mut referrer_buffer: HashMap<ReferrerKey, i64> = HashMap::new();
@@ -161,6 +172,20 @@ async fn flush_loop(mut rx: mpsc::UnboundedReceiver<RequestEvent>, pool: PgPool)
             if let Err(e) = crate::db::access_logs::insert_batch(&pool, &to_insert).await {
                 tracing::warn!(error = %e, "failed to flush access logs");
             }
+        }
+
+        if access_log_retention_days > 0 && last_cleanup_at.elapsed() >= cleanup_interval {
+            let cutoff = Utc::now() - chrono::Duration::days(i64::from(access_log_retention_days));
+            match crate::db::access_logs::delete_older_than(&pool, cutoff).await {
+                Ok(rows) if rows > 0 => {
+                    tracing::info!(deleted_rows = rows, "cleaned expired access logs");
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to cleanup expired access logs");
+                }
+            }
+            last_cleanup_at = std::time::Instant::now();
         }
     }
 }

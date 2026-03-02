@@ -150,7 +150,11 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let analytics_collector = AnalyticsCollector::new(pool.clone());
+    let analytics_collector = AnalyticsCollector::new(
+        pool.clone(),
+        config.access_log_retention_days,
+        config.access_log_cleanup_interval_secs,
+    );
     let log_broadcaster = LogBroadcaster::new();
     let build_manager = BuildManager::new(
         pool.clone(),
@@ -247,6 +251,7 @@ async fn main() -> anyhow::Result<()> {
         subscriber_redis_url,
         routing_cache.clone(),
     );
+    let access_bot_guard = rift_engine::proxy::access_bot_guard::AccessBotGuard::from_config(&config);
 
     let state = AppState {
         pool: pool.clone(),
@@ -268,6 +273,8 @@ async fn main() -> anyhow::Result<()> {
         routing_cache,
         state_store,
         scheduler,
+        trusted_proxy_cidrs: Arc::new(config.trusted_proxy_cidrs()),
+        access_bot_guard,
         proxy_inflight: Arc::new(Semaphore::new(config.proxy_max_inflight.max(1))),
         #[cfg(feature = "v8-isolate")]
         isolate_pool,

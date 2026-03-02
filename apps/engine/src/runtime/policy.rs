@@ -359,6 +359,7 @@ mod tests {
             proxy_connect_timeout_ms: 3_000,
             proxy_pool_max_idle_per_host: 32,
             proxy_max_inflight: 2_000,
+            trusted_proxy_cidrs: "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12".into(),
             public_port: None,
             base_domain: "localhost".into(),
             proxy_scheme: "http".into(),
@@ -430,6 +431,14 @@ mod tests {
             build_cpu_quota_us: 200_000,
             build_max_pids: 256,
             build_timeout_secs: 600,
+            access_log_retention_days: 30,
+            access_log_cleanup_interval_secs: 3600,
+            access_bot_mode: "off".into(),
+            access_bot_window_secs: 30,
+            access_bot_burst_threshold: 300,
+            access_bot_scan_unique_paths: 80,
+            access_bot_scan_404_threshold: 40,
+            access_bot_mitigation_secs: 300,
         }
     }
 

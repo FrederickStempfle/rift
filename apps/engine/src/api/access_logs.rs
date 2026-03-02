@@ -7,14 +7,20 @@ use uuid::Uuid;
 
 use crate::{
     api::{auth::AuthUser, AppState},
-    db::access_logs,
-    error::AppResult,
+    db::access_logs::{self, AccessLogFilters},
+    error::{AppError, AppResult},
 };
 
 #[derive(Debug, Deserialize)]
 pub struct AccessLogsQuery {
     pub project_id: Option<Uuid>,
     pub before_id: Option<i64>,
+    pub from: Option<chrono::DateTime<chrono::Utc>>,
+    pub to: Option<chrono::DateTime<chrono::Utc>>,
+    pub host: Option<String>,
+    pub path_prefix: Option<String>,
+    pub status: Option<u16>,
+    pub client_ip: Option<String>,
     pub limit: Option<u16>,
 }
 
@@ -42,19 +48,8 @@ pub async fn list_access_logs(
     auth_user: AuthUser,
     Query(query): Query<AccessLogsQuery>,
 ) -> AppResult<Json<AccessLogsResponse>> {
-    let limit = normalize_limit(query.limit);
-    let logs = if let Some(project_id) = query.project_id {
-        access_logs::list_for_project(
-            &state.pool,
-            auth_user.user_id,
-            project_id,
-            query.before_id,
-            limit,
-        )
-        .await?
-    } else {
-        access_logs::list_for_user(&state.pool, auth_user.user_id, query.before_id, limit).await?
-    };
+    let filters = normalize_filters(query)?;
+    let logs = access_logs::list(&state.pool, auth_user.user_id, filters).await?;
     let next_before_id = logs.last().map(|log| log.id);
 
     Ok(Json(AccessLogsResponse {
@@ -63,8 +58,34 @@ pub async fn list_access_logs(
     }))
 }
 
-fn normalize_limit(limit: Option<u16>) -> i64 {
-    i64::from(limit.unwrap_or(100).clamp(1, 1000))
+fn normalize_filters(query: AccessLogsQuery) -> Result<AccessLogFilters, AppError> {
+    if let (Some(from), Some(to)) = (&query.from, &query.to) {
+        if from > to {
+            return Err(AppError::BadRequest("`from` must be <= `to`".into()));
+        }
+    }
+
+    let host = query.host.map(|value| value.trim().to_lowercase()).filter(|value| !value.is_empty());
+    let path_prefix = query
+        .path_prefix
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let client_ip = query
+        .client_ip
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+
+    Ok(AccessLogFilters {
+        project_id: query.project_id,
+        before_id: query.before_id,
+        from: query.from,
+        to: query.to,
+        host,
+        path_prefix,
+        status: query.status.map(i32::from),
+        client_ip,
+        limit: i64::from(query.limit.unwrap_or(100).clamp(1, 1000)),
+    })
 }
 
 impl From<crate::db::models::AccessLog> for AccessLogResponse {

@@ -65,6 +65,7 @@ impl TestServer {
             proxy_connect_timeout_ms: 3_000,
             proxy_pool_max_idle_per_host: 32,
             proxy_max_inflight: 2_000,
+            trusted_proxy_cidrs: "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12".into(),
             base_domain: "localhost".into(),
             proxy_scheme: "http".into(),
             access_token_ttl_minutes: 15,
@@ -135,6 +136,14 @@ impl TestServer {
             build_cpu_quota_us: 200_000,
             build_max_pids: 256,
             build_timeout_secs: 600,
+            access_log_retention_days: 30,
+            access_log_cleanup_interval_secs: 3600,
+            access_bot_mode: "off".into(),
+            access_bot_window_secs: 30,
+            access_bot_burst_threshold: 300,
+            access_bot_scan_unique_paths: 80,
+            access_bot_scan_404_threshold: 40,
+            access_bot_mitigation_secs: 300,
         });
         let runtime_manager = RuntimeManager::new();
         let log_broadcaster = LogBroadcaster::new();
@@ -152,7 +161,7 @@ impl TestServer {
             #[cfg(feature = "v8-isolate")]
             None,
         );
-        let analytics_collector = AnalyticsCollector::new(pool.clone());
+        let analytics_collector = AnalyticsCollector::new(pool.clone(), 30, 3600);
         let cert_resolver = CertResolver::new();
         let challenge_store = AcmeChallengeStore::new();
         let ssl_manager = SslManager::new(
@@ -167,6 +176,8 @@ impl TestServer {
             state_store.clone(),
             "test-worker".to_string(),
         ));
+        let access_bot_guard =
+            rift_engine::proxy::access_bot_guard::AccessBotGuard::from_config(&config);
 
         let state = AppState {
             pool: pool.clone(),
@@ -193,6 +204,8 @@ impl TestServer {
             routing_cache: RoutingCache::new(),
             state_store,
             scheduler,
+            trusted_proxy_cidrs: Arc::new(config.trusted_proxy_cidrs()),
+            access_bot_guard,
             proxy_inflight: Arc::new(Semaphore::new(config.proxy_max_inflight)),
             #[cfg(feature = "v8-isolate")]
             isolate_pool: None,
@@ -665,6 +678,39 @@ async fn access_logs_are_user_scoped_and_queryable() -> anyhow::Result<()> {
             .len(),
         0
     );
+
+    let filtered_resp = client_a
+        .get(format!(
+            "{}/api/access-logs?project_id={}&host=a.localhost&status=201&path_prefix=%2Fa%2Fsec&client_ip=1.1.1.2",
+            server.base_url, project_a
+        ))
+        .bearer_auth(&token_a)
+        .send()
+        .await?;
+    assert_eq!(filtered_resp.status(), StatusCode::OK);
+    let filtered_json: serde_json::Value = filtered_resp.json().await?;
+    let filtered_logs = filtered_json["logs"]
+        .as_array()
+        .expect("logs should be an array");
+    assert_eq!(filtered_logs.len(), 1);
+    assert_eq!(
+        filtered_logs[0]["path"].as_str().unwrap_or_default(),
+        "/a/second"
+    );
+    assert_eq!(
+        filtered_logs[0]["status"].as_i64().unwrap_or_default(),
+        201
+    );
+
+    let invalid_range_resp = client_a
+        .get(format!(
+            "{}/api/access-logs?from=2030-01-01T00:00:00Z&to=2020-01-01T00:00:00Z",
+            server.base_url
+        ))
+        .bearer_auth(&token_a)
+        .send()
+        .await?;
+    assert_eq!(invalid_range_resp.status(), StatusCode::BAD_REQUEST);
 
     Ok(())
 }

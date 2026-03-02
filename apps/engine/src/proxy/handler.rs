@@ -19,7 +19,11 @@ use crate::{
     api::AppState,
     db::{domains, projects},
     error::AppError,
-    proxy::{analytics_collector::RequestEvent, routing_cache::CacheLookup},
+    proxy::{
+        analytics_collector::RequestEvent, client_ip::extract_client_ip,
+        access_bot_guard::MitigationAction,
+        routing_cache::CacheLookup,
+    },
     services::abuse::{AbuseDecision, AbuseLimit},
     state::RoutingEntry,
 };
@@ -60,6 +64,11 @@ pub async fn handle_request(
     state: AppState,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     let start = std::time::Instant::now();
+    let client_ip = extract_client_ip(
+        remote_addr.ip(),
+        req.headers(),
+        state.trusted_proxy_cidrs.as_ref().as_slice(),
+    );
 
     // Extract analytics metadata before forwarding (req headers will be consumed)
     let analytics_path = req.uri().path().to_owned();
@@ -77,18 +86,23 @@ pub async fn handle_request(
                 .map(|domain| domain.to_lowercase())
         });
 
-    let result = route_and_forward(req, remote_addr, &client, &state).await;
+    let result = route_and_forward(req, remote_addr, &client, &state, client_ip).await;
 
     let (status_code, project_id, cold_start) = match &result {
         Ok((resp, pid, cs)) => (resp.status().as_u16(), *pid, *cs),
         Err(RouteError::Status(sc, pid)) => (sc.as_u16(), *pid, false),
         Err(RouteError::Response(resp, pid)) => (resp.status().as_u16(), *pid, false),
     };
+    if analytics_path != CHALLENGE_VERIFY_PATH {
+        state
+            .access_bot_guard
+            .observe(client_ip, &analytics_path, status_code);
+    }
 
     state.analytics_collector.record(RequestEvent {
         project_id,
         timestamp: Utc::now(),
-        client_ip: remote_addr.ip(),
+        client_ip,
         host: analytics_host,
         method: analytics_method,
         status: status_code,
@@ -113,17 +127,17 @@ async fn route_and_forward(
     remote_addr: SocketAddr,
     client: &HttpClient,
     state: &AppState,
+    client_ip: IpAddr,
 ) -> Result<(Response<Full<Bytes>>, Option<Uuid>, bool), RouteError> {
     let _inflight_permit = acquire_proxy_inflight_permit(&state.proxy_inflight)
         .map_err(|response| RouteError::Response(response, None))?;
 
     if req.uri().path() == CHALLENGE_VERIFY_PATH {
-        let response = handle_challenge_verify(req, remote_addr, state).await;
+        let response = handle_challenge_verify(req, client_ip, state).await;
         return Ok((response, None, false));
     }
 
     let host = extract_host(req.headers()).ok_or(RouteError::Status(StatusCode::BAD_REQUEST, None))?;
-    let client_ip = remote_addr.ip();
     let path_bucket = route_bucket(req.uri().path());
     let return_to = req
         .uri()
@@ -136,6 +150,26 @@ async fn route_and_forward(
         .should_bypass_proxy_limits(client_ip, req.headers())
         .await;
     if !trusted {
+        if let Some(mitigation) = state.access_bot_guard.evaluate(client_ip) {
+            let response = match mitigation.action {
+                MitigationAction::Challenge => proxy_challenge_response(
+                    state,
+                    client_ip,
+                    req.headers(),
+                    mitigation.retry_after_secs,
+                    &mitigation.reason,
+                    &return_to,
+                ),
+                MitigationAction::Block => proxy_abuse_response(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "access_bot_block",
+                    mitigation.retry_after_secs,
+                    &mitigation.reason,
+                ),
+            };
+            return Err(RouteError::Response(response, None));
+        }
+
         let global = state.abuse_guard.resolve_limit(
             "proxy.global_ip",
             None,
@@ -267,7 +301,7 @@ async fn route_and_forward(
     // Firewall check
     let allowed = state
         .firewall_cache
-        .is_allowed(&state.pool, project_id, remote_addr.ip())
+        .is_allowed(&state.pool, project_id, client_ip)
         .await
         .map_err(|e| RouteError::Status(map_app_error(e), pid))?;
     if !allowed {
@@ -278,7 +312,7 @@ async fn route_and_forward(
     #[cfg(feature = "v8-isolate")]
     if let Some(ref isolate_pool) = state.isolate_pool {
         if isolate_pool.is_registered(project_id).await {
-            return handle_isolate_invoke(req, remote_addr, isolate_pool, project_id, &host, state)
+            return handle_isolate_invoke(req, client_ip, isolate_pool, project_id, &host, state)
                 .await;
         }
     }
@@ -354,7 +388,7 @@ async fn route_and_forward(
 
     // Set forwarding headers
     upstream = upstream
-        .header("x-forwarded-for", remote_addr.ip().to_string())
+        .header("x-forwarded-for", client_ip.to_string())
         .header("x-forwarded-host", &host)
         .header("x-forwarded-proto", &state.config.proxy_scheme)
         .header(HOST, &host);
@@ -563,7 +597,7 @@ small{{display:block;color:#64748b;margin-top:8px}}</style></head><body>\
 
 async fn handle_challenge_verify(
     req: Request<Incoming>,
-    remote_addr: SocketAddr,
+    client_ip: IpAddr,
     state: &AppState,
 ) -> Response<Full<Bytes>> {
     if req.method() != hyper::Method::POST {
@@ -575,7 +609,6 @@ async fn handle_challenge_verify(
         );
     }
 
-    let client_ip = remote_addr.ip();
     let headers = req.headers().clone();
     let (_, body) = req.into_parts();
     let body_bytes = match collect_body_limited(body, StatusCode::BAD_REQUEST).await {
@@ -808,7 +841,7 @@ fn error_response(status: StatusCode) -> Response<Full<Bytes>> {
 #[cfg(feature = "v8-isolate")]
 async fn handle_isolate_invoke(
     req: Request<Incoming>,
-    remote_addr: SocketAddr,
+    client_ip: IpAddr,
     isolate_pool: &crate::runtime::isolate::IsolatePool,
     project_id: Uuid,
     host: &str,
@@ -847,7 +880,7 @@ async fn handle_isolate_invoke(
             headers.push((name.to_string(), v.to_string()));
         }
     }
-    headers.push(("x-forwarded-for".to_string(), remote_addr.ip().to_string()));
+    headers.push(("x-forwarded-for".to_string(), client_ip.to_string()));
     headers.push(("x-forwarded-host".to_string(), host.to_string()));
     headers.push((
         "x-forwarded-proto".to_string(),

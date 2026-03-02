@@ -7,6 +7,7 @@ use axum::{
     Json, Router,
 };
 use serde_json::json;
+use ipnet::IpNet;
 use tokio::sync::Semaphore;
 use tower::ServiceBuilder;
 use tower_http::{
@@ -78,6 +79,10 @@ pub struct AppState {
     pub state_store: Arc<dyn StateStore>,
     /// Scheduler for placement decisions.
     pub scheduler: Arc<Scheduler>,
+    /// Trusted proxy CIDRs for forwarded client-IP extraction.
+    pub trusted_proxy_cidrs: Arc<Vec<IpNet>>,
+    /// Access-log-driven anti-bot detector and mitigation state.
+    pub access_bot_guard: crate::proxy::access_bot_guard::AccessBotGuard,
     /// Global in-flight proxy limiter used for overload shedding.
     pub proxy_inflight: Arc<Semaphore>,
     #[cfg(feature = "v8-isolate")]

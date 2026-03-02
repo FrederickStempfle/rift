@@ -1,5 +1,7 @@
 pub mod acme;
+pub mod access_bot_guard;
 pub mod analytics_collector;
+pub mod client_ip;
 pub mod firewall_cache;
 pub mod handler;
 pub mod routing_cache;
@@ -22,7 +24,7 @@ use hyper_util::{client::legacy::Client, rt::TokioExecutor, rt::TokioIo};
 use crate::{
     api::AppState,
     config::Config,
-    proxy::analytics_collector::RequestEvent,
+    proxy::{analytics_collector::RequestEvent, client_ip::extract_client_ip},
 };
 
 pub async fn serve(state: AppState) -> anyhow::Result<()> {
@@ -66,6 +68,11 @@ async fn serve_http(state: AppState) -> anyhow::Result<()> {
 
                     // Not an ACME challenge and we have HTTPS — redirect
                     if state.cert_resolver.has_any_certs().await {
+                        let client_ip = extract_client_ip(
+                            remote_addr.ip(),
+                            req.headers(),
+                            state.trusted_proxy_cidrs.as_ref().as_slice(),
+                        );
                         let host = req
                             .headers()
                             .get(hyper::header::HOST)
@@ -88,7 +95,7 @@ async fn serve_http(state: AppState) -> anyhow::Result<()> {
                         state.analytics_collector.record(RequestEvent {
                             project_id,
                             timestamp: Utc::now(),
-                            client_ip: remote_addr.ip(),
+                            client_ip,
                             host: if host.is_empty() {
                                 None
                             } else {
@@ -101,6 +108,9 @@ async fn serve_http(state: AppState) -> anyhow::Result<()> {
                             path: req.uri().path().to_owned(),
                             referer: None,
                         });
+                        state
+                            .access_bot_guard
+                            .observe(client_ip, req.uri().path(), StatusCode::MOVED_PERMANENTLY.as_u16());
                         let location = format!("https://{host}{path}");
                         return Ok(Response::builder()
                             .status(StatusCode::MOVED_PERMANENTLY)

@@ -1,5 +1,7 @@
 use chrono::Duration;
 use clap::Parser;
+use ipnet::IpNet;
+use std::net::IpAddr;
 
 #[derive(Debug, Clone, Parser)]
 #[command(author, version, about = "Rift engine")]
@@ -58,6 +60,14 @@ pub struct Config {
     /// Maximum in-flight proxy requests before immediate overload shedding.
     #[arg(long, env = "RIFT_PROXY_MAX_INFLIGHT", default_value_t = 4000)]
     pub proxy_max_inflight: usize,
+
+    /// Comma-separated trusted proxy CIDRs allowed to provide forwarded client IP headers.
+    #[arg(
+        long,
+        env = "RIFT_TRUSTED_PROXY_CIDRS",
+        default_value = "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fc00::/7,fe80::/10"
+    )]
+    pub trusted_proxy_cidrs: String,
 
     /// The externally-visible port (after Docker port mapping). Defaults to proxy_port.
     #[arg(long, env = "RIFT_PUBLIC_PORT")]
@@ -375,6 +385,62 @@ pub struct Config {
     /// Build timeout in seconds.
     #[arg(long, env = "RIFT_BUILD_TIMEOUT_SECS", default_value_t = 600)]
     pub build_timeout_secs: u64,
+
+    /// Access log retention period in days. Set to 0 to disable cleanup.
+    #[arg(
+        long,
+        env = "RIFT_ACCESS_LOG_RETENTION_DAYS",
+        default_value_t = 30
+    )]
+    pub access_log_retention_days: u16,
+
+    /// Interval between access-log cleanup runs in seconds.
+    #[arg(
+        long,
+        env = "RIFT_ACCESS_LOG_CLEANUP_INTERVAL_SECS",
+        default_value_t = 3600
+    )]
+    pub access_log_cleanup_interval_secs: u64,
+
+    /// Access-log-driven bot mitigation mode: off | challenge | block.
+    #[arg(long, env = "RIFT_ACCESS_BOT_MODE", default_value = "off")]
+    pub access_bot_mode: String,
+
+    /// Sliding window in seconds used by access-log bot detection.
+    #[arg(long, env = "RIFT_ACCESS_BOT_WINDOW_SECS", default_value_t = 30)]
+    pub access_bot_window_secs: u64,
+
+    /// Request burst threshold within the bot window.
+    #[arg(
+        long,
+        env = "RIFT_ACCESS_BOT_BURST_THRESHOLD",
+        default_value_t = 300
+    )]
+    pub access_bot_burst_threshold: u32,
+
+    /// Distinct path threshold for scanner detection within the bot window.
+    #[arg(
+        long,
+        env = "RIFT_ACCESS_BOT_SCAN_UNIQUE_PATHS",
+        default_value_t = 80
+    )]
+    pub access_bot_scan_unique_paths: u32,
+
+    /// 404-response threshold for scanner detection within the bot window.
+    #[arg(
+        long,
+        env = "RIFT_ACCESS_BOT_SCAN_404_THRESHOLD",
+        default_value_t = 40
+    )]
+    pub access_bot_scan_404_threshold: u32,
+
+    /// Mitigation duration in seconds for access-log bot detection.
+    #[arg(
+        long,
+        env = "RIFT_ACCESS_BOT_MITIGATION_SECS",
+        default_value_t = 300
+    )]
+    pub access_bot_mitigation_secs: u64,
 }
 
 impl Config {
@@ -429,6 +495,10 @@ impl Config {
         self.jwt_public_key_pem.replace("\\n", "\n")
     }
 
+    pub fn trusted_proxy_cidrs(&self) -> Vec<IpNet> {
+        parse_cidr_list(&self.trusted_proxy_cidrs)
+    }
+
     /// Resolve the server's public IP: use the explicit override if set,
     /// otherwise auto-detect by calling an external service.
     pub async fn resolve_public_ip(&self) -> Option<String> {
@@ -456,4 +526,14 @@ impl Config {
 
         None
     }
+}
+
+fn parse_cidr_list(raw: &str) -> Vec<IpNet> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .filter_map(|item| {
+            item.parse::<IpNet>().or_else(|_| item.parse::<IpAddr>().map(IpNet::from)).ok()
+        })
+        .collect()
 }
