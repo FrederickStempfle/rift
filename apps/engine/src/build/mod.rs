@@ -1352,13 +1352,28 @@ impl BuildManager {
             AppError::Internal(format!("failed to read {}: {e}", config_path.display()))
         })?;
 
-        // Check if standalone output is already configured (be specific to avoid
-        // matching outputFileTracingRoot, outputFileTracing, comments, etc.)
-        if content.contains("output:") || content.contains("output =") {
+        let needs_output = !content.contains("output:") && !content.contains("output =");
+        // Only inject turbotrace when there is no existing `experimental:` block
+        // to avoid creating a duplicate key that would break the config.
+        let needs_turbotrace =
+            !content.contains("turbotrace") && !content.contains("experimental:");
+
+        if !needs_output && !needs_turbotrace {
             return Ok(());
         }
 
-        // Find the config object and inject `output: "standalone"`.
+        // Build the injection string for all missing settings.
+        let mut injection = String::new();
+        if needs_output {
+            injection.push_str("\n  output: \"standalone\",");
+        }
+        if needs_turbotrace {
+            // turbotrace is a Rust-based file tracer (~10× faster than the default
+            // JS nft) that dramatically reduces "Collecting build traces" time.
+            injection.push_str("\n  experimental: { turbotrace: {} },");
+        }
+
+        // Find the config object opening brace and inject right after it.
         // Handles common patterns:
         //   const nextConfig = { ... }
         //   module.exports = { ... }
@@ -1366,11 +1381,11 @@ impl BuildManager {
         let injected = if let Some(eq_pos) = content.find("= {") {
             let brace_pos = eq_pos + 2;
             let (before, after) = content.split_at(brace_pos + 1);
-            format!("{before}\n  output: \"standalone\",{after}")
+            format!("{before}{injection}{after}")
         } else if let Some(def_pos) = content.find("default {") {
             let brace_pos = def_pos + 7; // position of `{`
             let (before, after) = content.split_at(brace_pos + 1);
-            format!("{before}\n  output: \"standalone\",{after}")
+            format!("{before}{injection}{after}")
         } else {
             // Couldn't parse config format, skip injection
             return Ok(());
@@ -1380,12 +1395,19 @@ impl BuildManager {
             AppError::Internal(format!("failed to write {}: {e}", config_path.display()))
         })?;
 
+        let mut what = Vec::new();
+        if needs_output {
+            what.push("output: \"standalone\"");
+        }
+        if needs_turbotrace {
+            what.push("experimental.turbotrace");
+        }
         insert_and_broadcast_log(
             &self.pool,
             &self.log_broadcaster,
             deployment_id,
             "info",
-            "Injected output: \"standalone\" into next.config",
+            &format!("Injected {} into next.config", what.join(", ")),
             "build",
         )
         .await?;
