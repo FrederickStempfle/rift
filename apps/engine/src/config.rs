@@ -34,27 +34,15 @@ pub struct Config {
     pub proxy_port: u16,
 
     /// Upstream request timeout in milliseconds for proxy forwarding.
-    #[arg(
-        long,
-        env = "RIFT_PROXY_UPSTREAM_TIMEOUT_MS",
-        default_value_t = 30_000
-    )]
+    #[arg(long, env = "RIFT_PROXY_UPSTREAM_TIMEOUT_MS", default_value_t = 30_000)]
     pub proxy_upstream_timeout_ms: u64,
 
     /// Upstream TCP connect timeout in milliseconds.
-    #[arg(
-        long,
-        env = "RIFT_PROXY_CONNECT_TIMEOUT_MS",
-        default_value_t = 3_000
-    )]
+    #[arg(long, env = "RIFT_PROXY_CONNECT_TIMEOUT_MS", default_value_t = 3_000)]
     pub proxy_connect_timeout_ms: u64,
 
     /// Maximum idle upstream connections per host in proxy pool.
-    #[arg(
-        long,
-        env = "RIFT_PROXY_POOL_MAX_IDLE_PER_HOST",
-        default_value_t = 128
-    )]
+    #[arg(long, env = "RIFT_PROXY_POOL_MAX_IDLE_PER_HOST", default_value_t = 128)]
     pub proxy_pool_max_idle_per_host: usize,
 
     /// Maximum in-flight proxy requests before immediate overload shedding.
@@ -155,27 +143,15 @@ pub struct Config {
     pub abuse_bot_verify: bool,
 
     /// Crawler verification cache TTL in seconds.
-    #[arg(
-        long,
-        env = "RIFT_ABUSE_BOT_VERIFY_CACHE_SECS",
-        default_value_t = 600
-    )]
+    #[arg(long, env = "RIFT_ABUSE_BOT_VERIFY_CACHE_SECS", default_value_t = 600)]
     pub abuse_bot_verify_cache_secs: u64,
 
     /// Minimum solve time in seconds for abuse challenge verification.
-    #[arg(
-        long,
-        env = "RIFT_ABUSE_CHALLENGE_MIN_SOLVE_SECS",
-        default_value_t = 2
-    )]
+    #[arg(long, env = "RIFT_ABUSE_CHALLENGE_MIN_SOLVE_SECS", default_value_t = 2)]
     pub abuse_challenge_min_solve_secs: u64,
 
     /// Maximum retry-after header emitted by abuse controls.
-    #[arg(
-        long,
-        env = "RIFT_ABUSE_MAX_RETRY_AFTER_SECS",
-        default_value_t = 600
-    )]
+    #[arg(long, env = "RIFT_ABUSE_MAX_RETRY_AFTER_SECS", default_value_t = 600)]
     pub abuse_max_retry_after_secs: u64,
 
     /// Ban tier 1 duration in seconds (first strike beyond hard limit).
@@ -187,11 +163,7 @@ pub struct Config {
     pub abuse_ban_tier2_secs: u64,
 
     /// Ban tier 3 duration in seconds.
-    #[arg(
-        long,
-        env = "RIFT_ABUSE_BAN_TIER3_SECS",
-        default_value_t = 1_800
-    )]
+    #[arg(long, env = "RIFT_ABUSE_BAN_TIER3_SECS", default_value_t = 1_800)]
     pub abuse_ban_tier3_secs: u64,
 
     /// Cloudflare Turnstile site key for challenge pages (optional).
@@ -220,7 +192,11 @@ pub struct Config {
     pub node_id: Option<String>,
 
     /// NATS JetStream URL for edge event propagation.
-    #[arg(long, env = "RIFT_JETSTREAM_URL", default_value = "nats://127.0.0.1:4222")]
+    #[arg(
+        long,
+        env = "RIFT_JETSTREAM_URL",
+        default_value = "nats://127.0.0.1:4222"
+    )]
     pub jetstream_url: String,
 
     /// S3-compatible artifact store endpoint.
@@ -228,7 +204,11 @@ pub struct Config {
     pub artifact_store_url: Option<String>,
 
     /// Artifact store bucket name.
-    #[arg(long, env = "RIFT_ARTIFACT_STORE_BUCKET", default_value = "rift-artifacts")]
+    #[arg(
+        long,
+        env = "RIFT_ARTIFACT_STORE_BUCKET",
+        default_value = "rift-artifacts"
+    )]
     pub artifact_store_bucket: String,
 
     /// Ed25519 private key (PEM) for artifact signing. Control-plane only.
@@ -387,11 +367,7 @@ pub struct Config {
     pub build_timeout_secs: u64,
 
     /// Access log retention period in days. Set to 0 to disable cleanup.
-    #[arg(
-        long,
-        env = "RIFT_ACCESS_LOG_RETENTION_DAYS",
-        default_value_t = 30
-    )]
+    #[arg(long, env = "RIFT_ACCESS_LOG_RETENTION_DAYS", default_value_t = 30)]
     pub access_log_retention_days: u16,
 
     /// Interval between access-log cleanup runs in seconds.
@@ -403,7 +379,7 @@ pub struct Config {
     pub access_log_cleanup_interval_secs: u64,
 
     /// Access-log-driven bot mitigation mode: off | challenge | block.
-    #[arg(long, env = "RIFT_ACCESS_BOT_MODE", default_value = "off")]
+    #[arg(long, env = "RIFT_ACCESS_BOT_MODE", default_value = "challenge")]
     pub access_bot_mode: String,
 
     /// Sliding window in seconds used by access-log bot detection.
@@ -411,35 +387,19 @@ pub struct Config {
     pub access_bot_window_secs: u64,
 
     /// Request burst threshold within the bot window.
-    #[arg(
-        long,
-        env = "RIFT_ACCESS_BOT_BURST_THRESHOLD",
-        default_value_t = 300
-    )]
+    #[arg(long, env = "RIFT_ACCESS_BOT_BURST_THRESHOLD", default_value_t = 300)]
     pub access_bot_burst_threshold: u32,
 
     /// Distinct path threshold for scanner detection within the bot window.
-    #[arg(
-        long,
-        env = "RIFT_ACCESS_BOT_SCAN_UNIQUE_PATHS",
-        default_value_t = 80
-    )]
+    #[arg(long, env = "RIFT_ACCESS_BOT_SCAN_UNIQUE_PATHS", default_value_t = 80)]
     pub access_bot_scan_unique_paths: u32,
 
     /// 404-response threshold for scanner detection within the bot window.
-    #[arg(
-        long,
-        env = "RIFT_ACCESS_BOT_SCAN_404_THRESHOLD",
-        default_value_t = 40
-    )]
+    #[arg(long, env = "RIFT_ACCESS_BOT_SCAN_404_THRESHOLD", default_value_t = 40)]
     pub access_bot_scan_404_threshold: u32,
 
     /// Mitigation duration in seconds for access-log bot detection.
-    #[arg(
-        long,
-        env = "RIFT_ACCESS_BOT_MITIGATION_SECS",
-        default_value_t = 300
-    )]
+    #[arg(long, env = "RIFT_ACCESS_BOT_MITIGATION_SECS", default_value_t = 300)]
     pub access_bot_mitigation_secs: u64,
 }
 
@@ -533,7 +493,9 @@ fn parse_cidr_list(raw: &str) -> Vec<IpNet> {
         .map(str::trim)
         .filter(|item| !item.is_empty())
         .filter_map(|item| {
-            item.parse::<IpNet>().or_else(|_| item.parse::<IpAddr>().map(IpNet::from)).ok()
+            item.parse::<IpNet>()
+                .or_else(|_| item.parse::<IpAddr>().map(IpNet::from))
+                .ok()
         })
         .collect()
 }

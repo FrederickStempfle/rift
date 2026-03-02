@@ -6,8 +6,8 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde_json::json;
 use ipnet::IpNet;
+use serde_json::json;
 use tokio::sync::Semaphore;
 use tower::ServiceBuilder;
 use tower_http::{
@@ -41,15 +41,15 @@ pub mod analytics;
 pub mod auth;
 pub mod deployments;
 pub mod domains;
-pub mod env_vars;
 pub mod edge_nodes;
+pub mod env_vars;
 pub mod firewall;
 pub mod logs;
 pub mod projects;
 pub mod regions;
 pub mod releases;
-pub mod runtime;
 pub mod routing;
+pub mod runtime;
 pub mod users;
 pub mod webhooks;
 

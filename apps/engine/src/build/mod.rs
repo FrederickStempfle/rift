@@ -228,7 +228,12 @@ impl BuildManager {
                 "build",
                 &build_dir,
                 "git",
-                &["remote".to_owned(), "set-url".to_owned(), "origin".to_owned(), project.repo_url.clone()],
+                &[
+                    "remote".to_owned(),
+                    "set-url".to_owned(),
+                    "origin".to_owned(),
+                    project.repo_url.clone(),
+                ],
             )
             .await;
 
@@ -261,7 +266,11 @@ impl BuildManager {
                     "build",
                     &build_dir,
                     "git",
-                    &["reset".to_owned(), "--hard".to_owned(), "FETCH_HEAD".to_owned()],
+                    &[
+                        "reset".to_owned(),
+                        "--hard".to_owned(),
+                        "FETCH_HEAD".to_owned(),
+                    ],
                 )
                 .await
                 .is_ok()

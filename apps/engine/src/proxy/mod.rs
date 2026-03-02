@@ -1,5 +1,5 @@
-pub mod acme;
 pub mod access_bot_guard;
+pub mod acme;
 pub mod analytics_collector;
 pub mod client_ip;
 pub mod firewall_cache;
@@ -108,9 +108,11 @@ async fn serve_http(state: AppState) -> anyhow::Result<()> {
                             path: req.uri().path().to_owned(),
                             referer: None,
                         });
-                        state
-                            .access_bot_guard
-                            .observe(client_ip, req.uri().path(), StatusCode::MOVED_PERMANENTLY.as_u16());
+                        state.access_bot_guard.observe(
+                            client_ip,
+                            req.uri().path(),
+                            StatusCode::MOVED_PERMANENTLY.as_u16(),
+                        );
                         let location = format!("https://{host}{path}");
                         return Ok(Response::builder()
                             .status(StatusCode::MOVED_PERMANENTLY)

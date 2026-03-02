@@ -77,8 +77,7 @@ pub async fn get_analytics(
             .ok_or_else(|| AppError::NotFound("project not found".into()))?;
 
         let buckets = analytics::query_hourly(&state.pool, project_id, since).await?;
-        let referrers =
-            analytics::query_top_referrers(&state.pool, project_id, since, 10).await?;
+        let referrers = analytics::query_top_referrers(&state.pool, project_id, since, 10).await?;
         let paths = analytics::query_top_paths(&state.pool, project_id, since, 10).await?;
         (buckets, referrers, paths)
     } else {
@@ -89,8 +88,7 @@ pub async fn get_analytics(
             analytics::query_top_referrers_for_user(&state.pool, auth_user.user_id, since, 10)
                 .await?;
         let paths =
-            analytics::query_top_paths_for_user(&state.pool, auth_user.user_id, since, 10)
-                .await?;
+            analytics::query_top_paths_for_user(&state.pool, auth_user.user_id, since, 10).await?;
         (buckets, referrers, paths)
     };
 

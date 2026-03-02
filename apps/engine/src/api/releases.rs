@@ -50,8 +50,8 @@ pub async fn list_releases(
         .await?
         .ok_or_else(|| AppError::NotFound("project not found".into()))?;
 
-    let releases = edge::list_releases_for_project_user(&state.pool, project.id, auth_user.user_id)
-        .await?;
+    let releases =
+        edge::list_releases_for_project_user(&state.pool, project.id, auth_user.user_id).await?;
     Ok(Json(
         releases
             .into_iter()
@@ -98,8 +98,12 @@ pub async fn promote_release(
         .await?
         .ok_or_else(|| AppError::NotFound("release not found".into()))?;
 
-    if let Some(host) = release_host_for_project(&state, promoted.project_id, auth_user.user_id).await? {
-        let binding = edge::upsert_route_binding(&state.pool, &host, promoted.project_id, promoted.id).await?;
+    if let Some(host) =
+        release_host_for_project(&state, promoted.project_id, auth_user.user_id).await?
+    {
+        let binding =
+            edge::upsert_route_binding(&state.pool, &host, promoted.project_id, promoted.id)
+                .await?;
         state.routing_cache.invalidate_host(&host).await;
 
         let entry = RoutingEntry {

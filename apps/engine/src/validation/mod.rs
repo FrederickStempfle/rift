@@ -9,9 +9,8 @@ static SUBDOMAIN_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-z0-9-]{1,63}$").expect("subdomain regex must compile"));
 static BRANCH_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[A-Za-z0-9._/-]{1,255}$").expect("branch regex must compile"));
-static OUTPUT_DIR_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^[A-Za-z0-9._/-]{1,255}$").expect("output dir regex must compile")
-});
+static OUTPUT_DIR_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^[A-Za-z0-9._/-]{1,255}$").expect("output dir regex must compile"));
 static DOMAIN_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$")
         .expect("domain regex must compile")
@@ -100,9 +99,7 @@ pub fn validate_branch(value: &str) -> Result<(), AppError> {
         ));
     }
     if value.contains("..") {
-        return Err(AppError::BadRequest(
-            "branch must not contain '..'".into(),
-        ));
+        return Err(AppError::BadRequest("branch must not contain '..'".into()));
     }
     if !BRANCH_RE.is_match(value) {
         return Err(AppError::BadRequest(
@@ -143,7 +140,9 @@ pub fn validate_custom_command(value: &str, field: &'static str) -> Result<(), A
 
     // Shell metacharacters are blocked so custom commands cannot chain,
     // redirect, or execute subshell expressions.
-    let forbidden = [';', '|', '&', '>', '<', '`', '$', '(', ')', '{', '}', '\n', '\r'];
+    let forbidden = [
+        ';', '|', '&', '>', '<', '`', '$', '(', ')', '{', '}', '\n', '\r',
+    ];
     if trimmed.chars().any(|c| forbidden.contains(&c)) {
         return Err(AppError::BadRequest(format!(
             "{field} contains forbidden shell metacharacters"

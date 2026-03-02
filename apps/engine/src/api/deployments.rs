@@ -215,9 +215,10 @@ pub async fn package_deployment(
     auth_user: AuthUser,
     Path(deployment_id): Path<Uuid>,
 ) -> AppResult<(StatusCode, Json<PackageDeploymentResponse>)> {
-    let deployment = deployments::get_deployment_for_user(&state.pool, deployment_id, auth_user.user_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("deployment not found".into()))?;
+    let deployment =
+        deployments::get_deployment_for_user(&state.pool, deployment_id, auth_user.user_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("deployment not found".into()))?;
     if !state.abuse_guard.is_trusted_request(addr.ip(), &headers) {
         let by_ip = state.abuse_guard.resolve_limit(
             "api.deploy.package.ip",

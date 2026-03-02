@@ -652,14 +652,14 @@ async fn access_logs_are_user_scoped_and_queryable() -> anyhow::Result<()> {
         .await?;
     assert_eq!(all_resp.status(), StatusCode::OK);
     let all_json: serde_json::Value = all_resp.json().await?;
-    let all_logs = all_json["logs"].as_array().expect("logs should be an array");
+    let all_logs = all_json["logs"]
+        .as_array()
+        .expect("logs should be an array");
     assert_eq!(all_logs.len(), 2);
     let project_a_str = project_a.to_string();
-    assert!(
-        all_logs
-            .iter()
-            .all(|entry| entry["project_id"].as_str() == Some(project_a_str.as_str()))
-    );
+    assert!(all_logs
+        .iter()
+        .all(|entry| entry["project_id"].as_str() == Some(project_a_str.as_str())));
 
     let forbidden_scope_resp = client_b
         .get(format!(
@@ -697,10 +697,7 @@ async fn access_logs_are_user_scoped_and_queryable() -> anyhow::Result<()> {
         filtered_logs[0]["path"].as_str().unwrap_or_default(),
         "/a/second"
     );
-    assert_eq!(
-        filtered_logs[0]["status"].as_i64().unwrap_or_default(),
-        201
-    );
+    assert_eq!(filtered_logs[0]["status"].as_i64().unwrap_or_default(), 201);
 
     let invalid_range_resp = client_a
         .get(format!(

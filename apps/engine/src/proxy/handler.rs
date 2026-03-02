@@ -20,9 +20,8 @@ use crate::{
     db::{domains, projects},
     error::AppError,
     proxy::{
-        analytics_collector::RequestEvent, client_ip::extract_client_ip,
-        access_bot_guard::MitigationAction,
-        routing_cache::CacheLookup,
+        access_bot_guard::MitigationAction, analytics_collector::RequestEvent,
+        client_ip::extract_client_ip, routing_cache::CacheLookup,
     },
     services::abuse::{AbuseDecision, AbuseLimit},
     state::RoutingEntry,
@@ -137,7 +136,8 @@ async fn route_and_forward(
         return Ok((response, None, false));
     }
 
-    let host = extract_host(req.headers()).ok_or(RouteError::Status(StatusCode::BAD_REQUEST, None))?;
+    let host =
+        extract_host(req.headers()).ok_or(RouteError::Status(StatusCode::BAD_REQUEST, None))?;
     let path_bucket = route_bucket(req.uri().path());
     let return_to = req
         .uri()
@@ -150,7 +150,10 @@ async fn route_and_forward(
         .should_bypass_proxy_limits(client_ip, req.headers())
         .await;
     if !trusted {
-        if let Some(mitigation) = state.access_bot_guard.evaluate(client_ip) {
+        if let Some(mitigation) = state
+            .access_bot_guard
+            .evaluate_with_path(client_ip, req.uri().path())
+        {
             let response = match mitigation.action {
                 MitigationAction::Challenge => proxy_challenge_response(
                     state,
@@ -403,8 +406,7 @@ async fn route_and_forward(
         .map_err(|_| RouteError::Status(StatusCode::INTERNAL_SERVER_ERROR, pid))?;
 
     // Forward
-    let upstream_timeout =
-        Duration::from_millis(state.config.proxy_upstream_timeout_ms.max(500));
+    let upstream_timeout = Duration::from_millis(state.config.proxy_upstream_timeout_ms.max(500));
     let upstream_resp = tokio::time::timeout(upstream_timeout, client.request(upstream_req))
         .await
         .map_err(|_| RouteError::Status(StatusCode::GATEWAY_TIMEOUT, pid))?
@@ -433,7 +435,10 @@ async fn route_and_forward(
     Ok((resp, pid, cold_start))
 }
 
-pub(crate) async fn resolve_project_id(state: &AppState, host: &str) -> Result<Option<Uuid>, AppError> {
+pub(crate) async fn resolve_project_id(
+    state: &AppState,
+    host: &str,
+) -> Result<Option<Uuid>, AppError> {
     // 1. Check the routing cache first (hot path — no DB hit).
     match state.routing_cache.lookup(host).await {
         CacheLookup::Hit(project_id) => return Ok(Some(project_id)),
@@ -662,10 +667,11 @@ async fn handle_challenge_verify(
         }
     }
 
-    let set_cookie =
-        state
-            .abuse_guard
-            .build_challenge_set_cookie(client_ip, &headers, state.config.proxy_scheme == "https");
+    let set_cookie = state.abuse_guard.build_challenge_set_cookie(
+        client_ip,
+        &headers,
+        state.config.proxy_scheme == "https",
+    );
     Response::builder()
         .status(StatusCode::SEE_OTHER)
         .header("location", return_to)
@@ -1025,7 +1031,10 @@ mod tests {
     #[test]
     fn sanitize_return_to_accepts_internal_paths() {
         assert_eq!(sanitize_return_to("/projects/demo"), "/projects/demo");
-        assert_eq!(sanitize_return_to("/projects/demo?tab=logs"), "/projects/demo?tab=logs");
+        assert_eq!(
+            sanitize_return_to("/projects/demo?tab=logs"),
+            "/projects/demo?tab=logs"
+        );
     }
 
     #[test]

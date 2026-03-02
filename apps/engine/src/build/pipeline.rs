@@ -175,9 +175,7 @@ async fn run_child_and_capture(
     display_command: &str,
 ) -> Result<(), AppError> {
     let mut child = cmd.spawn().map_err(|error| {
-        AppError::Internal(format!(
-            "failed to spawn '{display_command}': {error}"
-        ))
+        AppError::Internal(format!("failed to spawn '{display_command}': {error}"))
     })?;
 
     let stdout = child.stdout.take();
@@ -200,14 +198,9 @@ async fn run_child_and_capture(
         "error".to_owned(),
     ));
 
-    let status = child
-        .wait()
-        .await
-        .map_err(|error| {
-            AppError::Internal(format!(
-                "failed waiting for '{display_command}': {error}"
-            ))
-        })?;
+    let status = child.wait().await.map_err(|error| {
+        AppError::Internal(format!("failed waiting for '{display_command}': {error}"))
+    })?;
 
     let _ = stdout_task.await;
     let _ = stderr_task.await;
@@ -317,7 +310,10 @@ mod tests {
     #[test]
     fn redact_command_hides_env_secret() {
         let cmd = "git -c credential.helper=!f() { echo password=$RIFT_GITHUB_TOKEN; } clone";
-        let envs = vec![("RIFT_GITHUB_TOKEN".to_owned(), "secret-token-value".to_owned())];
+        let envs = vec![(
+            "RIFT_GITHUB_TOKEN".to_owned(),
+            "secret-token-value".to_owned(),
+        )];
         let redacted = redact_command_for_log(cmd, &envs);
         assert!(!redacted.contains("secret-token-value"));
     }

@@ -178,7 +178,10 @@ pub async fn upsert_route_binding(
     .map_err(AppError::Db)
 }
 
-pub async fn get_route_binding(pool: &PgPool, host: &str) -> Result<Option<RouteBinding>, AppError> {
+pub async fn get_route_binding(
+    pool: &PgPool,
+    host: &str,
+) -> Result<Option<RouteBinding>, AppError> {
     sqlx::query_as::<_, RouteBinding>(
         r#"
         SELECT host, project_id, release_id, version, updated_at

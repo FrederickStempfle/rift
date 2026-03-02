@@ -2,10 +2,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
-use crate::{
-    db::models::AccessLog,
-    error::AppError,
-};
+use crate::{db::models::AccessLog, error::AppError};
 
 #[derive(Debug, Clone)]
 pub struct NewAccessLog {

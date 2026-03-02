@@ -65,7 +65,10 @@ fn normalize_filters(query: AccessLogsQuery) -> Result<AccessLogFilters, AppErro
         }
     }
 
-    let host = query.host.map(|value| value.trim().to_lowercase()).filter(|value| !value.is_empty());
+    let host = query
+        .host
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty());
     let path_prefix = query
         .path_prefix
         .map(|value| value.trim().to_owned())

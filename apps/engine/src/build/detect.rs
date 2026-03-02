@@ -738,8 +738,6 @@ mod tests {
         let project = project_with("unknown");
 
         let err = detect_build_plan(&project, temp.path()).expect_err("should fail");
-        assert!(err
-            .to_string()
-            .contains("failed to read package.json from"));
+        assert!(err.to_string().contains("failed to read package.json from"));
     }
 }

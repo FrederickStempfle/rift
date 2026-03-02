@@ -81,10 +81,7 @@ mod tests {
     fn prefers_cf_connecting_ip_for_trusted_proxy() {
         let mut headers = HeaderMap::new();
         headers.insert("cf-connecting-ip", "203.0.113.42".parse().unwrap());
-        headers.insert(
-            "x-forwarded-for",
-            "203.0.113.50, 10.1.1.5".parse().unwrap(),
-        );
+        headers.insert("x-forwarded-for", "203.0.113.50, 10.1.1.5".parse().unwrap());
         let ip = extract_client_ip("10.9.0.2".parse().unwrap(), &headers, &trusted_list());
         assert_eq!(ip, "203.0.113.42".parse::<IpAddr>().unwrap());
     }

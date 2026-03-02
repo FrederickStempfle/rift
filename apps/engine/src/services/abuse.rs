@@ -312,7 +312,8 @@ impl AbuseGuard {
                 continue;
             }
             match (override_cfg.project_id, project_id) {
-                (Some(override_project), Some(target_project)) if override_project == target_project => {}
+                (Some(override_project), Some(target_project))
+                    if override_project == target_project => {}
                 (Some(_), _) => continue,
                 (None, _) => {}
             }
@@ -350,7 +351,12 @@ impl AbuseGuard {
         self.is_verified_crawler(client_ip, headers).await
     }
 
-    pub fn build_challenge_set_cookie(&self, client_ip: IpAddr, headers: &HeaderMap, secure: bool) -> String {
+    pub fn build_challenge_set_cookie(
+        &self,
+        client_ip: IpAddr,
+        headers: &HeaderMap,
+        secure: bool,
+    ) -> String {
         let token = self.issue_challenge_token(client_ip, headers);
         let mut cookie = format!(
             "{}={}; Max-Age={}; Path=/; HttpOnly; SameSite=Lax",
@@ -609,7 +615,9 @@ impl AbuseGuard {
     }
 
     fn clamp_retry_after(&self, seconds: u64) -> u64 {
-        seconds.max(1).min(self.settings.max_retry_after_secs.max(1))
+        seconds
+            .max(1)
+            .min(self.settings.max_retry_after_secs.max(1))
     }
 
     fn ban_tier(&self, strikes: u64) -> (Duration, &'static str) {
@@ -638,7 +646,9 @@ impl AbuseGuard {
             }
         };
 
-        metrics::ABUSE_DECISION.with_label_values(&[scope, action]).inc();
+        metrics::ABUSE_DECISION
+            .with_label_values(&[scope, action])
+            .inc();
 
         let mut lock = self.telemetry.scope_counters.write().await;
         let item = lock.entry(scope.to_owned()).or_default();
@@ -649,30 +659,29 @@ impl AbuseGuard {
         }
     }
 
-    async fn incr_counter(
-        &self,
-        key: &str,
-        window: Duration,
-    ) -> Result<(u64, u64), anyhow::Error> {
+    async fn incr_counter(&self, key: &str, window: Duration) -> Result<(u64, u64), anyhow::Error> {
         match &self.backend {
             Backend::Local { state } => Ok(state.incr_counter(key, window).await),
-            Backend::Redis { client, fallback } => match redis_incr_counter(client, key, window).await {
-                Ok(item) => Ok(item),
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        "redis counter update failed; falling back to local abuse state"
-                    );
-                    Ok(fallback.incr_counter(key, window).await)
+            Backend::Redis { client, fallback } => {
+                match redis_incr_counter(client, key, window).await {
+                    Ok(item) => Ok(item),
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "redis counter update failed; falling back to local abuse state"
+                        );
+                        Ok(fallback.incr_counter(key, window).await)
+                    }
                 }
-            },
+            }
         }
     }
 
     async fn incr_strike(&self, actor_key: &str) -> Result<u64, anyhow::Error> {
         match &self.backend {
             Backend::Local { state } => Ok(state.incr_strike(actor_key).await),
-            Backend::Redis { client, fallback } => match redis_incr_strike(client, actor_key).await {
+            Backend::Redis { client, fallback } => match redis_incr_strike(client, actor_key).await
+            {
                 Ok(strikes) => Ok(strikes),
                 Err(error) => {
                     tracing::warn!(
@@ -691,33 +700,37 @@ impl AbuseGuard {
                 state.set_ban(actor_key, duration).await;
                 Ok(())
             }
-            Backend::Redis { client, fallback } => match redis_set_ban(client, actor_key, duration).await {
-                Ok(()) => Ok(()),
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        "redis set ban failed; falling back to local abuse state"
-                    );
-                    fallback.set_ban(actor_key, duration).await;
-                    Ok(())
+            Backend::Redis { client, fallback } => {
+                match redis_set_ban(client, actor_key, duration).await {
+                    Ok(()) => Ok(()),
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "redis set ban failed; falling back to local abuse state"
+                        );
+                        fallback.set_ban(actor_key, duration).await;
+                        Ok(())
+                    }
                 }
-            },
+            }
         }
     }
 
     async fn ban_ttl_secs(&self, actor_key: &str) -> Option<u64> {
         match &self.backend {
             Backend::Local { state } => state.ban_ttl_secs(actor_key).await,
-            Backend::Redis { client, fallback } => match redis_ban_ttl_secs(client, actor_key).await {
-                Ok(ttl) => ttl,
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        "redis ban lookup failed; falling back to local abuse state"
-                    );
-                    fallback.ban_ttl_secs(actor_key).await
+            Backend::Redis { client, fallback } => {
+                match redis_ban_ttl_secs(client, actor_key).await {
+                    Ok(ttl) => ttl,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "redis ban lookup failed; falling back to local abuse state"
+                        );
+                        fallback.ban_ttl_secs(actor_key).await
+                    }
                 }
-            },
+            }
         }
     }
 }
@@ -956,7 +969,10 @@ async fn redis_incr_counter(
     if count == 1 {
         let _: bool = conn.expire(&redis_key, window.as_secs() as i64).await?;
     }
-    let ttl: i64 = conn.ttl(&redis_key).await.unwrap_or(window.as_secs() as i64);
+    let ttl: i64 = conn
+        .ttl(&redis_key)
+        .await
+        .unwrap_or(window.as_secs() as i64);
     Ok((count, ttl.max(1) as u64))
 }
 

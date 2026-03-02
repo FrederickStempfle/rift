@@ -1,7 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::Context;
-use tokio::sync::Semaphore;
 use rift_engine::{
     api::{self, AppState},
     build::BuildManager,
@@ -26,6 +25,7 @@ use rift_engine::{
     state,
     ws::LogBroadcaster,
 };
+use tokio::sync::Semaphore;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -251,7 +251,8 @@ async fn main() -> anyhow::Result<()> {
         subscriber_redis_url,
         routing_cache.clone(),
     );
-    let access_bot_guard = rift_engine::proxy::access_bot_guard::AccessBotGuard::from_config(&config);
+    let access_bot_guard =
+        rift_engine::proxy::access_bot_guard::AccessBotGuard::from_config(&config);
 
     let state = AppState {
         pool: pool.clone(),
