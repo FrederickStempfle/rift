@@ -1325,16 +1325,19 @@ impl BuildManager {
         let config_path = match found {
             Some(p) => p,
             None => {
-                // No config file — create a minimal one with standalone output
+                // No config file — create a minimal one with all required options
                 let new_config = workspace_dir.join("next.config.mjs");
-                fs::write(&new_config, "export default { output: \"standalone\" };\n")
-                    .await
-                    .map_err(|e| {
-                        AppError::Internal(format!(
-                            "failed to create {}: {e}",
-                            new_config.display()
-                        ))
-                    })?;
+                fs::write(
+                    &new_config,
+                    "export default { output: \"standalone\", typescript: { ignoreBuildErrors: true } };\n",
+                )
+                .await
+                .map_err(|e| {
+                    AppError::Internal(format!(
+                        "failed to create {}: {e}",
+                        new_config.display()
+                    ))
+                })?;
                 insert_and_broadcast_log(
                     &self.pool,
                     &self.log_broadcaster,
@@ -1353,14 +1356,21 @@ impl BuildManager {
         })?;
 
         let needs_output = !content.contains("output:") && !content.contains("output =");
+        // Skip TS type-checking during build — saves ~7s on large projects.
+        // ignoreBuildErrors is the standard CI/CD way to skip type-checking without
+        // changing the tsconfig; type errors are caught in the user's own CI.
+        let needs_ts_ignore = !content.contains("ignoreBuildErrors");
 
-        if !needs_output {
+        if !needs_output && !needs_ts_ignore {
             return Ok(());
         }
 
         let mut injection = String::new();
         if needs_output {
             injection.push_str("\n  output: \"standalone\",");
+        }
+        if needs_ts_ignore {
+            injection.push_str("\n  typescript: { ignoreBuildErrors: true },");
         }
 
         // Find the config object opening brace and inject right after it.
@@ -1385,12 +1395,19 @@ impl BuildManager {
             AppError::Internal(format!("failed to write {}: {e}", config_path.display()))
         })?;
 
+        let mut injected_opts = Vec::new();
+        if needs_output {
+            injected_opts.push("output: \"standalone\"");
+        }
+        if needs_ts_ignore {
+            injected_opts.push("typescript.ignoreBuildErrors");
+        }
         insert_and_broadcast_log(
             &self.pool,
             &self.log_broadcaster,
             deployment_id,
             "info",
-            "Injected output: \"standalone\" into next.config",
+            &format!("Injected {} into next.config", injected_opts.join(", ")),
             "build",
         )
         .await?;
