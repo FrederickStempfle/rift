@@ -236,13 +236,14 @@ async fn flush_buffers(
         )
         .await
         {
-            Ok(()) => {
-                buffer.remove(&(project_id, bucket));
-            }
+            Ok(()) => {}
             Err(e) => {
-                tracing::warn!(error = %e, "failed to flush analytics bucket");
+                tracing::warn!(error = %e, "failed to flush analytics bucket, discarding");
             }
         }
+        // Always remove — retrying a permanent error (e.g. FK violation for a
+        // deleted project) would loop forever and block the flush loop.
+        buffer.remove(&(project_id, bucket));
     }
 
     let referrer_entries: Vec<_> = referrer_buffer
@@ -255,13 +256,12 @@ async fn flush_buffers(
         match crate::db::analytics::upsert_referrer(pool, project_id, bucket, &referrer, requests)
             .await
         {
-            Ok(()) => {
-                referrer_buffer.remove(&(project_id, bucket, referrer));
-            }
+            Ok(()) => {}
             Err(e) => {
-                tracing::warn!(error = %e, "failed to flush analytics referrer bucket");
+                tracing::warn!(error = %e, "failed to flush analytics referrer bucket, discarding");
             }
         }
+        referrer_buffer.remove(&(project_id, bucket, referrer));
     }
 
     let path_entries: Vec<_> = path_buffer
@@ -285,24 +285,24 @@ async fn flush_buffers(
         )
         .await
         {
-            Ok(()) => {
-                path_buffer.remove(&(project_id, bucket, path));
-            }
+            Ok(()) => {}
             Err(e) => {
-                tracing::warn!(error = %e, "failed to flush analytics path bucket");
+                tracing::warn!(error = %e, "failed to flush analytics path bucket, discarding");
             }
         }
+        path_buffer.remove(&(project_id, bucket, path));
     }
 
     if !access_buffer.is_empty() {
         match crate::db::access_logs::insert_batch(pool, access_buffer).await {
-            Ok(()) => {
-                access_buffer.clear();
-            }
+            Ok(()) => {}
             Err(e) => {
-                tracing::warn!(error = %e, "failed to flush access logs");
+                tracing::warn!(error = %e, "failed to flush access logs, discarding batch");
             }
         }
+        // Always clear — a permanently-bad entry (FK violation for a deleted
+        // project) would otherwise block every future log from being written.
+        access_buffer.clear();
     }
 }
 
