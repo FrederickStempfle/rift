@@ -9,6 +9,7 @@ use rift_engine::{
     proxy::{
         self, acme::AcmeChallengeStore, analytics_collector::AnalyticsCollector,
         firewall_cache::FirewallCache, routing_cache::RoutingCache, tls::CertResolver,
+        waf::WafCache,
     },
     runtime::{
         backend::{PoolBackend, ProcessBackend},
@@ -154,6 +155,7 @@ async fn main() -> anyhow::Result<()> {
         pool.clone(),
         config.access_log_retention_days,
         config.access_log_cleanup_interval_secs,
+        config.waf_event_retention_days,
     );
     let log_broadcaster = LogBroadcaster::new();
     let build_manager = BuildManager::new(
@@ -261,11 +263,12 @@ async fn main() -> anyhow::Result<()> {
         password_service,
         auth_rate_limiters: AuthRateLimiters::new(),
         abuse_guard: AbuseGuard::new(&config),
-        audit_logger: AuditLogger::new(pool),
+        audit_logger: AuditLogger::new(pool.clone()),
         runtime_backend: runtime_backend.clone(),
         build_manager,
         public_ip,
         firewall_cache: FirewallCache::new(),
+        waf_cache: WafCache::new(pool.clone()),
         analytics_collector,
         log_broadcaster,
         ssl_manager: ssl_manager.clone(),
@@ -280,6 +283,23 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "v8-isolate")]
         isolate_pool,
     };
+
+    // Seed WAF managed baseline rules and log status
+    if state.config.waf_enabled {
+        match rift_engine::db::waf::seed_managed_rules(&state.pool).await {
+            Ok(count) if count > 0 => {
+                tracing::info!(count, "seeded WAF managed baseline rules");
+            }
+            Ok(_) => {
+                tracing::debug!("WAF managed baseline rules already present");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to seed WAF managed rules");
+            }
+        }
+    } else {
+        tracing::info!("WAF disabled (RIFT_WAF_ENABLED=false)");
+    }
 
     // Restore deployments that were running before the engine restarted
     let restored = state.runtime_backend.restore(&state.pool, &config).await;

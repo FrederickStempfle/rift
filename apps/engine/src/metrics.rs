@@ -170,6 +170,36 @@ pub static WORKER_MEM_FREE: Lazy<GaugeVec> = Lazy::new(|| {
     .expect("metric registration failed")
 });
 
+// --- WAF ---
+
+pub static WAF_DECISION: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "rift_waf_decision_total",
+        "WAF decisions by scope and action",
+        &["scope", "action"]
+    )
+    .expect("metric registration failed")
+});
+
+pub static WAF_RULE_MATCH: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "rift_waf_rule_match_total",
+        "WAF rule match count by rule name",
+        &["rule_name"]
+    )
+    .expect("metric registration failed")
+});
+
+pub static WAF_EVAL_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "rift_waf_eval_duration_seconds",
+        "WAF evaluation duration",
+        &["scope"],
+        vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]
+    )
+    .expect("metric registration failed")
+});
+
 // --- Abuse controls ---
 
 pub static ABUSE_DECISION: Lazy<CounterVec> = Lazy::new(|| {
@@ -230,6 +260,15 @@ mod tests {
             .with_label_values(&["proxy.global_ip", "allow"])
             .inc();
         ABUSE_BAN_TIER.with_label_values(&["5m"]).inc();
+        WAF_DECISION
+            .with_label_values(&["global", "allow"])
+            .inc();
+        WAF_RULE_MATCH
+            .with_label_values(&["test-rule"])
+            .inc();
+        WAF_EVAL_DURATION
+            .with_label_values(&["global"])
+            .observe(0.001);
 
         let output = encode_metrics();
         assert!(!output.is_empty());
@@ -239,6 +278,9 @@ mod tests {
         assert!(output.contains("rift_pool_warm_workers"));
         assert!(output.contains("rift_build_duration_seconds"));
         assert!(output.contains("rift_abuse_decision_total"));
+        assert!(output.contains("rift_waf_decision_total"));
+        assert!(output.contains("rift_waf_rule_match_total"));
+        assert!(output.contains("rift_waf_eval_duration_seconds"));
     }
 
     #[test]

@@ -439,6 +439,8 @@ mod tests {
             access_bot_scan_unique_paths: 80,
             access_bot_scan_404_threshold: 40,
             access_bot_mitigation_secs: 300,
+            waf_enabled: true,
+            waf_event_retention_days: 30,
         }
     }
 

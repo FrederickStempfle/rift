@@ -24,6 +24,7 @@ use crate::{
     proxy::{
         acme::AcmeChallengeStore, analytics_collector::AnalyticsCollector,
         firewall_cache::FirewallCache, routing_cache::RoutingCache, tls::CertResolver,
+        waf::WafCache,
     },
     runtime::backend::RuntimeBackend,
     scheduler::Scheduler,
@@ -51,6 +52,7 @@ pub mod releases;
 pub mod routing;
 pub mod runtime;
 pub mod users;
+pub mod waf;
 pub mod webhooks;
 
 #[derive(Clone)]
@@ -68,6 +70,8 @@ pub struct AppState {
     /// Auto-detected or overridden via RIFT_PUBLIC_IP. Resolved once at startup.
     pub public_ip: Option<String>,
     pub firewall_cache: FirewallCache,
+    /// WAF rule cache (compiled rules per scope with TTL).
+    pub waf_cache: WafCache,
     pub analytics_collector: AnalyticsCollector,
     pub log_broadcaster: LogBroadcaster,
     pub ssl_manager: SslManager,
@@ -146,6 +150,7 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/env-vars", env_vars::routes())
         .nest("/api/domains", domains::routes())
         .nest("/api/firewall", firewall::routes())
+        .nest("/api/waf", waf::routes())
         .nest("/api/webhooks", webhooks::routes())
         .route("/api/analytics", get(analytics::get_analytics))
         .route("/api/access-logs", get(access_logs::list_access_logs))

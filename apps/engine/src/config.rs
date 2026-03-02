@@ -378,6 +378,14 @@ pub struct Config {
     )]
     pub access_log_cleanup_interval_secs: u64,
 
+    /// Global WAF kill switch. Set to false to bypass all WAF evaluation.
+    #[arg(long, env = "RIFT_WAF_ENABLED", default_value_t = true)]
+    pub waf_enabled: bool,
+
+    /// WAF event retention in days. Set to 0 to disable cleanup.
+    #[arg(long, env = "RIFT_WAF_EVENT_RETENTION_DAYS", default_value_t = 30)]
+    pub waf_event_retention_days: u16,
+
     /// Access-log-driven bot mitigation mode: off | challenge | block.
     #[arg(long, env = "RIFT_ACCESS_BOT_MODE", default_value = "challenge")]
     pub access_bot_mode: String,

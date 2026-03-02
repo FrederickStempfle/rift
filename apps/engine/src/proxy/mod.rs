@@ -7,6 +7,7 @@ pub mod handler;
 pub mod routing_cache;
 pub mod routing_subscriber;
 pub mod tls;
+pub mod waf;
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -22,6 +22,7 @@ use crate::{
     proxy::{
         access_bot_guard::MitigationAction, analytics_collector::RequestEvent,
         client_ip::extract_client_ip, routing_cache::CacheLookup,
+        waf::{WafAction, WafRequestContext},
     },
     services::abuse::{AbuseDecision, AbuseLimit},
     state::RoutingEntry,
@@ -263,6 +264,14 @@ async fn route_and_forward(
         }
     }
 
+    // --- Global WAF check (before project resolution) ---
+    if state.config.waf_enabled {
+        let waf_ctx = build_waf_context(client_ip, &req);
+        if let Some(response) = evaluate_waf(state, None, &waf_ctx, &return_to).await {
+            return Err(RouteError::Response(response, None));
+        }
+    }
+
     let project_id = resolve_project_id(state, &host)
         .await
         .map_err(|e| RouteError::Status(map_app_error(e), None))?
@@ -309,6 +318,14 @@ async fn route_and_forward(
         .map_err(|e| RouteError::Status(map_app_error(e), pid))?;
     if !allowed {
         return Err(RouteError::Status(StatusCode::FORBIDDEN, pid));
+    }
+
+    // --- Project WAF check (after project resolution + firewall) ---
+    if state.config.waf_enabled {
+        let waf_ctx = build_waf_context(client_ip, &req);
+        if let Some(response) = evaluate_waf(state, Some(project_id), &waf_ctx, &return_to).await {
+            return Err(RouteError::Response(response, pid));
+        }
     }
 
     // V8 isolate pool: handle function-only projects directly (no HTTP hop)
@@ -832,6 +849,184 @@ fn bearer_fingerprint(headers: &HeaderMap) -> Option<String> {
     hasher.update(token.as_bytes());
     let digest = hasher.finalize();
     Some(hex::encode(&digest[..8]))
+}
+
+/// Build WAF request context from an incoming request.
+fn build_waf_context(client_ip: IpAddr, req: &Request<Incoming>) -> WafRequestContext {
+    let method = req.method().as_str().to_owned();
+    let host = extract_host(req.headers()).unwrap_or_default();
+    let path = req.uri().path().to_owned();
+    let query = req.uri().query().unwrap_or("").to_owned();
+    let user_agent = req
+        .headers()
+        .get(hyper::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    let headers: Vec<(String, String)> = req
+        .headers()
+        .iter()
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|val| (k.as_str().to_owned(), val.to_owned()))
+        })
+        .collect();
+
+    WafRequestContext {
+        client_ip_str: client_ip.to_string(),
+        client_ip,
+        method,
+        host,
+        path,
+        query,
+        user_agent,
+        headers,
+    }
+}
+
+/// Evaluate WAF rules and return a response if the request should be blocked/challenged.
+/// Returns None if the request is allowed. Respects WAF policy mode and fail-open settings.
+async fn evaluate_waf(
+    state: &AppState,
+    project_id: Option<Uuid>,
+    ctx: &WafRequestContext,
+    return_to: &str,
+) -> Option<Response<Full<Bytes>>> {
+    let start = std::time::Instant::now();
+    let scope_label = if project_id.is_some() {
+        "project"
+    } else {
+        "global"
+    };
+
+    // --- Check policy: disabled means skip entirely ---
+    let policy = match crate::db::waf::get_policy(&state.pool, project_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, scope = scope_label, "WAF policy fetch failed, failing open");
+            None
+        }
+    };
+    let mode = policy.as_ref().map_or("active", |p| p.mode.as_str());
+    let fail_open = policy.as_ref().map_or(true, |p| p.fail_open);
+
+    if mode == "disabled" {
+        return None;
+    }
+
+    // --- Fetch compiled rules ---
+    let scope_key = if project_id.is_some() {
+        project_id
+    } else {
+        None
+    };
+    let rules = match state.waf_cache.get_rules(&state.pool, scope_key).await {
+        Ok(rules) => rules,
+        Err(e) => {
+            tracing::warn!(error = %e, scope = scope_label, "WAF rule fetch failed");
+            crate::metrics::WAF_DECISION
+                .with_label_values(&[scope_label, "error"])
+                .inc();
+            if fail_open {
+                return None;
+            }
+            // Fail closed — block the request
+            return Some(proxy_abuse_response(
+                StatusCode::FORBIDDEN,
+                "waf_error",
+                0,
+                "WAF evaluation error",
+            ));
+        }
+    };
+
+    let decision = crate::proxy::waf::evaluate_rules(&rules, ctx);
+    let duration = start.elapsed().as_secs_f64();
+    crate::metrics::WAF_EVAL_DURATION
+        .with_label_values(&[scope_label])
+        .observe(duration);
+
+    // --- Emit one event per matched log rule ---
+    for (rule_id, rule_name) in &decision.logged_rules {
+        crate::metrics::WAF_RULE_MATCH
+            .with_label_values(&[rule_name])
+            .inc();
+        state.waf_cache.record_event(crate::db::waf::NewWafEvent {
+            project_id,
+            rule_id: Some(*rule_id),
+            action: "log".into(),
+            client_ip: ctx.client_ip_str.clone(),
+            method: ctx.method.clone(),
+            host: ctx.host.clone(),
+            path: ctx.path.clone(),
+            user_agent: ctx.user_agent.clone(),
+            rule_name: Some(rule_name.clone()),
+        });
+    }
+
+    // --- Determine effective action (policy mode can downgrade) ---
+    let effective_action = if mode == "log_only" && decision.action.is_terminal() {
+        // In log_only mode, record the would-be action but don't enforce it
+        WafAction::Log
+    } else {
+        decision.action
+    };
+
+    // Emit event for the terminal match (if any)
+    if let Some(ref rule_name) = decision.matched_rule_name {
+        crate::metrics::WAF_RULE_MATCH
+            .with_label_values(&[rule_name])
+            .inc();
+        state.waf_cache.record_event(crate::db::waf::NewWafEvent {
+            project_id,
+            rule_id: decision.matched_rule_id,
+            action: decision.action.as_str().into(), // original action, not effective
+            client_ip: ctx.client_ip_str.clone(),
+            method: ctx.method.clone(),
+            host: ctx.host.clone(),
+            path: ctx.path.clone(),
+            user_agent: ctx.user_agent.clone(),
+            rule_name: Some(rule_name.clone()),
+        });
+    }
+
+    crate::metrics::WAF_DECISION
+        .with_label_values(&[scope_label, effective_action.as_str()])
+        .inc();
+
+    match effective_action {
+        WafAction::Allow | WafAction::Log => None,
+        WafAction::Challenge => {
+            let mut headers = hyper::HeaderMap::new();
+            if let Ok(ua_val) = hyper::header::HeaderValue::from_str(&ctx.user_agent) {
+                headers.insert(hyper::header::USER_AGENT, ua_val);
+            }
+            Some(proxy_challenge_response(
+                state,
+                ctx.client_ip,
+                &headers,
+                60,
+                &format!(
+                    "WAF: {}",
+                    decision.matched_rule_name.as_deref().unwrap_or("rule match")
+                ),
+                return_to,
+            ))
+        }
+        WafAction::Block => {
+            let reason = format!(
+                "blocked by WAF rule: {}",
+                decision.matched_rule_name.as_deref().unwrap_or("unknown")
+            );
+            Some(proxy_abuse_response(
+                StatusCode::FORBIDDEN,
+                "waf_block",
+                0,
+                &reason,
+            ))
+        }
+    }
 }
 
 fn error_response(status: StatusCode) -> Response<Full<Bytes>> {

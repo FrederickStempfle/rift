@@ -34,13 +34,19 @@ pub struct AnalyticsCollector {
 }
 
 impl AnalyticsCollector {
-    pub fn new(pool: PgPool, access_log_retention_days: u16, cleanup_interval_secs: u64) -> Self {
+    pub fn new(
+        pool: PgPool,
+        access_log_retention_days: u16,
+        cleanup_interval_secs: u64,
+        waf_event_retention_days: u16,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(20_000);
         tokio::spawn(flush_loop(
             rx,
             pool,
             access_log_retention_days,
             std::time::Duration::from_secs(cleanup_interval_secs.max(30)),
+            waf_event_retention_days,
         ));
         Self {
             tx,
@@ -82,6 +88,7 @@ async fn flush_loop(
     pool: PgPool,
     access_log_retention_days: u16,
     cleanup_interval: std::time::Duration,
+    waf_event_retention_days: u16,
 ) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
     let mut last_cleanup_at = std::time::Instant::now();
@@ -119,6 +126,17 @@ async fn flush_loop(
                         Ok(_) => {}
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to cleanup expired access logs");
+                        }
+                    }
+                    if waf_event_retention_days > 0 {
+                        match crate::db::waf::cleanup_old_events(&pool, i32::from(waf_event_retention_days)).await {
+                            Ok(rows) if rows > 0 => {
+                                tracing::info!(deleted_rows = rows, "cleaned expired WAF events");
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(error = %e, "failed to cleanup expired WAF events");
+                            }
                         }
                     }
                     last_cleanup_at = std::time::Instant::now();

@@ -144,6 +144,8 @@ impl TestServer {
             access_bot_scan_unique_paths: 80,
             access_bot_scan_404_threshold: 40,
             access_bot_mitigation_secs: 300,
+            waf_enabled: true,
+            waf_event_retention_days: 30,
         });
         let runtime_manager = RuntimeManager::new();
         let log_broadcaster = LogBroadcaster::new();
@@ -161,7 +163,7 @@ impl TestServer {
             #[cfg(feature = "v8-isolate")]
             None,
         );
-        let analytics_collector = AnalyticsCollector::new(pool.clone(), 30, 3600);
+        let analytics_collector = AnalyticsCollector::new(pool.clone(), 30, 3600, 30);
         let cert_resolver = CertResolver::new();
         let challenge_store = AcmeChallengeStore::new();
         let ssl_manager = SslManager::new(
@@ -191,7 +193,7 @@ impl TestServer {
             password_service: PasswordService::new()?,
             auth_rate_limiters: AuthRateLimiters::new(),
             abuse_guard: AbuseGuard::new(&config),
-            audit_logger: AuditLogger::new(pool),
+            audit_logger: AuditLogger::new(pool.clone()),
             runtime_backend,
             build_manager,
             public_ip: config.public_ip.clone(),
@@ -202,6 +204,7 @@ impl TestServer {
             challenge_store,
             cert_resolver,
             routing_cache: RoutingCache::new(),
+            waf_cache: rift_engine::proxy::waf::WafCache::new(pool.clone()),
             state_store,
             scheduler,
             trusted_proxy_cidrs: Arc::new(config.trusted_proxy_cidrs()),
