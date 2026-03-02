@@ -186,7 +186,6 @@ struct LimitOverride {
 
 #[derive(Clone)]
 struct CrawlerVerifier {
-    resolver: Resolver,
     cache: Arc<RwLock<HashMap<String, BotCacheEntry>>>,
     ttl: Duration,
 }
@@ -205,8 +204,7 @@ impl AbuseGuard {
 
         let crawler_verifier = if settings.bot_verify_enabled {
             match Resolver::builder_tokio() {
-                Ok(builder) => Some(CrawlerVerifier {
-                    resolver: builder.build(),
+                Ok(_) => Some(CrawlerVerifier {
                     cache: Arc::new(RwLock::new(HashMap::new())),
                     ttl: settings.bot_verify_cache_ttl,
                 }),
@@ -767,7 +765,12 @@ impl CrawlerVerifier {
     }
 
     async fn verify_ptr_forward(&self, client_ip: IpAddr, valid_suffixes: &[&str]) -> bool {
-        let reverse = match self.resolver.reverse_lookup(client_ip).await {
+        let resolver = match Resolver::builder_tokio() {
+            Ok(builder) => builder.build(),
+            Err(_) => return false,
+        };
+
+        let reverse = match resolver.reverse_lookup(client_ip).await {
             Ok(result) => result,
             Err(_) => return false,
         };
@@ -778,7 +781,7 @@ impl CrawlerVerifier {
                 continue;
             }
 
-            let forward = match self.resolver.lookup_ip(host.clone()).await {
+            let forward = match resolver.lookup_ip(host.clone()).await {
                 Ok(result) => result,
                 Err(_) => continue,
             };
