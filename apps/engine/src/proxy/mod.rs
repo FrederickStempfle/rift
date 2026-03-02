@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bytes::Bytes;
+use chrono::Utc;
 use http_body_util::Full;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -18,7 +19,11 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::{client::legacy::Client, rt::TokioExecutor, rt::TokioIo};
 
-use crate::{api::AppState, config::Config};
+use crate::{
+    api::AppState,
+    config::Config,
+    proxy::analytics_collector::RequestEvent,
+};
 
 pub async fn serve(state: AppState) -> anyhow::Result<()> {
     // Always run both HTTP and HTTPS listeners.
@@ -53,6 +58,7 @@ async fn serve_http(state: AppState) -> anyhow::Result<()> {
                 let client = client.clone();
                 let state = state.clone();
                 async move {
+                    let request_started = std::time::Instant::now();
                     // Check for ACME challenge
                     if let Some(resp) = handle_acme_or_redirect(&req, &state).await {
                         return Ok::<_, std::convert::Infallible>(resp);
@@ -71,6 +77,30 @@ async fn serve_http(state: AppState) -> anyhow::Result<()> {
                             .path_and_query()
                             .map(|pq| pq.as_str())
                             .unwrap_or("/");
+                        let project_id = if host.is_empty() {
+                            None
+                        } else {
+                            handler::resolve_project_id(&state, &host)
+                                .await
+                                .ok()
+                                .flatten()
+                        };
+                        state.analytics_collector.record(RequestEvent {
+                            project_id,
+                            timestamp: Utc::now(),
+                            client_ip: remote_addr.ip(),
+                            host: if host.is_empty() {
+                                None
+                            } else {
+                                Some(host.clone())
+                            },
+                            method: req.method().as_str().to_owned(),
+                            status: StatusCode::MOVED_PERMANENTLY.as_u16(),
+                            duration_ms: request_started.elapsed().as_millis() as u64,
+                            cold_start: false,
+                            path: req.uri().path().to_owned(),
+                            referer: None,
+                        });
                         let location = format!("https://{host}{path}");
                         return Ok(Response::builder()
                             .status(StatusCode::MOVED_PERMANENTLY)

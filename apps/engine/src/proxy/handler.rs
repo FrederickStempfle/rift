@@ -399,7 +399,7 @@ async fn route_and_forward(
     Ok((resp, pid, cold_start))
 }
 
-async fn resolve_project_id(state: &AppState, host: &str) -> Result<Option<Uuid>, AppError> {
+pub(crate) async fn resolve_project_id(state: &AppState, host: &str) -> Result<Option<Uuid>, AppError> {
     // 1. Check the routing cache first (hot path — no DB hit).
     match state.routing_cache.lookup(host).await {
         CacheLookup::Hit(project_id) => return Ok(Some(project_id)),
