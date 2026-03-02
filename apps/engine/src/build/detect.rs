@@ -498,6 +498,29 @@ pub fn detect_output_dir(project: &Project, workspace_dir: &Path) -> String {
         }
     }
 
+    // Final fallback: scan apps/, packages/, sites/ for a single output dir
+    // without requiring index.html — handles library/component builds that
+    // produce a dist/ with no HTML entry point.
+    for container in ["apps", "packages", "sites"] {
+        let mut candidates: Vec<String> = Vec::new();
+        for pkg_dir in list_subdirs(&workspace_dir.join(container)) {
+            let pkg_name = pkg_dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            for output in OUTPUT_DIRS {
+                if pkg_dir.join(output).exists() {
+                    candidates.push(format!("{container}/{pkg_name}/{output}"));
+                }
+            }
+        }
+        // Only commit when unambiguous — one package produced one output dir.
+        if candidates.len() == 1 {
+            return candidates.remove(0);
+        }
+    }
+
     "dist".to_owned()
 }
 
