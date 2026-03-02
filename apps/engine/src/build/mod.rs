@@ -197,6 +197,17 @@ impl BuildManager {
             })?;
         }
 
+        // Stable per-project build directory so compiler caches (webpack, SWC, Vite)
+        // remain valid across deployments. Workspace paths are embedded in cache keys,
+        // so using a consistent path (project ID, not deployment UUID) is essential.
+        // Lives in build_root (tmpfs); the immutable artifact is copied to workspace_dir
+        // (named volume) after the build so it survives container restarts.
+        let build_dir = PathBuf::from(&self.config.build_root)
+            .join(format!("b-{}", project.id));
+        if build_dir.exists() {
+            let _ = fs::remove_dir_all(&build_dir).await;
+        }
+
         // Clone with explicit argv to avoid shell injection. If a GitHub token
         // exists, provide it via env-backed credential helper (not in args/logs).
         let mut clone_env: Vec<(String, String)> = Vec::new();
@@ -215,7 +226,7 @@ impl BuildManager {
             }
         }
         clone_args.push(project.repo_url.clone());
-        clone_args.push(workspace_dir.to_string_lossy().to_string());
+        clone_args.push(build_dir.to_string_lossy().to_string());
 
         run_argv_and_log_with_env(
             &self.pool,
@@ -236,6 +247,12 @@ impl BuildManager {
             });
         })?;
         stage_timings.push(("clone", started_at.elapsed().as_millis()));
+
+        // Shadow workspace_dir with the stable build path for the entire build phase.
+        // The original deploy dir is preserved in deploy_dir; after the build the
+        // immutable artifact is copied there and RuntimeKind paths are remapped.
+        let deploy_dir = workspace_dir.clone();
+        let workspace_dir = build_dir.clone();
 
         let (sha, message) = read_git_metadata(&workspace_dir).await?;
         deployments::update_source_metadata(&self.pool, deployment_id, &sha, message.as_deref())
@@ -1033,6 +1050,26 @@ impl BuildManager {
         runtime_kind = create_immutable_artifact(&workspace_dir, runtime_kind, copy_mode).await;
 
         stage_timings.push(("artifact", started_at.elapsed().as_millis()));
+
+        // Copy the immutable artifact from build_dir (tmpfs) to deploy_dir (named
+        // volume) so it survives container restarts. Then remap RuntimeKind paths
+        // and free the tmpfs build workspace.
+        {
+            let artifact_built = workspace_dir.join("_rift_artifact");
+            let artifact_dest = deploy_dir.join("_rift_artifact");
+            if artifact_built.exists()
+                && copy_dir_with_mode(&artifact_built, &artifact_dest, CopyMode::Recursive)
+                    .await
+                    .is_ok()
+            {
+                runtime_kind = remap_runtime_kind(runtime_kind, &artifact_built, &artifact_dest);
+                let _ = set_dir_writable(&artifact_built).await;
+                let _ = fs::remove_dir_all(&workspace_dir).await;
+            }
+        }
+        // Restore workspace_dir to the deploy dir for any post-build code.
+        #[allow(unused_variables)]
+        let workspace_dir = deploy_dir.clone();
 
         // Capture function info for V8 isolate pool registration (before runtime_kind is moved)
         #[cfg(feature = "v8-isolate")]
@@ -2175,5 +2212,34 @@ async fn save_next_build_caches(
         if let Err(e) = copy_dir_recursive(&src, &dst).await {
             tracing::debug!(error = %e, "failed to save Next.js build cache for {key}");
         }
+    }
+}
+
+/// Remap all paths inside a RuntimeKind from one prefix to another.
+/// Used when moving the immutable artifact from the build dir to the deploy dir.
+fn remap_runtime_kind(
+    kind: RuntimeKind,
+    old_prefix: &std::path::Path,
+    new_prefix: &std::path::Path,
+) -> RuntimeKind {
+    let remap = |p: PathBuf| -> PathBuf {
+        if let Ok(rel) = p.strip_prefix(old_prefix) {
+            new_prefix.join(rel)
+        } else {
+            p
+        }
+    };
+    match kind {
+        RuntimeKind::StaticDeno { dir } => RuntimeKind::StaticDeno { dir: remap(dir) },
+        RuntimeKind::NextDeno { dir } => RuntimeKind::NextDeno { dir: remap(dir) },
+        RuntimeKind::NodeServer { dir, entry } => RuntimeKind::NodeServer {
+            dir: remap(dir),
+            entry: remap(entry),
+        },
+        RuntimeKind::Functions { dir } => RuntimeKind::Functions { dir: remap(dir) },
+        RuntimeKind::Combined { entry, functions_dir } => RuntimeKind::Combined {
+            entry: remap(entry),
+            functions_dir: remap(functions_dir),
+        },
     }
 }
