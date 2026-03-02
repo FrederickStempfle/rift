@@ -89,8 +89,8 @@ services:
 
   frontend:
     build:
-      context: ..
-      dockerfile: docker/Dockerfile.frontend
+      context: ${RIFT_FRONTEND_CONTEXT:-../../frontend}
+      dockerfile: ${RIFT_FRONTEND_DOCKERFILE:-Dockerfile}
     depends_on:
       - engine
     env_file:
