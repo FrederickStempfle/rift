@@ -907,8 +907,16 @@ impl BuildManager {
                     entry,
                 }
             }
-            BuildOutput::Static { .. } => {
-                let detected_dir = detect_output_dir(&project, &workspace_dir);
+            BuildOutput::Static { dir: ref hint_dir } => {
+                // Use the hint from detection (non-empty = workspace app with known subdir)
+                // when it actually exists; otherwise fall back to auto-detection.
+                let detected_dir = if !hint_dir.is_empty()
+                    && workspace_dir.join(&hint_dir).exists()
+                {
+                    hint_dir.clone()
+                } else {
+                    detect_output_dir(&project, &workspace_dir)
+                };
                 let output_dir = workspace_dir.join(&detected_dir);
                 insert_and_broadcast_log(
                     &self.pool,

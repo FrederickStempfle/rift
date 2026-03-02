@@ -446,8 +446,8 @@ pub fn detect_output_dir(project: &Project, workspace_dir: &Path) -> String {
         }
     }
 
-    // Scan apps/ first (preferred), then packages/, looking for web output with index.html
-    for container in ["apps", "packages", "sites"] {
+    // Scan apps/ (preferred), then sites/, then packages/, for web output with index.html
+    for container in ["apps", "sites", "packages"] {
         for pkg_dir in list_subdirs(&workspace_dir.join(container)) {
             let pkg_name = pkg_dir
                 .file_name()
@@ -498,10 +498,10 @@ pub fn detect_output_dir(project: &Project, workspace_dir: &Path) -> String {
         }
     }
 
-    // Final fallback: scan apps/, packages/, sites/ for a single output dir
+    // Final fallback: scan apps/, sites/, packages/ for a single output dir
     // without requiring index.html — handles library/component builds that
     // produce a dist/ with no HTML entry point.
-    for container in ["apps", "packages", "sites"] {
+    for container in ["apps", "sites", "packages"] {
         let mut candidates: Vec<String> = Vec::new();
         for pkg_dir in list_subdirs(&workspace_dir.join(container)) {
             let pkg_name = pkg_dir
@@ -578,17 +578,16 @@ fn check_unsupported_adapter(all_deps: &[&str], adapters: &[(&str, &str)]) -> Op
 
 /// Scan workspace packages to find a deployable web app.
 ///
-/// Looks in `apps/` (preferred) then `packages/` for a package that:
+/// Looks in `apps/` (preferred), then `sites/`, then `packages/` for a package that:
 /// 1. Has a known web framework (vite, next, nuxt, etc.) as a dependency
 /// 2. Has a `build` script
 ///
-/// Prefers `apps/` over `packages/`, and within each container prefers
-/// packages that have an `index.html` (SPA entry point).
+/// Priority: apps/ > sites/ > packages/. Within each tier, packages with
+/// an `index.html` (SPA entry point) are preferred.
 fn find_deployable_app(workspace_dir: &Path) -> Option<WorkspaceApp> {
     let mut candidates = Vec::new();
 
-    // Scan apps/ first, then packages/
-    for container in ["apps", "packages", "sites"] {
+    for container in ["apps", "sites", "packages"] {
         let container_dir = workspace_dir.join(container);
         if !container_dir.is_dir() {
             continue;
@@ -659,6 +658,11 @@ fn find_deployable_app(workspace_dir: &Path) -> Option<WorkspaceApp> {
                     None
                 };
 
+                let container_priority: u8 = match container {
+                    "apps" => 2,
+                    "sites" => 1,
+                    _ => 0,
+                };
                 candidates.push((
                     WorkspaceApp {
                         name: pkg_name,
@@ -680,7 +684,7 @@ fn find_deployable_app(workspace_dir: &Path) -> Option<WorkspaceApp> {
                         is_remix,
                         unsupported_platform,
                     },
-                    container == "apps",
+                    container_priority,
                     has_index_html,
                 ));
             }
@@ -691,9 +695,9 @@ fn find_deployable_app(workspace_dir: &Path) -> Option<WorkspaceApp> {
         return None;
     }
 
-    // Sort: prefer apps/ over packages/, then prefer those with index.html
+    // Sort: apps/ (2) > sites/ (1) > packages/ (0), then prefer index.html
     candidates.sort_by(|a, b| {
-        b.1.cmp(&a.1) // apps/ first
+        b.1.cmp(&a.1) // higher priority container first
             .then(b.2.cmp(&a.2)) // has index.html first
     });
 
