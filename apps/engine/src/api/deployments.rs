@@ -2,7 +2,7 @@ use std::{net::SocketAddr, time::Duration};
 
 use axum::{
     extract::{ConnectInfo, Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::get,
     Json, Router,
 };
@@ -83,33 +83,55 @@ pub async fn list_deployments(
 pub async fn create_deployment(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     auth_user: AuthUser,
     Json(payload): Json<CreateDeploymentRequest>,
 ) -> AppResult<(StatusCode, Json<DeploymentResponse>)> {
-    enforce_abuse_limit(
-        &state,
-        AbuseLimit::per_ip(
+    if !state.abuse_guard.is_trusted_request(addr.ip(), &headers) {
+        let by_ip = state.abuse_guard.resolve_limit(
             "api.deploy.create.ip",
-            addr.ip(),
-            "deploy",
+            Some(payload.project_id),
             45,
             Duration::from_secs(10 * 60),
             Some(30),
-        ),
-    )
-    .await?;
-    enforce_abuse_limit(
-        &state,
-        AbuseLimit {
-            scope: "api.deploy.create.user",
-            actor_key: format!("user:{}", auth_user.user_id),
-            bucket_key: format!("scope:api.deploy.create.user:user:{}", auth_user.user_id),
-            limit: 20,
-            window: Duration::from_secs(10 * 60),
-            challenge_after: Some(12),
-        },
-    )
-    .await?;
+        );
+        if by_ip.enabled {
+            enforce_abuse_limit(
+                &state,
+                AbuseLimit::per_ip(
+                    "api.deploy.create.ip",
+                    addr.ip(),
+                    "deploy",
+                    by_ip.limit,
+                    by_ip.window,
+                    by_ip.challenge_after,
+                ),
+            )
+            .await?;
+        }
+
+        let by_user = state.abuse_guard.resolve_limit(
+            "api.deploy.create.user",
+            Some(payload.project_id),
+            20,
+            Duration::from_secs(10 * 60),
+            Some(12),
+        );
+        if by_user.enabled {
+            enforce_abuse_limit(
+                &state,
+                AbuseLimit {
+                    scope: "api.deploy.create.user",
+                    actor_key: format!("user:{}", auth_user.user_id),
+                    bucket_key: format!("scope:api.deploy.create.user:user:{}", auth_user.user_id),
+                    limit: by_user.limit,
+                    window: by_user.window,
+                    challenge_after: by_user.challenge_after,
+                },
+            )
+            .await?;
+        }
+    }
 
     let project =
         projects::get_project_for_user(&state.pool, payload.project_id, auth_user.user_id)
@@ -189,25 +211,36 @@ pub async fn create_deployment(
 pub async fn package_deployment(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     auth_user: AuthUser,
     Path(deployment_id): Path<Uuid>,
 ) -> AppResult<(StatusCode, Json<PackageDeploymentResponse>)> {
-    enforce_abuse_limit(
-        &state,
-        AbuseLimit::per_ip(
-            "api.deploy.package.ip",
-            addr.ip(),
-            "package",
-            60,
-            Duration::from_secs(60 * 60),
-            Some(40),
-        ),
-    )
-    .await?;
-
     let deployment = deployments::get_deployment_for_user(&state.pool, deployment_id, auth_user.user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("deployment not found".into()))?;
+    if !state.abuse_guard.is_trusted_request(addr.ip(), &headers) {
+        let by_ip = state.abuse_guard.resolve_limit(
+            "api.deploy.package.ip",
+            Some(deployment.project_id),
+            60,
+            Duration::from_secs(60 * 60),
+            Some(40),
+        );
+        if by_ip.enabled {
+            enforce_abuse_limit(
+                &state,
+                AbuseLimit::per_ip(
+                    "api.deploy.package.ip",
+                    addr.ip(),
+                    "package",
+                    by_ip.limit,
+                    by_ip.window,
+                    by_ip.challenge_after,
+                ),
+            )
+            .await?;
+        }
+    }
     if deployment.status != "ready" && deployment.status != "suspended" {
         return Err(AppError::Conflict(
             "only ready/suspended deployments can be packaged".into(),

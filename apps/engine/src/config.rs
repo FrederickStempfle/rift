@@ -88,6 +88,42 @@ pub struct Config {
     #[arg(long, env = "RIFT_REDIS_URL", default_value = "redis://127.0.0.1:6379")]
     pub redis_url: String,
 
+    /// Comma-separated trusted IP/CIDR ranges that bypass abuse controls.
+    #[arg(long, env = "RIFT_ABUSE_ALLOWLIST_CIDRS", default_value = "")]
+    pub abuse_allowlist_cidrs: String,
+
+    /// Optional bypass token accepted in `RIFT_ABUSE_BYPASS_HEADER`.
+    #[arg(long, env = "RIFT_ABUSE_BYPASS_TOKEN")]
+    pub abuse_bypass_token: Option<String>,
+
+    /// Header name carrying optional abuse bypass token.
+    #[arg(
+        long,
+        env = "RIFT_ABUSE_BYPASS_HEADER",
+        default_value = "x-rift-abuse-bypass"
+    )]
+    pub abuse_bypass_header: String,
+
+    /// Optional JSON array with per-scope/per-project abuse limit overrides.
+    #[arg(long, env = "RIFT_ABUSE_LIMIT_OVERRIDES_JSON")]
+    pub abuse_limit_overrides_json: Option<String>,
+
+    /// Challenge cookie TTL in seconds.
+    #[arg(long, env = "RIFT_ABUSE_CHALLENGE_TTL_SECS", default_value_t = 900)]
+    pub abuse_challenge_ttl_secs: u64,
+
+    /// Enable crawler reverse+forward DNS verification bypass.
+    #[arg(long, env = "RIFT_ABUSE_BOT_VERIFY", default_value_t = true)]
+    pub abuse_bot_verify: bool,
+
+    /// Crawler verification cache TTL in seconds.
+    #[arg(
+        long,
+        env = "RIFT_ABUSE_BOT_VERIFY_CACHE_SECS",
+        default_value_t = 600
+    )]
+    pub abuse_bot_verify_cache_secs: u64,
+
     /// Unique worker ID for this engine instance. Auto-generated if not set.
     #[arg(long, env = "RIFT_WORKER_ID")]
     pub worker_id: Option<String>,

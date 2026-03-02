@@ -104,18 +104,29 @@ pub async fn register(
     jar: CookieJar,
     Json(payload): Json<RegisterRequest>,
 ) -> AppResult<(StatusCode, CookieJar, Json<AuthResponse>)> {
-    enforce_abuse_limit(
-        &state,
-        AbuseLimit::per_ip(
+    if !state.abuse_guard.is_trusted_request(addr.ip(), &headers) {
+        let cfg = state.abuse_guard.resolve_limit(
             "api.auth.register",
-            addr.ip(),
-            "register",
+            None,
             12,
             Duration::from_secs(60 * 60),
             Some(6),
-        ),
-    )
-    .await?;
+        );
+        if cfg.enabled {
+            enforce_abuse_limit(
+                &state,
+                AbuseLimit::per_ip(
+                    "api.auth.register",
+                    addr.ip(),
+                    "register",
+                    cfg.limit,
+                    cfg.window,
+                    cfg.challenge_after,
+                ),
+            )
+            .await?;
+        }
+    }
 
     let email = payload.email.trim().to_ascii_lowercase();
     validation::validate_email(&email)?;
@@ -158,30 +169,51 @@ pub async fn login(
     validation::validate_email(&email)?;
     validation::validate_password(&payload.password)?;
 
-    enforce_abuse_limit(
-        &state,
-        AbuseLimit::per_ip(
+    if !state.abuse_guard.is_trusted_request(addr.ip(), &headers) {
+        let by_ip = state.abuse_guard.resolve_limit(
             "api.auth.login.ip",
-            addr.ip(),
-            "login",
+            None,
             30,
             Duration::from_secs(15 * 60),
             Some(18),
-        ),
-    )
-    .await?;
-    enforce_abuse_limit(
-        &state,
-        AbuseLimit {
-            scope: "api.auth.login.email",
-            actor_key: format!("ip:{}", addr.ip()),
-            bucket_key: format!("scope:api.auth.login.email:email:{email}"),
-            limit: 8,
-            window: Duration::from_secs(15 * 60),
-            challenge_after: Some(5),
-        },
-    )
-    .await?;
+        );
+        if by_ip.enabled {
+            enforce_abuse_limit(
+                &state,
+                AbuseLimit::per_ip(
+                    "api.auth.login.ip",
+                    addr.ip(),
+                    "login",
+                    by_ip.limit,
+                    by_ip.window,
+                    by_ip.challenge_after,
+                ),
+            )
+            .await?;
+        }
+
+        let by_email = state.abuse_guard.resolve_limit(
+            "api.auth.login.email",
+            None,
+            8,
+            Duration::from_secs(15 * 60),
+            Some(5),
+        );
+        if by_email.enabled {
+            enforce_abuse_limit(
+                &state,
+                AbuseLimit {
+                    scope: "api.auth.login.email",
+                    actor_key: format!("ip:{}", addr.ip()),
+                    bucket_key: format!("scope:api.auth.login.email:email:{email}"),
+                    limit: by_email.limit,
+                    window: by_email.window,
+                    challenge_after: by_email.challenge_after,
+                },
+            )
+            .await?;
+        }
+    }
 
     let maybe_user = users::find_user_by_email(&state.pool, &email).await?;
     let verified = state.password_service.verify_or_dummy(

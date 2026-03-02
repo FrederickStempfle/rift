@@ -1,4 +1,8 @@
-use std::{convert::Infallible, net::SocketAddr, time::Duration};
+use std::{
+    convert::Infallible,
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
 
 use bytes::{Bytes, BytesMut};
 use http_body_util::{BodyExt, Full};
@@ -26,6 +30,8 @@ const PROXY_ROUTE_LIMIT: u64 = 600;
 const PROXY_ROUTE_CHALLENGE: u64 = 420;
 const PROXY_TOKEN_LIMIT: u64 = 900;
 const PROXY_TOKEN_CHALLENGE: u64 = 650;
+const PROXY_PROJECT_LIMIT: u64 = 700;
+const PROXY_PROJECT_CHALLENGE: u64 = 500;
 
 const HOP_BY_HOP: &[&str] = &[
     "connection",
@@ -103,57 +109,95 @@ async fn route_and_forward(
     let host = extract_host(req.headers()).ok_or(RouteError::Status(StatusCode::BAD_REQUEST, None))?;
     let client_ip = remote_addr.ip();
     let path_bucket = route_bucket(req.uri().path());
-
-    if let Some(response) = enforce_proxy_limit(
-        state,
-        AbuseLimit::per_ip(
+    let trusted = state
+        .abuse_guard
+        .should_bypass_proxy_limits(client_ip, req.headers())
+        .await;
+    if !trusted {
+        let global = state.abuse_guard.resolve_limit(
             "proxy.global_ip",
-            client_ip,
-            "global",
+            None,
             PROXY_GLOBAL_LIMIT,
             Duration::from_secs(10),
             Some(PROXY_GLOBAL_CHALLENGE),
-        ),
-    )
-    .await
-    .map_err(|e| RouteError::Status(map_app_error(e), None))?
-    {
-        return Err(RouteError::Response(response, None));
-    }
+        );
+        if global.enabled {
+            if let Some(response) = enforce_proxy_limit(
+                state,
+                AbuseLimit::per_ip(
+                    "proxy.global_ip",
+                    client_ip,
+                    "global",
+                    global.limit,
+                    global.window,
+                    global.challenge_after,
+                ),
+                client_ip,
+                req.headers(),
+            )
+            .await
+            .map_err(|e| RouteError::Status(map_app_error(e), None))?
+            {
+                return Err(RouteError::Response(response, None));
+            }
+        }
 
-    if let Some(response) = enforce_proxy_limit(
-        state,
-        AbuseLimit::per_ip(
+        let route = state.abuse_guard.resolve_limit(
             "proxy.route_ip",
-            client_ip,
-            format!("route:{host}:{path_bucket}"),
+            None,
             PROXY_ROUTE_LIMIT,
             Duration::from_secs(10),
             Some(PROXY_ROUTE_CHALLENGE),
-        ),
-    )
-    .await
-    .map_err(|e| RouteError::Status(map_app_error(e), None))?
-    {
-        return Err(RouteError::Response(response, None));
-    }
+        );
+        if route.enabled {
+            if let Some(response) = enforce_proxy_limit(
+                state,
+                AbuseLimit::per_ip(
+                    "proxy.route_ip",
+                    client_ip,
+                    format!("route:{host}:{path_bucket}"),
+                    route.limit,
+                    route.window,
+                    route.challenge_after,
+                ),
+                client_ip,
+                req.headers(),
+            )
+            .await
+            .map_err(|e| RouteError::Status(map_app_error(e), None))?
+            {
+                return Err(RouteError::Response(response, None));
+            }
+        }
 
-    if let Some(token_fingerprint) = bearer_fingerprint(req.headers()) {
-        if let Some(response) = enforce_proxy_limit(
-            state,
-            AbuseLimit {
-                scope: "proxy.token",
-                actor_key: format!("token:{token_fingerprint}"),
-                bucket_key: format!("scope:proxy.token:token:{token_fingerprint}"),
-                limit: PROXY_TOKEN_LIMIT,
-                window: Duration::from_secs(10),
-                challenge_after: Some(PROXY_TOKEN_CHALLENGE),
-            },
-        )
-        .await
-        .map_err(|e| RouteError::Status(map_app_error(e), None))?
-        {
-            return Err(RouteError::Response(response, None));
+        if let Some(token_fingerprint) = bearer_fingerprint(req.headers()) {
+            let token = state.abuse_guard.resolve_limit(
+                "proxy.token",
+                None,
+                PROXY_TOKEN_LIMIT,
+                Duration::from_secs(10),
+                Some(PROXY_TOKEN_CHALLENGE),
+            );
+            if token.enabled {
+                if let Some(response) = enforce_proxy_limit(
+                    state,
+                    AbuseLimit {
+                        scope: "proxy.token",
+                        actor_key: format!("token:{token_fingerprint}"),
+                        bucket_key: format!("scope:proxy.token:token:{token_fingerprint}"),
+                        limit: token.limit,
+                        window: token.window,
+                        challenge_after: token.challenge_after,
+                    },
+                    client_ip,
+                    req.headers(),
+                )
+                .await
+                .map_err(|e| RouteError::Status(map_app_error(e), None))?
+                {
+                    return Err(RouteError::Response(response, None));
+                }
+            }
         }
     }
 
@@ -163,6 +207,36 @@ async fn route_and_forward(
         .ok_or(RouteError::Status(StatusCode::NOT_FOUND, None))?;
 
     let pid = Some(project_id);
+
+    if !trusted {
+        let project = state.abuse_guard.resolve_limit(
+            "proxy.project_ip",
+            Some(project_id),
+            PROXY_PROJECT_LIMIT,
+            Duration::from_secs(10),
+            Some(PROXY_PROJECT_CHALLENGE),
+        );
+        if project.enabled {
+            if let Some(response) = enforce_proxy_limit(
+                state,
+                AbuseLimit::per_ip(
+                    "proxy.project_ip",
+                    client_ip,
+                    format!("project:{project_id}"),
+                    project.limit,
+                    project.window,
+                    project.challenge_after,
+                ),
+                client_ip,
+                req.headers(),
+            )
+            .await
+            .map_err(|e| RouteError::Status(map_app_error(e), pid))?
+            {
+                return Err(RouteError::Response(response, pid));
+            }
+        }
+    }
 
     // Firewall check
     let allowed = state
@@ -379,15 +453,18 @@ pub(crate) fn match_subdomain<'a>(host: &'a str, base_domain: &str) -> Option<&'
 async fn enforce_proxy_limit(
     state: &AppState,
     limit: AbuseLimit,
+    client_ip: IpAddr,
+    headers: &HeaderMap,
 ) -> Result<Option<Response<Full<Bytes>>>, AppError> {
     match state.abuse_guard.enforce(limit).await? {
         AbuseDecision::Allow => Ok(None),
         AbuseDecision::Challenge {
             retry_after_secs,
             reason,
-        } => Ok(Some(proxy_abuse_response(
-            StatusCode::FORBIDDEN,
-            "challenge",
+        } => Ok(Some(proxy_challenge_response(
+            state,
+            client_ip,
+            headers,
             retry_after_secs,
             &reason,
         ))),
@@ -402,6 +479,33 @@ async fn enforce_proxy_limit(
             &reason,
         ))),
     }
+}
+
+fn proxy_challenge_response(
+    state: &AppState,
+    client_ip: IpAddr,
+    headers: &HeaderMap,
+    retry_after_secs: u64,
+    reason: &str,
+) -> Response<Full<Bytes>> {
+    let set_cookie = state.abuse_guard.build_challenge_set_cookie(
+        client_ip,
+        headers,
+        state.config.proxy_scheme == "https",
+    );
+    let body = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Verify</title></head><body><h1>Verification required</h1><p>{reason}</p><p>Retry in {retry_after_secs}s.</p><script>setTimeout(()=>location.reload(),1200);</script></body></html>"
+    );
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header("content-type", "text/html; charset=utf-8")
+        .header("cache-control", "no-store")
+        .header("retry-after", retry_after_secs.to_string())
+        .header("x-rift-abuse-action", "challenge")
+        .header("x-rift-challenge", "required")
+        .header("set-cookie", set_cookie)
+        .body(Full::new(Bytes::from(body)))
+        .unwrap_or_else(|_| error_response(StatusCode::FORBIDDEN))
 }
 
 fn proxy_abuse_response(

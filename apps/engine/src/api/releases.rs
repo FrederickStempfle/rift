@@ -2,7 +2,7 @@ use std::{net::SocketAddr, time::Duration};
 
 use axum::{
     extract::{ConnectInfo, Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::{get, post},
     Json, Router,
 };
@@ -63,25 +63,36 @@ pub async fn list_releases(
 pub async fn promote_release(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     auth_user: AuthUser,
     Path(release_id): Path<Uuid>,
 ) -> AppResult<Json<ReleaseResponse>> {
-    enforce_abuse_limit(
-        &state,
-        AbuseLimit::per_ip(
-            "api.release.promote.ip",
-            addr.ip(),
-            "promote",
-            40,
-            Duration::from_secs(30 * 60),
-            Some(25),
-        ),
-    )
-    .await?;
-
     let release = edge::get_release_for_user(&state.pool, release_id, auth_user.user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("release not found".into()))?;
+    if !state.abuse_guard.is_trusted_request(addr.ip(), &headers) {
+        let by_ip = state.abuse_guard.resolve_limit(
+            "api.release.promote.ip",
+            Some(release.project_id),
+            40,
+            Duration::from_secs(30 * 60),
+            Some(25),
+        );
+        if by_ip.enabled {
+            enforce_abuse_limit(
+                &state,
+                AbuseLimit::per_ip(
+                    "api.release.promote.ip",
+                    addr.ip(),
+                    "promote",
+                    by_ip.limit,
+                    by_ip.window,
+                    by_ip.challenge_after,
+                ),
+            )
+            .await?;
+        }
+    }
 
     let promoted = edge::mark_release_promoted(&state.pool, release.id)
         .await?
@@ -112,25 +123,36 @@ pub async fn promote_release(
 pub async fn rollback_release(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     auth_user: AuthUser,
     Path(release_id): Path<Uuid>,
 ) -> AppResult<(StatusCode, Json<ReleaseResponse>)> {
-    enforce_abuse_limit(
-        &state,
-        AbuseLimit::per_ip(
-            "api.release.rollback.ip",
-            addr.ip(),
-            "rollback",
-            30,
-            Duration::from_secs(30 * 60),
-            Some(20),
-        ),
-    )
-    .await?;
-
     let release = edge::get_release_for_user(&state.pool, release_id, auth_user.user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("release not found".into()))?;
+    if !state.abuse_guard.is_trusted_request(addr.ip(), &headers) {
+        let by_ip = state.abuse_guard.resolve_limit(
+            "api.release.rollback.ip",
+            Some(release.project_id),
+            30,
+            Duration::from_secs(30 * 60),
+            Some(20),
+        );
+        if by_ip.enabled {
+            enforce_abuse_limit(
+                &state,
+                AbuseLimit::per_ip(
+                    "api.release.rollback.ip",
+                    addr.ip(),
+                    "rollback",
+                    by_ip.limit,
+                    by_ip.window,
+                    by_ip.challenge_after,
+                ),
+            )
+            .await?;
+        }
+    }
 
     let rolled_back = edge::mark_release_rollback(&state.pool, release.id)
         .await?

@@ -5,16 +5,24 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use hickory_resolver::Resolver;
+use hmac::{Hmac, Mac};
+use http::HeaderMap;
+use ipnet::IpNet;
 use redis::AsyncCommands;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use crate::{config::Config, error::AppError, metrics};
 
 const STRIKE_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+const DEFAULT_BYPASS_HEADER: &str = "x-rift-abuse-bypass";
+const CHALLENGE_COOKIE_NAME: &str = "rift_abuse_challenge";
 
 #[derive(Debug, Clone)]
 pub struct AbuseLimit {
@@ -62,12 +70,6 @@ pub enum AbuseDecision {
     },
 }
 
-impl AbuseDecision {
-    pub fn is_allow(&self) -> bool {
-        matches!(self, Self::Allow)
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct AbuseScopeStats {
     pub scope: String,
@@ -87,10 +89,20 @@ pub struct AbuseSnapshot {
     pub scopes: Vec<AbuseScopeStats>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ResolvedLimit {
+    pub enabled: bool,
+    pub limit: u64,
+    pub window: Duration,
+    pub challenge_after: Option<u64>,
+}
+
 #[derive(Clone)]
 pub struct AbuseGuard {
     backend: Backend,
     telemetry: Arc<Telemetry>,
+    settings: Arc<AbuseSettings>,
+    crawler_verifier: Option<CrawlerVerifier>,
 }
 
 #[derive(Clone)]
@@ -145,10 +157,67 @@ struct LocalStrike {
     count: u64,
 }
 
+#[derive(Debug, Clone)]
+struct AbuseSettings {
+    allowlist_cidrs: Vec<IpNet>,
+    bypass_header: String,
+    bypass_token: Option<String>,
+    challenge_ttl: Duration,
+    bot_verify_enabled: bool,
+    bot_verify_cache_ttl: Duration,
+    limit_overrides: Vec<LimitOverride>,
+    challenge_secret: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LimitOverride {
+    scope: String,
+    #[serde(default)]
+    project_id: Option<Uuid>,
+    #[serde(default)]
+    limit: Option<u64>,
+    #[serde(default)]
+    window_secs: Option<u64>,
+    #[serde(default)]
+    challenge_after: Option<u64>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+#[derive(Clone)]
+struct CrawlerVerifier {
+    resolver: Resolver,
+    cache: Arc<RwLock<HashMap<String, BotCacheEntry>>>,
+    ttl: Duration,
+}
+
+#[derive(Clone, Copy)]
+struct BotCacheEntry {
+    verified: bool,
+    expires_at: Instant,
+}
+
 impl AbuseGuard {
     pub fn new(config: &Config) -> Self {
         let telemetry = Arc::new(Telemetry::default());
         let local = Arc::new(LocalState::default());
+        let settings = Arc::new(AbuseSettings::from_config(config));
+
+        let crawler_verifier = if settings.bot_verify_enabled {
+            match Resolver::builder_tokio() {
+                Ok(builder) => Some(CrawlerVerifier {
+                    resolver: builder.build(),
+                    cache: Arc::new(RwLock::new(HashMap::new())),
+                    ttl: settings.bot_verify_cache_ttl,
+                }),
+                Err(error) => {
+                    tracing::warn!(error = %error, "failed to initialize crawler DNS verifier");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         if config.state_store == "redis" {
             match redis::Client::open(config.redis_url.clone()) {
@@ -159,6 +228,8 @@ impl AbuseGuard {
                             fallback: local,
                         },
                         telemetry,
+                        settings,
+                        crawler_verifier,
                     };
                 }
                 Err(error) => {
@@ -173,16 +244,116 @@ impl AbuseGuard {
         Self {
             backend: Backend::Local { state: local },
             telemetry,
+            settings,
+            crawler_verifier,
         }
     }
 
     pub fn local_for_tests() -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"test-challenge-secret");
+        let settings = AbuseSettings {
+            allowlist_cidrs: Vec::new(),
+            bypass_header: DEFAULT_BYPASS_HEADER.to_owned(),
+            bypass_token: None,
+            challenge_ttl: Duration::from_secs(900),
+            bot_verify_enabled: false,
+            bot_verify_cache_ttl: Duration::from_secs(600),
+            limit_overrides: Vec::new(),
+            challenge_secret: hasher.finalize().to_vec(),
+        };
+
         Self {
             backend: Backend::Local {
                 state: Arc::new(LocalState::default()),
             },
             telemetry: Arc::new(Telemetry::default()),
+            settings: Arc::new(settings),
+            crawler_verifier: None,
         }
+    }
+
+    pub fn redis_for_tests(redis_url: &str) -> Result<Self, AppError> {
+        let mut guard = Self::local_for_tests();
+        let client = redis::Client::open(redis_url)
+            .map_err(|e| AppError::Internal(format!("redis init failed: {e}")))?;
+        guard.backend = Backend::Redis {
+            client,
+            fallback: Arc::new(LocalState::default()),
+        };
+        Ok(guard)
+    }
+
+    pub fn resolve_limit(
+        &self,
+        scope: &str,
+        project_id: Option<Uuid>,
+        default_limit: u64,
+        default_window: Duration,
+        default_challenge_after: Option<u64>,
+    ) -> ResolvedLimit {
+        let mut resolved = ResolvedLimit {
+            enabled: true,
+            limit: default_limit,
+            window: default_window,
+            challenge_after: default_challenge_after,
+        };
+
+        for override_cfg in &self.settings.limit_overrides {
+            if override_cfg.scope != scope {
+                continue;
+            }
+            match (override_cfg.project_id, project_id) {
+                (Some(override_project), Some(target_project)) if override_project == target_project => {}
+                (Some(_), _) => continue,
+                (None, _) => {}
+            }
+
+            if let Some(enabled) = override_cfg.enabled {
+                resolved.enabled = enabled;
+            }
+            if let Some(limit) = override_cfg.limit {
+                resolved.limit = limit;
+            }
+            if let Some(window_secs) = override_cfg.window_secs {
+                resolved.window = Duration::from_secs(window_secs.max(1));
+            }
+            if let Some(challenge_after) = override_cfg.challenge_after {
+                resolved.challenge_after = Some(challenge_after);
+            }
+        }
+
+        resolved
+    }
+
+    pub fn is_trusted_request(&self, client_ip: IpAddr, headers: &HeaderMap) -> bool {
+        self.is_allowlisted_ip(client_ip) || self.has_bypass_token(headers)
+    }
+
+    pub async fn should_bypass_proxy_limits(&self, client_ip: IpAddr, headers: &HeaderMap) -> bool {
+        if self.is_trusted_request(client_ip, headers) {
+            return true;
+        }
+
+        if self.has_valid_challenge_cookie(client_ip, headers) {
+            return true;
+        }
+
+        self.is_verified_crawler(client_ip, headers).await
+    }
+
+    pub fn build_challenge_set_cookie(&self, client_ip: IpAddr, headers: &HeaderMap, secure: bool) -> String {
+        let token = self.issue_challenge_token(client_ip, headers);
+        let mut cookie = format!(
+            "{}={}; Max-Age={}; Path=/; HttpOnly; SameSite=Lax",
+            CHALLENGE_COOKIE_NAME,
+            token,
+            self.settings.challenge_ttl.as_secs().max(1)
+        );
+        if secure {
+            cookie.push_str("; Secure");
+        }
+        cookie
     }
 
     pub async fn enforce(&self, limit: AbuseLimit) -> Result<AbuseDecision, AppError> {
@@ -194,7 +365,7 @@ impl AbuseGuard {
                 reason: "temporary network ban active".to_owned(),
                 tier: "existing".to_owned(),
             };
-            self.record(&limit.scope, &decision).await;
+            self.record(limit.scope, &decision).await;
             return Ok(decision);
         }
 
@@ -272,6 +443,88 @@ impl AbuseGuard {
         }
     }
 
+    fn is_allowlisted_ip(&self, client_ip: IpAddr) -> bool {
+        self.settings
+            .allowlist_cidrs
+            .iter()
+            .any(|cidr| cidr.contains(&client_ip))
+    }
+
+    fn has_bypass_token(&self, headers: &HeaderMap) -> bool {
+        let Some(expected) = self.settings.bypass_token.as_deref() else {
+            return false;
+        };
+
+        let Some(value) = headers
+            .get(self.settings.bypass_header.as_str())
+            .and_then(|v| v.to_str().ok())
+        else {
+            return false;
+        };
+
+        constant_time_eq(expected.as_bytes(), value.as_bytes())
+    }
+
+    async fn is_verified_crawler(&self, client_ip: IpAddr, headers: &HeaderMap) -> bool {
+        let Some(verifier) = &self.crawler_verifier else {
+            return false;
+        };
+
+        let Some(user_agent) = headers
+            .get(http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+        else {
+            return false;
+        };
+
+        verifier.verify(client_ip, user_agent).await
+    }
+
+    fn issue_challenge_token(&self, client_ip: IpAddr, headers: &HeaderMap) -> String {
+        let window = current_window(self.settings.challenge_ttl);
+        let ua_hash = user_agent_hash(headers);
+        let sig = self.sign_challenge(client_ip, &ua_hash, window);
+        format!("{window}:{sig}")
+    }
+
+    fn has_valid_challenge_cookie(&self, client_ip: IpAddr, headers: &HeaderMap) -> bool {
+        let Some(cookie_value) = extract_cookie(headers, CHALLENGE_COOKIE_NAME) else {
+            return false;
+        };
+
+        let mut parts = cookie_value.split(':');
+        let Some(window_raw) = parts.next() else {
+            return false;
+        };
+        let Some(sig) = parts.next() else {
+            return false;
+        };
+        if parts.next().is_some() {
+            return false;
+        }
+
+        let Ok(window) = window_raw.parse::<u64>() else {
+            return false;
+        };
+
+        let current = current_window(self.settings.challenge_ttl);
+        if window > current || current.saturating_sub(window) > 1 {
+            return false;
+        }
+
+        let ua_hash = user_agent_hash(headers);
+        let expected_sig = self.sign_challenge(client_ip, &ua_hash, window);
+        constant_time_eq(expected_sig.as_bytes(), sig.as_bytes())
+    }
+
+    fn sign_challenge(&self, client_ip: IpAddr, ua_hash: &str, window: u64) -> String {
+        let mut mac = Hmac::<Sha256>::new_from_slice(&self.settings.challenge_secret)
+            .expect("HMAC accepts any key length");
+        mac.update(format!("{client_ip}|{ua_hash}|{window}").as_bytes());
+        let bytes = mac.finalize().into_bytes();
+        hex::encode(bytes)
+    }
+
     async fn record(&self, scope: &str, decision: &AbuseDecision) {
         let action = match decision {
             AbuseDecision::Allow => {
@@ -279,7 +532,9 @@ impl AbuseGuard {
                 "allow"
             }
             AbuseDecision::Challenge { .. } => {
-                self.telemetry.challenged_total.fetch_add(1, Ordering::Relaxed);
+                self.telemetry
+                    .challenged_total
+                    .fetch_add(1, Ordering::Relaxed);
                 "challenge"
             }
             AbuseDecision::Block { .. } => {
@@ -306,18 +561,16 @@ impl AbuseGuard {
     ) -> Result<(u64, u64), anyhow::Error> {
         match &self.backend {
             Backend::Local { state } => Ok(state.incr_counter(key, window).await),
-            Backend::Redis { client, fallback } => {
-                match redis_incr_counter(client, key, window).await {
-                    Ok(item) => Ok(item),
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            "redis counter update failed; falling back to local abuse state"
-                        );
-                        Ok(fallback.incr_counter(key, window).await)
-                    }
+            Backend::Redis { client, fallback } => match redis_incr_counter(client, key, window).await {
+                Ok(item) => Ok(item),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "redis counter update failed; falling back to local abuse state"
+                    );
+                    Ok(fallback.incr_counter(key, window).await)
                 }
-            }
+            },
         }
     }
 
@@ -370,6 +623,41 @@ impl AbuseGuard {
                     fallback.ban_ttl_secs(actor_key).await
                 }
             },
+        }
+    }
+}
+
+impl AbuseSettings {
+    fn from_config(config: &Config) -> Self {
+        let allowlist_cidrs = parse_allowlist(&config.abuse_allowlist_cidrs);
+        let bypass_header = config
+            .abuse_bypass_header
+            .trim()
+            .to_ascii_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect::<String>();
+        let bypass_header = if bypass_header.is_empty() {
+            DEFAULT_BYPASS_HEADER.to_owned()
+        } else {
+            bypass_header
+        };
+
+        let limit_overrides = parse_limit_overrides(config.abuse_limit_overrides_json.as_deref());
+
+        let mut hasher = Sha256::new();
+        hasher.update(config.master_key.as_bytes());
+        hasher.update(b"rift-abuse-challenge");
+
+        Self {
+            allowlist_cidrs,
+            bypass_header,
+            bypass_token: config.abuse_bypass_token.clone(),
+            challenge_ttl: Duration::from_secs(config.abuse_challenge_ttl_secs.max(60)),
+            bot_verify_enabled: config.abuse_bot_verify,
+            bot_verify_cache_ttl: Duration::from_secs(config.abuse_bot_verify_cache_secs.max(60)),
+            limit_overrides,
+            challenge_secret: hasher.finalize().to_vec(),
         }
     }
 }
@@ -450,6 +738,93 @@ impl LocalState {
     }
 }
 
+impl CrawlerVerifier {
+    async fn verify(&self, client_ip: IpAddr, user_agent: &str) -> bool {
+        let ua = user_agent.to_ascii_lowercase();
+        let Some((cache_key, suffixes)) = crawler_rules(&ua, client_ip) else {
+            return false;
+        };
+
+        {
+            let cache = self.cache.read().await;
+            if let Some(entry) = cache.get(&cache_key) {
+                if entry.expires_at > Instant::now() {
+                    return entry.verified;
+                }
+            }
+        }
+
+        let verified = self.verify_ptr_forward(client_ip, suffixes).await;
+        let mut cache = self.cache.write().await;
+        cache.insert(
+            cache_key,
+            BotCacheEntry {
+                verified,
+                expires_at: Instant::now() + self.ttl,
+            },
+        );
+        verified
+    }
+
+    async fn verify_ptr_forward(&self, client_ip: IpAddr, valid_suffixes: &[&str]) -> bool {
+        let reverse = match self.resolver.reverse_lookup(client_ip).await {
+            Ok(result) => result,
+            Err(_) => return false,
+        };
+
+        for name in reverse.iter() {
+            let host = name.to_utf8().to_ascii_lowercase();
+            if !valid_suffixes.iter().any(|suffix| host.ends_with(suffix)) {
+                continue;
+            }
+
+            let forward = match self.resolver.lookup_ip(host.clone()).await {
+                Ok(result) => result,
+                Err(_) => continue,
+            };
+
+            if forward.iter().any(|ip| ip == client_ip) {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+fn parse_allowlist(raw: &str) -> Vec<IpNet> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .filter_map(|item| {
+            item.parse::<IpNet>()
+                .or_else(|_| item.parse::<IpAddr>().map(IpNet::from))
+                .ok()
+        })
+        .collect()
+}
+
+fn parse_limit_overrides(raw: Option<&str>) -> Vec<LimitOverride> {
+    let Some(raw_json) = raw else {
+        return Vec::new();
+    };
+
+    if raw_json.trim().is_empty() {
+        return Vec::new();
+    }
+
+    match serde_json::from_str::<Vec<LimitOverride>>(raw_json) {
+        Ok(overrides) => overrides,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to parse RIFT_ABUSE_LIMIT_OVERRIDES_JSON; ignoring overrides"
+            );
+            Vec::new()
+        }
+    }
+}
+
 fn redis_counter_key(key: &str) -> String {
     format!("rift:abuse:counter:{key}")
 }
@@ -521,31 +896,290 @@ fn ban_tier(strikes: u64) -> (Duration, &'static str) {
     }
 }
 
+fn user_agent_hash(headers: &HeaderMap) -> String {
+    let ua = headers
+        .get(http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    let mut hasher = Sha256::new();
+    hasher.update(ua.as_bytes());
+    let digest = hasher.finalize();
+    hex::encode(&digest[..8])
+}
+
+fn current_window(ttl: Duration) -> u64 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    now / ttl.as_secs().max(1)
+}
+
+fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(http::header::COOKIE)?.to_str().ok()?;
+    for pair in raw.split(';') {
+        let mut kv = pair.trim().splitn(2, '=');
+        let key = kv.next()?.trim();
+        let value = kv.next()?.trim();
+        if key == name {
+            return Some(value.to_owned());
+        }
+    }
+    None
+}
+
+fn crawler_rules(user_agent: &str, ip: IpAddr) -> Option<(String, &'static [&'static str])> {
+    let rules: &[(&str, &[&str])] = &[
+        ("googlebot", &[".googlebot.com", ".google.com"]),
+        ("bingbot", &[".search.msn.com"]),
+        ("duckduckbot", &[".duckduckgo.com"]),
+        ("yandexbot", &[".yandex.com", ".yandex.net", ".yandex.ru"]),
+    ];
+
+    for (needle, suffixes) in rules {
+        if user_agent.contains(needle) {
+            return Some((format!("{needle}:{ip}"), suffixes));
+        }
+    }
+    None
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::HeaderValue;
 
     #[tokio::test]
-    async fn escalates_to_ban_after_limit() {
+    async fn challenge_then_block_flow() {
         let guard = AbuseGuard::local_for_tests();
         let actor = "ip:127.0.0.1".to_owned();
 
-        for _ in 0..2 {
-            let decision = guard
-                .enforce(AbuseLimit {
-                    scope: "api.auth.login",
-                    actor_key: actor.clone(),
-                    bucket_key: "login:127.0.0.1".to_owned(),
-                    limit: 1,
-                    window: Duration::from_secs(60),
-                    challenge_after: None,
-                })
-                .await
-                .unwrap();
-            if matches!(decision, AbuseDecision::Block { .. }) {
-                return;
-            }
-        }
-        panic!("expected block decision after limit breach");
+        let allow = guard
+            .enforce(AbuseLimit {
+                scope: "proxy.global_ip",
+                actor_key: actor.clone(),
+                bucket_key: "scope:proxy.global_ip:test".to_owned(),
+                limit: 3,
+                window: Duration::from_secs(60),
+                challenge_after: Some(1),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(allow, AbuseDecision::Allow));
+
+        let challenged = guard
+            .enforce(AbuseLimit {
+                scope: "proxy.global_ip",
+                actor_key: actor.clone(),
+                bucket_key: "scope:proxy.global_ip:test".to_owned(),
+                limit: 3,
+                window: Duration::from_secs(60),
+                challenge_after: Some(1),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(challenged, AbuseDecision::Challenge { .. }));
+
+        let _ = guard
+            .enforce(AbuseLimit {
+                scope: "proxy.global_ip",
+                actor_key: actor.clone(),
+                bucket_key: "scope:proxy.global_ip:test".to_owned(),
+                limit: 1,
+                window: Duration::from_secs(60),
+                challenge_after: None,
+            })
+            .await
+            .unwrap();
+
+        let blocked = guard
+            .enforce(AbuseLimit {
+                scope: "proxy.global_ip",
+                actor_key: actor,
+                bucket_key: "scope:proxy.global_ip:test".to_owned(),
+                limit: 1,
+                window: Duration::from_secs(60),
+                challenge_after: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(blocked, AbuseDecision::Block { .. }));
+    }
+
+    #[test]
+    fn parses_allowlist_and_overrides() {
+        let allowlist = parse_allowlist("127.0.0.1,10.0.0.0/8,invalid");
+        assert_eq!(allowlist.len(), 2);
+
+        let overrides = parse_limit_overrides(Some(
+            r#"[{"scope":"proxy.global_ip","limit":10,"window_secs":5,"enabled":true}]"#,
+        ));
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].scope, "proxy.global_ip");
+    }
+
+    #[tokio::test]
+    async fn redis_backend_persists_ban_when_configured() {
+        let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+            return;
+        };
+
+        let guard = AbuseGuard::redis_for_tests(&redis_url).unwrap();
+        let actor = format!("ip:test-{}", Uuid::new_v4());
+        let bucket = format!("scope:test:{}", Uuid::new_v4());
+
+        let _ = guard
+            .enforce(AbuseLimit {
+                scope: "proxy.global_ip",
+                actor_key: actor.clone(),
+                bucket_key: bucket.clone(),
+                limit: 0,
+                window: Duration::from_secs(30),
+                challenge_after: None,
+            })
+            .await
+            .unwrap();
+
+        let decision = guard
+            .enforce(AbuseLimit {
+                scope: "proxy.global_ip",
+                actor_key: actor.clone(),
+                bucket_key: bucket,
+                limit: 100,
+                window: Duration::from_secs(30),
+                challenge_after: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(decision, AbuseDecision::Block { .. }));
+    }
+
+    #[tokio::test]
+    async fn redis_fallback_works_for_unreachable_backend() {
+        let mut guard = AbuseGuard::local_for_tests();
+        let bad_client = redis::Client::open("redis://127.0.0.1:1").unwrap();
+        guard.backend = Backend::Redis {
+            client: bad_client,
+            fallback: Arc::new(LocalState::default()),
+        };
+
+        let decision = guard
+            .enforce(AbuseLimit {
+                scope: "proxy.global_ip",
+                actor_key: "ip:127.0.0.1".to_owned(),
+                bucket_key: "scope:proxy.global_ip:fallback".to_owned(),
+                limit: 10,
+                window: Duration::from_secs(30),
+                challenge_after: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(decision, AbuseDecision::Allow));
+    }
+
+    #[test]
+    fn allowlist_and_bypass_token_are_trusted() {
+        let mut guard = AbuseGuard::local_for_tests();
+        let settings = AbuseSettings {
+            allowlist_cidrs: vec!["10.0.0.0/8".parse().unwrap()],
+            bypass_header: "x-rift-abuse-bypass".to_owned(),
+            bypass_token: Some("secret-token".to_owned()),
+            challenge_ttl: Duration::from_secs(900),
+            bot_verify_enabled: false,
+            bot_verify_cache_ttl: Duration::from_secs(600),
+            limit_overrides: Vec::new(),
+            challenge_secret: vec![1; 32],
+        };
+        guard.settings = Arc::new(settings);
+
+        let headers = HeaderMap::new();
+        assert!(guard.is_trusted_request("10.1.1.1".parse().unwrap(), &headers));
+
+        let mut token_headers = HeaderMap::new();
+        token_headers.insert(
+            "x-rift-abuse-bypass",
+            HeaderValue::from_static("secret-token"),
+        );
+        assert!(guard.is_trusted_request("192.0.2.3".parse().unwrap(), &token_headers));
+    }
+
+    #[test]
+    fn challenge_cookie_round_trip_validates() {
+        let guard = AbuseGuard::local_for_tests();
+        let ip: IpAddr = "203.0.113.8".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("Mozilla/5.0"),
+        );
+
+        let set_cookie = guard.build_challenge_set_cookie(ip, &headers, true);
+        let value = set_cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .trim_start_matches("rift_abuse_challenge=");
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert(
+            http::header::COOKIE,
+            HeaderValue::from_str(&format!("rift_abuse_challenge={value}")).unwrap(),
+        );
+        request_headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("Mozilla/5.0"),
+        );
+
+        assert!(guard.has_valid_challenge_cookie(ip, &request_headers));
+    }
+
+    #[test]
+    fn project_override_wins_over_global_default() {
+        let mut guard = AbuseGuard::local_for_tests();
+        let project_id = Uuid::new_v4();
+        let settings = AbuseSettings {
+            allowlist_cidrs: Vec::new(),
+            bypass_header: DEFAULT_BYPASS_HEADER.to_owned(),
+            bypass_token: None,
+            challenge_ttl: Duration::from_secs(900),
+            bot_verify_enabled: false,
+            bot_verify_cache_ttl: Duration::from_secs(600),
+            limit_overrides: vec![LimitOverride {
+                scope: "proxy.project_ip".to_owned(),
+                project_id: Some(project_id),
+                limit: Some(999),
+                window_secs: Some(22),
+                challenge_after: Some(777),
+                enabled: Some(true),
+            }],
+            challenge_secret: vec![7; 32],
+        };
+        guard.settings = Arc::new(settings);
+
+        let resolved = guard.resolve_limit(
+            "proxy.project_ip",
+            Some(project_id),
+            10,
+            Duration::from_secs(10),
+            Some(5),
+        );
+        assert_eq!(resolved.limit, 999);
+        assert_eq!(resolved.window, Duration::from_secs(22));
+        assert_eq!(resolved.challenge_after, Some(777));
     }
 }

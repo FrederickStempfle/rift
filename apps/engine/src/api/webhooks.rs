@@ -1,6 +1,8 @@
+use std::{net::SocketAddr, time::Duration};
+
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{HeaderMap, StatusCode},
     routing::post,
     Json, Router,
@@ -9,7 +11,12 @@ use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
 
-use crate::{api::AppState, db::projects, error::AppError};
+use crate::{
+    api::AppState,
+    db::projects,
+    error::AppError,
+    services::abuse::{AbuseDecision, AbuseLimit},
+};
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/github", post(handle_github_webhook))
@@ -17,6 +24,7 @@ pub fn routes() -> Router<AppState> {
 
 async fn handle_github_webhook(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
@@ -82,6 +90,30 @@ async fn handle_github_webhook(
         }
     };
 
+    if !state.abuse_guard.is_trusted_request(addr.ip(), &headers) {
+        let by_ip = state.abuse_guard.resolve_limit(
+            "api.webhook.github",
+            Some(project.id),
+            120,
+            Duration::from_secs(60),
+            Some(90),
+        );
+        if by_ip.enabled {
+            enforce_abuse_limit(
+                &state,
+                AbuseLimit::per_ip(
+                    "api.webhook.github",
+                    addr.ip(),
+                    format!("webhook:{}", project.id),
+                    by_ip.limit,
+                    by_ip.window,
+                    by_ip.challenge_after,
+                ),
+            )
+            .await?;
+        }
+    }
+
     // Verify webhook signature if project has a secret
     if let Some(secret) = &project.webhook_secret {
         let signature = headers
@@ -145,4 +177,23 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         .zip(b.iter())
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         == 0
+}
+
+async fn enforce_abuse_limit(state: &AppState, limit: AbuseLimit) -> Result<(), AppError> {
+    match state.abuse_guard.enforce(limit).await? {
+        AbuseDecision::Allow => Ok(()),
+        AbuseDecision::Challenge {
+            retry_after_secs,
+            reason,
+        } => Err(AppError::RateLimited(format!(
+            "{reason}; retry in {retry_after_secs}s"
+        ))),
+        AbuseDecision::Block {
+            retry_after_secs,
+            reason,
+            tier: _,
+        } => Err(AppError::RateLimited(format!(
+            "{reason}; retry in {retry_after_secs}s"
+        ))),
+    }
 }
