@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     config::Config,
-    db::{deployments, env_vars, models::Project, users},
+    db::{deployments, domains, env_vars, models::Project, users},
     error::AppError,
     lifecycle::{
         state_machine::DeploymentState,
@@ -22,6 +22,7 @@ use crate::{
         policy::{self, BuildPolicy},
         RuntimeKind, RuntimeLaunchSpec,
     },
+    state::{RoutingEntry, StateStore},
     validation,
     ws::LogBroadcaster,
 };
@@ -41,6 +42,7 @@ pub struct BuildManager {
     pool: sqlx::PgPool,
     config: Arc<Config>,
     runtime_backend: Arc<dyn RuntimeBackend>,
+    state_store: Arc<dyn StateStore>,
     build_root: PathBuf,
     deploy_root: PathBuf,
     concurrency: Arc<Semaphore>,
@@ -65,6 +67,7 @@ impl BuildManager {
         pool: sqlx::PgPool,
         config: Arc<Config>,
         runtime_backend: Arc<dyn RuntimeBackend>,
+        state_store: Arc<dyn StateStore>,
         build_root: PathBuf,
         deploy_root: PathBuf,
         log_broadcaster: LogBroadcaster,
@@ -83,6 +86,7 @@ impl BuildManager {
             pool,
             config,
             runtime_backend,
+            state_store,
             build_root,
             deploy_root,
             concurrency: Arc::new(Semaphore::new(max_concurrent)),
@@ -1283,6 +1287,49 @@ impl BuildManager {
             "runtime",
         )
         .await?;
+
+        // Publish routing entries for all project domains so the proxy picks up
+        // the new deployment immediately without waiting for a cache miss.
+        match domains::list_domains_for_project(&self.pool, project.id).await {
+            Ok(project_domains) => {
+                for domain in project_domains {
+                    let entry = RoutingEntry {
+                        host: domain.domain.clone(),
+                        project_id: project.id,
+                        deployment_id,
+                        worker_addr: self.config.proxy_addr(),
+                        version: 1,
+                    };
+                    if let Err(e) = self.state_store.set_routing(&entry).await {
+                        tracing::warn!(
+                            host = %domain.domain,
+                            error = %e,
+                            "failed to persist routing entry after build"
+                        );
+                    }
+                    if let Err(e) = self.state_store.publish_routing_update(&entry).await {
+                        tracing::warn!(
+                            host = %domain.domain,
+                            error = %e,
+                            "failed to publish routing update after build"
+                        );
+                    } else {
+                        tracing::info!(
+                            host = %domain.domain,
+                            deployment_id = %deployment_id,
+                            "routing update published after build"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    project_id = %project.id,
+                    error = %e,
+                    "failed to fetch domains for routing update after build"
+                );
+            }
+        }
 
         // Clean up old deployments for this project
         let deploy_root = self.deploy_root.clone();

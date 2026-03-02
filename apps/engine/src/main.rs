@@ -158,16 +158,6 @@ async fn main() -> anyhow::Result<()> {
         config.waf_event_retention_days,
     );
     let log_broadcaster = LogBroadcaster::new();
-    let build_manager = BuildManager::new(
-        pool.clone(),
-        Arc::clone(&config),
-        runtime_backend.clone(),
-        config.build_root.clone().into(),
-        config.deploy_root.clone().into(),
-        log_broadcaster.clone(),
-        #[cfg(feature = "v8-isolate")]
-        isolate_pool.clone(),
-    );
 
     let public_ip = config.resolve_public_ip().await;
     match &public_ip {
@@ -225,6 +215,18 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(state::local::LocalStateStore::new())
         }
     };
+
+    let build_manager = BuildManager::new(
+        pool.clone(),
+        Arc::clone(&config),
+        runtime_backend.clone(),
+        state_store.clone(),
+        config.build_root.clone().into(),
+        config.deploy_root.clone().into(),
+        log_broadcaster.clone(),
+        #[cfg(feature = "v8-isolate")]
+        isolate_pool.clone(),
+    );
 
     let worker_id = config
         .worker_id
