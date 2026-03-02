@@ -1353,24 +1353,14 @@ impl BuildManager {
         })?;
 
         let needs_output = !content.contains("output:") && !content.contains("output =");
-        // Only inject turbotrace when there is no existing `experimental:` block
-        // to avoid creating a duplicate key that would break the config.
-        let needs_turbotrace =
-            !content.contains("turbotrace") && !content.contains("experimental:");
 
-        if !needs_output && !needs_turbotrace {
+        if !needs_output {
             return Ok(());
         }
 
-        // Build the injection string for all missing settings.
         let mut injection = String::new();
         if needs_output {
             injection.push_str("\n  output: \"standalone\",");
-        }
-        if needs_turbotrace {
-            // turbotrace is a Rust-based file tracer (~10× faster than the default
-            // JS nft) that dramatically reduces "Collecting build traces" time.
-            injection.push_str("\n  experimental: { turbotrace: {} },");
         }
 
         // Find the config object opening brace and inject right after it.
@@ -1395,19 +1385,12 @@ impl BuildManager {
             AppError::Internal(format!("failed to write {}: {e}", config_path.display()))
         })?;
 
-        let mut what = Vec::new();
-        if needs_output {
-            what.push("output: \"standalone\"");
-        }
-        if needs_turbotrace {
-            what.push("experimental.turbotrace");
-        }
         insert_and_broadcast_log(
             &self.pool,
             &self.log_broadcaster,
             deployment_id,
             "info",
-            &format!("Injected {} into next.config", what.join(", ")),
+            "Injected output: \"standalone\" into next.config",
             "build",
         )
         .await?;
