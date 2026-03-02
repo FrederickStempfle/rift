@@ -164,3 +164,16 @@ pub struct AuditLog {
     pub user_agent: Option<String>,
     pub metadata: serde_json::Value,
 }
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct AccessLog {
+    pub id: i64,
+    pub project_id: Option<Uuid>,
+    pub timestamp: DateTime<Utc>,
+    pub client_ip: String,
+    pub host: Option<String>,
+    pub method: String,
+    pub path: String,
+    pub status: i32,
+    pub duration_ms: i64,
+}

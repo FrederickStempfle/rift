@@ -35,6 +35,7 @@ use crate::{
     ws::LogBroadcaster,
 };
 
+pub mod access_logs;
 pub mod analytics;
 pub mod auth;
 pub mod deployments;
@@ -142,6 +143,7 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/firewall", firewall::routes())
         .nest("/api/webhooks", webhooks::routes())
         .route("/api/analytics", get(analytics::get_analytics))
+        .route("/api/access-logs", get(access_logs::list_access_logs))
         .route("/api/runtime/stats", get(runtime::get_runtime_stats))
         .route("/api/runtime/abuse", get(runtime::get_abuse_stats))
         .route("/api/runtime/project", get(runtime::get_project_runtime))

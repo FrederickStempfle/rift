@@ -1,19 +1,24 @@
 use std::collections::HashMap;
+use std::net::IpAddr;
 
-use chrono::{Timelike, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use sqlx::PgPool;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 #[derive(Debug)]
 pub struct RequestEvent {
-    pub project_id: Uuid,
+    pub project_id: Option<Uuid>,
+    pub timestamp: DateTime<Utc>,
+    pub client_ip: IpAddr,
+    pub host: Option<String>,
+    pub method: String,
     pub status: u16,
     pub duration_ms: u64,
     /// Whether this request triggered a cold start (worker specialization).
     pub cold_start: bool,
     /// Request path (e.g. "/api/users").
-    pub path: Option<String>,
+    pub path: String,
     /// Referrer domain (e.g. "google.com") or None for direct traffic.
     pub referer: Option<String>,
 }
@@ -51,15 +56,16 @@ async fn flush_loop(mut rx: mpsc::UnboundedReceiver<RequestEvent>, pool: PgPool)
     let mut buffer: HashMap<AnalyticsKey, AnalyticsCounters> = HashMap::new();
     let mut referrer_buffer: HashMap<ReferrerKey, i64> = HashMap::new();
     let mut path_buffer: HashMap<PathKey, PathCounters> = HashMap::new();
+    let mut access_buffer: Vec<crate::db::access_logs::NewAccessLog> = Vec::new();
 
     loop {
         interval.tick().await;
 
         // Drain all pending events
         while let Ok(event) = rx.try_recv() {
-            let now = Utc::now();
             // Truncate to hour — these unwraps are safe (0 is always valid)
-            let bucket = now
+            let bucket = event
+                .timestamp
                 .with_minute(0)
                 .unwrap()
                 .with_second(0)
@@ -68,30 +74,27 @@ async fn flush_loop(mut rx: mpsc::UnboundedReceiver<RequestEvent>, pool: PgPool)
                 .unwrap();
 
             let is_error = event.status >= 400;
+            if let Some(project_id) = event.project_id {
+                // Hourly aggregate
+                let entry = buffer.entry((project_id, bucket)).or_default();
+                entry.0 += 1;
+                if is_error {
+                    entry.1 += 1;
+                }
+                entry.2 += event.duration_ms as i64;
+                if event.cold_start {
+                    entry.3 += 1;
+                }
 
-            // Hourly aggregate
-            let entry = buffer.entry((event.project_id, bucket)).or_default();
-            entry.0 += 1;
-            if is_error {
-                entry.1 += 1;
-            }
-            entry.2 += event.duration_ms as i64;
-            if event.cold_start {
-                entry.3 += 1;
-            }
+                // Referrer aggregate
+                let referrer = event.referer.unwrap_or_else(|| "(direct)".to_owned());
+                *referrer_buffer
+                    .entry((project_id, bucket, referrer))
+                    .or_default() += 1;
 
-            // Referrer aggregate
-            let referrer = event
-                .referer
-                .unwrap_or_else(|| "(direct)".to_owned());
-            *referrer_buffer
-                .entry((event.project_id, bucket, referrer))
-                .or_default() += 1;
-
-            // Path aggregate
-            if let Some(path) = event.path {
+                // Path aggregate
                 let path_entry = path_buffer
-                    .entry((event.project_id, bucket, path))
+                    .entry((project_id, bucket, event.path.clone()))
                     .or_default();
                 path_entry.0 += 1;
                 if is_error {
@@ -99,6 +102,17 @@ async fn flush_loop(mut rx: mpsc::UnboundedReceiver<RequestEvent>, pool: PgPool)
                 }
                 path_entry.2 += event.duration_ms as i64;
             }
+
+            access_buffer.push(crate::db::access_logs::NewAccessLog {
+                project_id: event.project_id,
+                timestamp: event.timestamp,
+                client_ip: event.client_ip.to_string(),
+                host: event.host.map(|value| truncate(value, 255)),
+                method: truncate(event.method, 16),
+                path: truncate(event.path, 2048),
+                status: event.status as i32,
+                duration_ms: event.duration_ms as i64,
+            });
         }
 
         // Flush aggregated hourly buckets to DB
@@ -141,5 +155,19 @@ async fn flush_loop(mut rx: mpsc::UnboundedReceiver<RequestEvent>, pool: PgPool)
                 tracing::warn!(error = %e, "failed to flush analytics path bucket");
             }
         }
+
+        if !access_buffer.is_empty() {
+            let to_insert = std::mem::take(&mut access_buffer);
+            if let Err(e) = crate::db::access_logs::insert_batch(&pool, &to_insert).await {
+                tracing::warn!(error = %e, "failed to flush access logs");
+            }
+        }
     }
+}
+
+fn truncate(value: String, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value;
+    }
+    value.chars().take(max_chars).collect()
 }

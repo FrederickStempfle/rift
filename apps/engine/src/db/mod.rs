@@ -2,6 +2,7 @@ use sqlx::{postgres::PgPoolOptions, PgPool};
 
 use crate::error::AppError;
 
+pub mod access_logs;
 pub mod analytics;
 pub mod audit;
 pub mod deployments;

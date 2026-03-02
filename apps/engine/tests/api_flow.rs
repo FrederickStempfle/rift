@@ -46,7 +46,7 @@ impl TestServer {
 
         let pool = db::connect_and_migrate(&database_url).await?;
         sqlx::query(
-            "TRUNCATE TABLE audit_log, deploy_logs, deployments, env_vars, domains, projects, refresh_tokens, users RESTART IDENTITY CASCADE",
+            "TRUNCATE TABLE access_logs, audit_log, deploy_logs, deployments, env_vars, domains, projects, refresh_tokens, users RESTART IDENTITY CASCADE",
         )
         .execute(&pool)
         .await?;
@@ -536,6 +536,134 @@ async fn list_projects_uses_deterministic_latest_deployment_on_tied_timestamps(
             .as_str()
             .unwrap_or_default(),
         "bbb222"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn access_logs_are_user_scoped_and_queryable() -> anyhow::Result<()> {
+    let Some(server) = TestServer::start().await? else {
+        return Ok(());
+    };
+
+    let client_a = reqwest::Client::builder().cookie_store(true).build()?;
+    let client_b = reqwest::Client::builder().cookie_store(true).build()?;
+    let token_a = register_user(&client_a, &server.base_url).await?;
+    let token_b = register_user(&client_b, &server.base_url).await?;
+
+    let project_a_resp = client_a
+        .post(format!("{}/api/projects/", server.base_url))
+        .bearer_auth(&token_a)
+        .json(&json!({
+            "name": "access-logs-a",
+            "repo_url": "https://github.com/example/repo-a",
+            "subdomain": format!("access-a-{}", uuid::Uuid::new_v4().simple()),
+            "framework": "nextjs"
+        }))
+        .send()
+        .await?;
+    assert_eq!(project_a_resp.status(), StatusCode::CREATED);
+    let project_a_json: serde_json::Value = project_a_resp.json().await?;
+    let project_a = uuid::Uuid::parse_str(
+        project_a_json["id"]
+            .as_str()
+            .expect("project A id should be present"),
+    )?;
+
+    let project_b_resp = client_b
+        .post(format!("{}/api/projects/", server.base_url))
+        .bearer_auth(&token_b)
+        .json(&json!({
+            "name": "access-logs-b",
+            "repo_url": "https://github.com/example/repo-b",
+            "subdomain": format!("access-b-{}", uuid::Uuid::new_v4().simple()),
+            "framework": "nextjs"
+        }))
+        .send()
+        .await?;
+    assert_eq!(project_b_resp.status(), StatusCode::CREATED);
+    let project_b_json: serde_json::Value = project_b_resp.json().await?;
+    let project_b = uuid::Uuid::parse_str(
+        project_b_json["id"]
+            .as_str()
+            .expect("project B id should be present"),
+    )?;
+
+    let database_url = std::env::var("TEST_DATABASE_URL")?;
+    let pool = db::connect_and_migrate(&database_url).await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO access_logs (project_id, timestamp, client_ip, host, method, path, status, duration_ms)
+        VALUES
+            ($1, now() - interval '3 seconds', '1.1.1.1', 'a.localhost', 'GET', '/a/first', 200, 12),
+            ($1, now() - interval '2 seconds', '1.1.1.2', 'a.localhost', 'POST', '/a/second', 201, 18),
+            ($2, now() - interval '1 seconds', '2.2.2.2', 'b.localhost', 'GET', '/b/only', 200, 7)
+        "#,
+    )
+    .bind(project_a)
+    .bind(project_b)
+    .execute(&pool)
+    .await?;
+
+    let scoped_resp = client_a
+        .get(format!(
+            "{}/api/access-logs?project_id={}&limit=2",
+            server.base_url, project_a
+        ))
+        .bearer_auth(&token_a)
+        .send()
+        .await?;
+    assert_eq!(scoped_resp.status(), StatusCode::OK);
+    let scoped_json: serde_json::Value = scoped_resp.json().await?;
+    let scoped_logs = scoped_json["logs"]
+        .as_array()
+        .expect("logs should be an array");
+    assert_eq!(scoped_logs.len(), 2);
+    assert_eq!(
+        scoped_logs[0]["project_id"].as_str().unwrap_or_default(),
+        project_a.to_string()
+    );
+    assert_eq!(
+        scoped_logs[1]["project_id"].as_str().unwrap_or_default(),
+        project_a.to_string()
+    );
+    assert!(scoped_json["next_before_id"].is_number());
+
+    let all_resp = client_a
+        .get(format!("{}/api/access-logs?limit=10", server.base_url))
+        .bearer_auth(&token_a)
+        .send()
+        .await?;
+    assert_eq!(all_resp.status(), StatusCode::OK);
+    let all_json: serde_json::Value = all_resp.json().await?;
+    let all_logs = all_json["logs"].as_array().expect("logs should be an array");
+    assert_eq!(all_logs.len(), 2);
+    let project_a_str = project_a.to_string();
+    assert!(
+        all_logs
+            .iter()
+            .all(|entry| entry["project_id"].as_str() == Some(project_a_str.as_str()))
+    );
+
+    let forbidden_scope_resp = client_b
+        .get(format!(
+            "{}/api/access-logs?project_id={}&limit=10",
+            server.base_url, project_a
+        ))
+        .bearer_auth(&token_b)
+        .send()
+        .await?;
+    assert_eq!(forbidden_scope_resp.status(), StatusCode::OK);
+    let forbidden_scope_json: serde_json::Value = forbidden_scope_resp.json().await?;
+    assert_eq!(
+        forbidden_scope_json["logs"]
+            .as_array()
+            .expect("logs should be an array")
+            .len(),
+        0
     );
 
     Ok(())

@@ -6,6 +6,7 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
+use chrono::Utc;
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, header::HOST, HeaderMap, Request, Response, StatusCode, Uri};
 use hyper_util::client::legacy::Client;
@@ -62,6 +63,8 @@ pub async fn handle_request(
 
     // Extract analytics metadata before forwarding (req headers will be consumed)
     let analytics_path = req.uri().path().to_owned();
+    let analytics_method = req.method().as_str().to_owned();
+    let analytics_host = extract_host(req.headers());
     let analytics_referer = req
         .headers()
         .get(hyper::header::REFERER)
@@ -82,16 +85,18 @@ pub async fn handle_request(
         Err(RouteError::Response(resp, pid)) => (resp.status().as_u16(), *pid, false),
     };
 
-    if let Some(pid) = project_id {
-        state.analytics_collector.record(RequestEvent {
-            project_id: pid,
-            status: status_code,
-            duration_ms: start.elapsed().as_millis() as u64,
-            cold_start,
-            path: Some(analytics_path),
-            referer: analytics_referer,
-        });
-    }
+    state.analytics_collector.record(RequestEvent {
+        project_id,
+        timestamp: Utc::now(),
+        client_ip: remote_addr.ip(),
+        host: analytics_host,
+        method: analytics_method,
+        status: status_code,
+        duration_ms: start.elapsed().as_millis() as u64,
+        cold_start,
+        path: analytics_path,
+        referer: analytics_referer,
+    });
 
     match result {
         Ok((resp, _, _)) => Ok(resp),
