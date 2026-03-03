@@ -1285,7 +1285,7 @@ services:
       - redpanda-data:/var/lib/redpanda/data
 
   posthog-clickhouse:
-    image: clickhouse/clickhouse-server:24.8-alpine
+    image: clickhouse/clickhouse-server:25.12.5.44
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
@@ -1302,7 +1302,9 @@ services:
     volumes:
       - ./posthog/docker/clickhouse/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
       - ./posthog/docker/clickhouse/config.xml:/etc/clickhouse-server/config.xml:ro
+      - ./posthog/docker/clickhouse/config.d:/etc/clickhouse-server/config.d:ro
       - ./posthog/docker/clickhouse/users.xml:/etc/clickhouse-server/users.xml:ro
+      - ./posthog/docker/clickhouse/user_defined_function.xml:/etc/clickhouse-server/user_defined_function.xml:ro
       - clickhouse-data:/var/lib/clickhouse
       - clickhouse-logs:/var/log/clickhouse-server
 
