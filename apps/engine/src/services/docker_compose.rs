@@ -74,7 +74,7 @@ DASHBOARD_USERNAME=supabase
 DASHBOARD_PASSWORD={dashboard_password}
 SECRET_KEY_BASE={secret_key_base}
 
-POSTGRES_HOST=db
+POSTGRES_HOST=supabase-db
 POSTGRES_DB=postgres
 POSTGRES_PORT=5432
 
@@ -161,6 +161,12 @@ STUDIO_DEFAULT_PROJECT=Default
             return Err(e);
         }
 
+        // Connect engine container to the service's Docker network so the proxy
+        // can reach Supabase containers (kong, studio) by container name.
+        // The Supabase DB service is named 'supabase-db' (not 'db') to avoid
+        // DNS conflicts with the Rift DB on the engine's default network.
+        self.connect_engine_to_service_network(service_id).await;
+
         // Health check
         self.log(service_id, "info", "Waiting for Supabase to be ready...", "system")
             .await?;
@@ -171,15 +177,15 @@ STUDIO_DEFAULT_PROJECT=Default
 
         if healthy {
             // Store connection info.
-            // `internal_*_url` use host.docker.internal (the Docker host gateway)
-            // so the engine can reach Supabase containers via their published ports
-            // without joining the service's Docker network (which causes DNS conflicts).
-            // `api_url` / `studio_url` use localhost for direct user access from the VPS.
+            // `internal_*_url` use Docker container names reachable from the engine
+            // after joining the service network. Kong listens on 8000, Studio on 3000
+            // internally. `api_url`/`studio_url` use localhost published ports for
+            // direct user access from the VPS host.
             let connection_info = serde_json::json!({
                 "api_url": format!("http://localhost:{}", self.kong_port),
                 "studio_url": format!("http://localhost:{}", self.studio_port),
-                "internal_api_url": format!("http://host.docker.internal:{}", self.kong_port),
-                "internal_studio_url": format!("http://host.docker.internal:{}", self.studio_port),
+                "internal_api_url": format!("http://{}-kong-1:8000", service_id),
+                "internal_studio_url": format!("http://{}-studio-1:3000", service_id),
                 "db_connection_string": format!(
                     "postgresql://postgres:{}@localhost:{}/postgres",
                     postgres_password, self.db_port
@@ -225,6 +231,10 @@ STUDIO_DEFAULT_PROJECT=Default
         self.run_compose_command(&service_dir, &["start"], service_id)
             .await?;
 
+        // Re-ensure engine is connected to service network (may have been lost
+        // if the engine container was restarted since last deploy).
+        self.connect_engine_to_service_network(service_id).await;
+
         db_services::update_status_started(&self.pool, service_id, "running").await?;
         self.log(service_id, "info", "Supabase started.", "system")
             .await?;
@@ -266,6 +276,56 @@ STUDIO_DEFAULT_PROJECT=Default
             .await?;
 
         Ok(())
+    }
+
+    /// Connect the engine container to the Supabase service's Docker network.
+    /// This allows the proxy to forward requests to containers (kong, studio)
+    /// by their internal hostnames. The Supabase DB is named 'supabase-db' to
+    /// avoid DNS conflicts with the Rift 'db' on the engine's default network.
+    /// Silently ignores errors (e.g., already connected, not in Docker).
+    async fn connect_engine_to_service_network(&self, service_id: Uuid) {
+        // Detect our container ID from /etc/hostname (Docker sets this).
+        let hostname = match tokio::fs::read_to_string("/etc/hostname").await {
+            Ok(h) => h.trim().to_string(),
+            Err(_) => return, // Not in a container — localhost works fine in dev
+        };
+        if hostname.is_empty() {
+            return;
+        }
+
+        let network = format!("{}_default", service_id);
+        let result = tokio::process::Command::new("docker")
+            .args(["network", "connect", &network, &hostname])
+            .output()
+            .await;
+
+        match result {
+            Ok(output) if output.status.success() => {
+                self.log(
+                    service_id,
+                    "info",
+                    &format!("Connected engine to service network {network}"),
+                    "system",
+                )
+                .await
+                .ok();
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                // "already exists" means we're already connected — not an error
+                if !stderr.contains("already exists") {
+                    self.log(
+                        service_id,
+                        "warn",
+                        &format!("Could not connect to service network: {}", stderr.trim()),
+                        "system",
+                    )
+                    .await
+                    .ok();
+                }
+            }
+            Err(_) => {} // Docker command not available
+        }
     }
 
     async fn run_compose_command(
@@ -353,7 +413,7 @@ STUDIO_DEFAULT_PROJECT=Default
     async fn wait_for_health(&self, service_id: Uuid, service_dir: &Path) -> bool {
         // Check health via `docker compose ps --format json` since the engine
         // container can't reach Kong's published port on the host network.
-        let required_healthy = ["db", "kong", "auth", "realtime", "storage", "meta"];
+        let required_healthy = ["supabase-db", "kong", "auth", "realtime", "storage", "meta"];
 
         for attempt in 1..=90 {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -606,7 +666,7 @@ services:
     ports:
       - "${KONG_HTTP_PORT}:8000/tcp"
     depends_on:
-      db:
+      supabase-db:
         condition: service_healthy
     environment:
       KONG_DATABASE: "off"
@@ -631,7 +691,7 @@ services:
       interval: 5s
       retries: 3
     depends_on:
-      db:
+      supabase-db:
         condition: service_healthy
     environment:
       GOTRUE_API_HOST: 0.0.0.0
@@ -657,7 +717,7 @@ services:
     image: postgrest/postgrest:v14.0
     restart: unless-stopped
     depends_on:
-      db:
+      supabase-db:
         condition: service_healthy
     environment:
       PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
@@ -678,7 +738,7 @@ services:
       interval: 5s
       retries: 3
     depends_on:
-      db:
+      supabase-db:
         condition: service_healthy
     environment:
       PORT: "4000"
@@ -708,7 +768,7 @@ services:
       interval: 5s
       retries: 3
     depends_on:
-      db:
+      supabase-db:
         condition: service_healthy
       rest:
         condition: service_started
@@ -738,7 +798,7 @@ services:
       interval: 5s
       retries: 3
     depends_on:
-      db:
+      supabase-db:
         condition: service_healthy
     environment:
       PG_META_PORT: 8080
@@ -748,7 +808,7 @@ services:
       PG_META_DB_USER: supabase_admin
       PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
 
-  db:
+  supabase-db:
     image: supabase/postgres:15.14.1.093
     restart: unless-stopped
     healthcheck:
