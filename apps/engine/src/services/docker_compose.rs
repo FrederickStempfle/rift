@@ -119,7 +119,7 @@ STUDIO_DEFAULT_PROJECT=Default
             .map_err(|e| AppError::Internal(format!("failed to write docker-compose.yml: {e}")))?;
 
         // Write required config files
-        self.write_supabase_configs(&service_dir).await?;
+        self.write_supabase_configs(&service_dir, &anon_key, &service_role_key).await?;
 
         // Pull images
         self.log(service_id, "info", "Pulling Supabase Docker images...", "docker")
@@ -403,7 +403,7 @@ STUDIO_DEFAULT_PROJECT=Default
         .await
     }
 
-    async fn write_supabase_configs(&self, service_dir: &Path) -> Result<(), AppError> {
+    async fn write_supabase_configs(&self, service_dir: &Path, anon_key: &str, service_role_key: &str) -> Result<(), AppError> {
         // Create volumes directories that Supabase expects
         let volumes_dir = service_dir.join("volumes");
         for dir in &[
@@ -420,9 +420,11 @@ STUDIO_DEFAULT_PROJECT=Default
                 })?;
         }
 
-        // Write Kong config
-        let kong_yml = include_str!("templates/kong.yml");
-        tokio::fs::write(volumes_dir.join("api/kong.yml"), kong_yml)
+        // Write Kong config with pre-rendered keys
+        let kong_yml = include_str!("templates/kong.yml")
+            .replace("${SUPABASE_ANON_KEY}", anon_key)
+            .replace("${SUPABASE_SERVICE_KEY}", service_role_key);
+        tokio::fs::write(volumes_dir.join("api/kong.yml"), &kong_yml)
             .await
             .map_err(|e| AppError::Internal(format!("failed to write kong.yml: {e}")))?;
 
@@ -528,7 +530,7 @@ services:
   kong:
     image: kong:2.8.1
     restart: unless-stopped
-    entrypoint: bash -c 'eval "echo \"$$(cat ~/temp.yml)\"" > ~/kong.yml && /docker-entrypoint.sh kong docker-start'
+    entrypoint: bash -c 'cp ~/temp.yml ~/kong.yml && /docker-entrypoint.sh kong docker-start'
     ports:
       - "${KONG_HTTP_PORT}:8000/tcp"
     depends_on:
