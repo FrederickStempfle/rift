@@ -324,6 +324,24 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(count = restored, "restored deployments from previous run");
     }
 
+    // Reconnect engine to Docker networks of running services (e.g. Supabase)
+    // so the proxy can reach them after an engine container rebuild.
+    match rift_engine::db::services::list_running_service_ids(&state.pool).await {
+        Ok(ids) if !ids.is_empty() => {
+            for sid in &ids {
+                state
+                    .docker_compose_manager
+                    .connect_engine_to_service_network(*sid)
+                    .await;
+            }
+            tracing::info!(count = ids.len(), "reconnected to running service networks");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to list running services for network reconnect");
+        }
+    }
+
     // Restore function projects into the V8 isolate pool
     #[cfg(feature = "v8-isolate")]
     if let Some(ref isolate_pool) = state.isolate_pool {

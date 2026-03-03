@@ -91,6 +91,16 @@ pub async fn list_services_for_user(
     .map_err(AppError::Db)
 }
 
+pub async fn list_running_service_ids(pool: &PgPool) -> Result<Vec<Uuid>, AppError> {
+    let rows = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM services WHERE status = 'running'",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Db)?;
+    Ok(rows)
+}
+
 pub async fn update_status(
     pool: &PgPool,
     service_id: Uuid,

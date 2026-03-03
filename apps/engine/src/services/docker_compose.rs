@@ -283,7 +283,7 @@ STUDIO_DEFAULT_PROJECT=Default
     /// by their internal hostnames. The Supabase DB is named 'supabase-db' to
     /// avoid DNS conflicts with the Rift 'db' on the engine's default network.
     /// Silently ignores errors (e.g., already connected, not in Docker).
-    async fn connect_engine_to_service_network(&self, service_id: Uuid) {
+    pub async fn connect_engine_to_service_network(&self, service_id: Uuid) {
         // Detect our container ID from /etc/hostname (Docker sets this).
         let hostname = match tokio::fs::read_to_string("/etc/hostname").await {
             Ok(h) => h.trim().to_string(),
