@@ -524,15 +524,16 @@ impl RuntimeManager {
             }
         };
 
-        if ready.is_empty() {
-            return 0;
-        }
-
-        tracing::info!(
-            count = ready.len(),
-            "restoring deployments from previous run"
-        );
         let mut restored = 0;
+
+        if ready.is_empty() {
+            tracing::debug!("no ready deployments to restore");
+        } else {
+            tracing::info!(
+                count = ready.len(),
+                "restoring deployments from previous run"
+            );
+        }
 
         for deployment in ready {
             let workspace_dir = PathBuf::from(&config.deploy_root).join(deployment.id.to_string());
