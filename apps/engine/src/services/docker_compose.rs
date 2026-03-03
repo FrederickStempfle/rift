@@ -839,6 +839,10 @@ services:
     volumes:
       - ./volumes/db/data:/var/lib/postgresql/data:Z
       - ./volumes/db/init/99-roles.sql:/docker-entrypoint-initdb.d/init-scripts/99-roles.sql:Z
+    networks:
+      default:
+        aliases:
+          - db
 "#
     .to_string()
 }
