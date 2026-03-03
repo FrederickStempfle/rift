@@ -645,6 +645,9 @@ services:
       HOSTNAME: studio
       STUDIO_PG_META_URL: http://meta:8080
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_DB: ${POSTGRES_DB}
       DEFAULT_ORGANIZATION_NAME: ${STUDIO_DEFAULT_ORGANIZATION}
       DEFAULT_PROJECT_NAME: ${STUDIO_DEFAULT_PROJECT}
       SUPABASE_URL: http://kong:8000
@@ -839,10 +842,6 @@ services:
     volumes:
       - ./volumes/db/data:/var/lib/postgresql/data:Z
       - ./volumes/db/init/99-roles.sql:/docker-entrypoint-initdb.d/init-scripts/99-roles.sql:Z
-    networks:
-      default:
-        aliases:
-          - db
 "#
     .to_string()
 }
