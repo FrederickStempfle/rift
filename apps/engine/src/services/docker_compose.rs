@@ -166,7 +166,7 @@ STUDIO_DEFAULT_PROJECT=Default
             .await?;
 
         let healthy = self
-            .wait_for_health(service_id, &format!("http://host.docker.internal:{}", self.kong_port))
+            .wait_for_health(service_id, &service_dir)
             .await;
 
         if healthy {
@@ -344,53 +344,82 @@ STUDIO_DEFAULT_PROJECT=Default
         }
     }
 
-    async fn wait_for_health(&self, service_id: Uuid, api_url: &str) -> bool {
-        let client = reqwest::Client::new();
-        let health_url = format!("{api_url}/rest/v1/");
+    async fn wait_for_health(&self, service_id: Uuid, service_dir: &Path) -> bool {
+        // Check health via `docker compose ps --format json` since the engine
+        // container can't reach Kong's published port on the host network.
+        let required_healthy = ["db", "kong", "auth", "realtime", "storage", "meta"];
 
         for attempt in 1..=90 {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-            match client.get(&health_url).send().await {
-                Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 401 => {
-                    // 401 is expected (no auth header) but means the API is responding
-                    self.log(
-                        service_id,
-                        "info",
-                        &format!("Health check passed (attempt {attempt}/90)"),
-                        "system",
-                    )
-                    .await
-                    .ok();
-                    return true;
-                }
-                Ok(resp) => {
+            let output = tokio::process::Command::new("docker")
+                .args(["compose", "ps", "--format", "json"])
+                .current_dir(service_dir)
+                .output()
+                .await;
+
+            let output = match output {
+                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+                _ => {
                     if attempt % 10 == 0 {
                         self.log(
                             service_id,
                             "info",
-                            &format!(
-                                "Waiting for API... (attempt {attempt}/90, status: {})",
-                                resp.status()
-                            ),
+                            &format!("Waiting for services... (attempt {attempt}/90)"),
                             "system",
                         )
                         .await
                         .ok();
                     }
+                    continue;
                 }
-                Err(_) => {
-                    if attempt % 10 == 0 {
-                        self.log(
-                            service_id,
-                            "info",
-                            &format!("Waiting for API... (attempt {attempt}/90, not reachable yet)"),
-                            "system",
-                        )
-                        .await
-                        .ok();
+            };
+
+            // Parse each line as JSON, check Health field for required services
+            let mut all_healthy = true;
+            let mut found = std::collections::HashSet::new();
+            for line in output.lines() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                    let service = v["Service"].as_str().unwrap_or("");
+                    let health = v["Health"].as_str().unwrap_or("");
+                    if required_healthy.contains(&service) {
+                        found.insert(service.to_string());
+                        if health != "healthy" {
+                            all_healthy = false;
+                        }
                     }
                 }
+            }
+
+            if all_healthy && found.len() == required_healthy.len() {
+                self.log(
+                    service_id,
+                    "info",
+                    &format!("All services healthy (attempt {attempt}/90)"),
+                    "system",
+                )
+                .await
+                .ok();
+                return true;
+            }
+
+            if attempt % 10 == 0 {
+                let unhealthy: Vec<_> = required_healthy
+                    .iter()
+                    .filter(|s| !found.contains(**s))
+                    .copied()
+                    .collect();
+                self.log(
+                    service_id,
+                    "info",
+                    &format!(
+                        "Waiting for services... (attempt {attempt}/90, pending: {})",
+                        if unhealthy.is_empty() { "checking health".to_string() } else { unhealthy.join(", ") }
+                    ),
+                    "system",
+                )
+                .await
+                .ok();
             }
         }
 
