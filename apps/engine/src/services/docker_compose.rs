@@ -536,7 +536,7 @@ fn generate_supabase_compose() -> String {
     r#"# Supabase Docker Compose (managed by Rift)
 services:
   studio:
-    image: supabase/studio:2025.01.27-sha-ea850c5
+    image: supabase/studio:2026.03.02-sha-5644bee
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/platform/profile').then(r=>{if(r.status!==200)throw Error()})"]
@@ -587,7 +587,7 @@ services:
       - ./volumes/api/kong.yml:/home/kong/temp.yml:ro
 
   auth:
-    image: supabase/gotrue:v2.186.0
+    image: supabase/gotrue:v2.187.0
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9999/health"]
@@ -634,7 +634,7 @@ services:
     command: "postgrest"
 
   realtime:
-    image: supabase/realtime:v2.76.5
+    image: supabase/realtime:v2.78.6
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-sSfL", "--head", "-o", "/dev/null", "-H", "Authorization: Bearer ${SUPABASE_ANON_KEY}", "http://localhost:4000/api/tenants/realtime-dev/health"]
@@ -663,7 +663,7 @@ services:
       SU_PASSWORD: ${POSTGRES_PASSWORD}
 
   storage:
-    image: supabase/storage-api:v1.37.8
+    image: supabase/storage-api:v1.41.0
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/status"]
@@ -693,7 +693,7 @@ services:
       - ./volumes/storage:/var/lib/storage:z
 
   meta:
-    image: supabase/postgres-meta:v0.88.2
+    image: supabase/postgres-meta:v0.96.0
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:8080/health').then(r=>{if(r.status!==200)throw Error()})"]
@@ -712,7 +712,7 @@ services:
       PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
 
   db:
-    image: supabase/postgres:15.8.1.085
+    image: supabase/postgres:15.14.1.093
     restart: unless-stopped
     healthcheck:
       test: pg_isready -U postgres -h localhost
