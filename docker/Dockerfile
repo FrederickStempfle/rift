@@ -16,7 +16,7 @@ RUN cargo build --release -p rift-engine
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl bash postgresql-client iptables unzip git python3 make g++ \
+    && apt-get install -y --no-install-recommends ca-certificates curl bash postgresql-client iptables unzip git python3 make g++ gnupg \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Docker CLI (for managing Supabase via Docker Compose)
