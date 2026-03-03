@@ -456,11 +456,11 @@ async fn insert_and_broadcast_service_log(
 }
 
 fn generate_random_string(len: usize) -> String {
-    let mut rng = rand::rng();
+    let mut rng = rand::thread_rng();
     let chars: Vec<char> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         .chars()
         .collect();
-    (0..len).map(|_| chars[rng.random_range(0..chars.len())]).collect()
+    (0..len).map(|_| chars[rng.gen_range(0..chars.len())]).collect()
 }
 
 fn generate_supabase_jwt(jwt_secret: &str, role: &str) -> String {

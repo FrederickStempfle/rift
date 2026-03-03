@@ -10,6 +10,7 @@ v8-isolate = ["deno_core"]
 [dependencies]
 deno_core = { version = "0.311", optional = true }
 aes-gcm = "0.10"
+base64 = "0.22"
 anyhow = "1"
 async-trait = "0.1"
 bytes = "1"
