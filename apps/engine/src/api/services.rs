@@ -59,7 +59,7 @@ pub async fn create_service(
     auth_user: AuthUser,
     Json(payload): Json<CreateServiceRequest>,
 ) -> AppResult<(StatusCode, Json<ServiceResponse>)> {
-    if payload.service_type != "supabase" {
+    if !["supabase", "posthog"].contains(&payload.service_type.as_str()) {
         return Err(AppError::BadRequest(format!(
             "unsupported service type: {}",
             payload.service_type
@@ -89,11 +89,17 @@ pub async fn create_service(
             })?;
 
     let service_id = service.id;
+    let service_type = service.service_type.clone();
     let docker_manager = state.docker_compose_manager.clone();
 
     // Spawn deployment in background (like BuildManager)
     tokio::spawn(async move {
-        if let Err(e) = docker_manager.deploy_supabase(service_id).await {
+        let result = match service_type.as_str() {
+            "supabase" => docker_manager.deploy_supabase(service_id).await,
+            "posthog" => docker_manager.deploy_posthog(service_id).await,
+            _ => unreachable!(),
+        };
+        if let Err(e) = result {
             tracing::error!(service_id = %service_id, error = %e, "service deployment failed");
         }
     });
@@ -129,9 +135,15 @@ pub async fn stop_service(
         return Err(AppError::Conflict("service is not running".into()));
     }
 
+    let service_type = service.service_type.clone();
     let docker_manager = state.docker_compose_manager.clone();
     tokio::spawn(async move {
-        if let Err(e) = docker_manager.stop_supabase(service_id).await {
+        let result = match service_type.as_str() {
+            "supabase" => docker_manager.stop_supabase(service_id).await,
+            "posthog" => docker_manager.stop_posthog(service_id).await,
+            _ => unreachable!(),
+        };
+        if let Err(e) = result {
             tracing::error!(service_id = %service_id, error = %e, "failed to stop service");
         }
     });
@@ -152,9 +164,15 @@ pub async fn start_service(
         return Err(AppError::Conflict("service is not stopped".into()));
     }
 
+    let service_type = service.service_type.clone();
     let docker_manager = state.docker_compose_manager.clone();
     tokio::spawn(async move {
-        if let Err(e) = docker_manager.start_supabase(service_id).await {
+        let result = match service_type.as_str() {
+            "supabase" => docker_manager.start_supabase(service_id).await,
+            "posthog" => docker_manager.start_posthog(service_id).await,
+            _ => unreachable!(),
+        };
+        if let Err(e) = result {
             tracing::error!(service_id = %service_id, error = %e, "failed to start service");
         }
     });
@@ -175,9 +193,15 @@ pub async fn restart_service(
         return Err(AppError::Conflict("service is not running".into()));
     }
 
+    let service_type = service.service_type.clone();
     let docker_manager = state.docker_compose_manager.clone();
     tokio::spawn(async move {
-        if let Err(e) = docker_manager.restart_supabase(service_id).await {
+        let result = match service_type.as_str() {
+            "supabase" => docker_manager.restart_supabase(service_id).await,
+            "posthog" => docker_manager.restart_posthog(service_id).await,
+            _ => unreachable!(),
+        };
+        if let Err(e) = result {
             tracing::error!(service_id = %service_id, error = %e, "failed to restart service");
         }
     });
@@ -197,9 +221,15 @@ pub async fn delete_service(
     let docker_manager = state.docker_compose_manager.clone();
     let pool = state.pool.clone();
     let sid = service.id;
+    let service_type = service.service_type.clone();
 
     tokio::spawn(async move {
-        if let Err(e) = docker_manager.remove_supabase(sid).await {
+        let result = match service_type.as_str() {
+            "supabase" => docker_manager.remove_supabase(sid).await,
+            "posthog" => docker_manager.remove_posthog(sid).await,
+            _ => unreachable!(),
+        };
+        if let Err(e) = result {
             tracing::error!(service_id = %sid, error = %e, "failed to remove service containers");
         }
         if let Err(e) = db_services::delete_service(&pool, sid).await {
