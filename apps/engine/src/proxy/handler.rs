@@ -34,6 +34,7 @@ use crate::{
 type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Full<Bytes>>;
 
 const MAX_PROXY_BODY_BYTES: usize = 10 * 1024 * 1024;
+const MAX_PROXY_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
 const PROXY_GLOBAL_LIMIT: u64 = 2000;
 const PROXY_GLOBAL_CHALLENGE: u64 = 1400;
 const PROXY_ROUTE_LIMIT: u64 = 600;
@@ -495,7 +496,7 @@ async fn route_and_forward(
     let (parts, body) = req.into_parts();
 
     // Read body (bounded)
-    let body_bytes = collect_body_limited(body, StatusCode::BAD_REQUEST)
+    let body_bytes = collect_body_limited(body, StatusCode::BAD_REQUEST, MAX_PROXY_BODY_BYTES)
         .await
         .map_err(|status| RouteError::Status(status, pid))?;
 
@@ -552,7 +553,7 @@ async fn route_and_forward(
         response = response.header(name, value);
     }
 
-    let resp_bytes = collect_body_limited(upstream_resp.into_body(), StatusCode::BAD_GATEWAY)
+    let resp_bytes = collect_body_limited(upstream_resp.into_body(), StatusCode::BAD_GATEWAY, MAX_PROXY_RESPONSE_BYTES)
         .await
         .map_err(|status| RouteError::Status(status, pid))?;
 
@@ -680,7 +681,7 @@ async fn forward_direct(
 
     let (parts, body) = req.into_parts();
 
-    let body_bytes = collect_body_limited(body, StatusCode::BAD_REQUEST)
+    let body_bytes = collect_body_limited(body, StatusCode::BAD_REQUEST, MAX_PROXY_BODY_BYTES)
         .await
         .map_err(|status| RouteError::Status(status, None))?;
 
@@ -727,7 +728,7 @@ async fn forward_direct(
         response = response.header(name, value);
     }
 
-    let resp_bytes = collect_body_limited(upstream_resp.into_body(), StatusCode::BAD_GATEWAY)
+    let resp_bytes = collect_body_limited(upstream_resp.into_body(), StatusCode::BAD_GATEWAY, MAX_PROXY_RESPONSE_BYTES)
         .await
         .map_err(|status| RouteError::Status(status, None))?;
 
@@ -915,7 +916,7 @@ async fn handle_challenge_verify(
 
     let headers = req.headers().clone();
     let (_, body) = req.into_parts();
-    let body_bytes = match collect_body_limited(body, StatusCode::BAD_REQUEST).await {
+    let body_bytes = match collect_body_limited(body, StatusCode::BAD_REQUEST, MAX_PROXY_BODY_BYTES).await {
         Ok(bytes) => bytes,
         Err(status) => return error_response(status),
     };
@@ -1378,7 +1379,7 @@ async fn handle_isolate_invoke(
     let (parts, body) = req.into_parts();
 
     // Read body
-    let body_bytes = collect_body_limited(body, StatusCode::BAD_REQUEST)
+    let body_bytes = collect_body_limited(body, StatusCode::BAD_REQUEST, MAX_PROXY_BODY_BYTES)
         .await
         .map_err(|status| RouteError::Status(status, pid))?;
 
@@ -1463,13 +1464,14 @@ fn map_app_error(error: AppError) -> StatusCode {
 async fn collect_body_limited(
     mut body: Incoming,
     read_error_status: StatusCode,
+    max_bytes: usize,
 ) -> Result<Bytes, StatusCode> {
     let mut buffer = BytesMut::new();
 
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(|_| read_error_status)?;
         if let Ok(data) = frame.into_data() {
-            if buffer.len() + data.len() > MAX_PROXY_BODY_BYTES {
+            if buffer.len() + data.len() > max_bytes {
                 return Err(StatusCode::PAYLOAD_TOO_LARGE);
             }
             buffer.extend_from_slice(&data);
