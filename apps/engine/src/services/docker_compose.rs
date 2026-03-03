@@ -618,7 +618,7 @@ services:
       GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: "false"
 
   rest:
-    image: postgrest/postgrest:v14.0.0
+    image: postgrest/postgrest:v14.0
     restart: unless-stopped
     depends_on:
       db:
