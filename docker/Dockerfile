@@ -19,6 +19,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl bash postgresql-client iptables unzip git python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 
+# Install Docker CLI (for managing Supabase via Docker Compose)
+RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
     && ln -s /usr/local/bin/deno /usr/bin/deno
 
@@ -40,7 +46,7 @@ COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY templates/ /opt/rift/templates/
 
 RUN chmod +x /usr/local/bin/entrypoint.sh \
-    && mkdir -p /var/rift/deployments /var/rift/builds /var/rift/ssl /opt/rift/templates
+    && mkdir -p /var/rift/deployments /var/rift/builds /var/rift/ssl /opt/rift/templates /opt/rift/services
 
 ENV RUST_LOG=rift_engine=info,tower_http=info
 EXPOSE 3001 8080
