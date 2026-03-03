@@ -376,6 +376,13 @@ async fn route_and_forward(
         }
     }
 
+    // --- Check for direct service routing (target_url) before project resolution ---
+    if let Some(direct_url) = resolve_direct_target(state, &host).await
+        .map_err(|e| RouteError::Status(map_app_error(e), None))?
+    {
+        return forward_direct(req, client_ip, &host, &direct_url, &return_to, state, client).await;
+    }
+
     let project_id = resolve_project_id(state, &host)
         .await
         .map_err(|e| RouteError::Status(map_app_error(e), None))?
@@ -563,6 +570,7 @@ pub(crate) async fn resolve_project_id(
     // 1. Check the routing cache first (hot path — no DB hit).
     match state.routing_cache.lookup(host).await {
         CacheLookup::Hit(project_id) => return Ok(Some(project_id)),
+        CacheLookup::DirectHit(_) => return Ok(None), // handled by resolve_direct_target
         CacheLookup::NegativeHit => return Ok(None),
         CacheLookup::Miss => {}
     }
@@ -622,6 +630,112 @@ async fn sync_distributed_route(state: &AppState, host: &str, project_id: Uuid) 
     if let Err(e) = state.state_store.publish_routing_update(&entry).await {
         tracing::warn!(host = %host, error = %e, "failed to publish routing update");
     }
+}
+
+/// Resolve a direct target_url for service-assigned domains.
+/// Returns `Some(target_url)` if this host routes directly to a service,
+/// `None` if it should fall through to project resolution.
+async fn resolve_direct_target(
+    state: &AppState,
+    host: &str,
+) -> Result<Option<String>, AppError> {
+    // Check cache first.
+    match state.routing_cache.lookup(host).await {
+        CacheLookup::DirectHit(url) => return Ok(Some(url)),
+        CacheLookup::Hit(_) | CacheLookup::NegativeHit => return Ok(None),
+        CacheLookup::Miss => {}
+    }
+
+    // Cache miss — check DB for a target_url.
+    if let Some(target_url) = domains::get_target_url_by_domain(&state.pool, host).await? {
+        state
+            .routing_cache
+            .insert_direct(host.to_owned(), target_url.clone())
+            .await;
+        return Ok(Some(target_url));
+    }
+
+    Ok(None)
+}
+
+/// Forward a request directly to a target URL (for service-assigned domains).
+/// This bypasses all project-specific logic (firewall, WAF, runtime backend).
+async fn forward_direct(
+    req: Request<Incoming>,
+    client_ip: IpAddr,
+    host: &str,
+    target_base: &str,
+    _return_to: &str,
+    state: &AppState,
+    client: &HttpClient,
+) -> Result<(Response<Full<Bytes>>, Option<Uuid>, bool), RouteError> {
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+    let target_url: Uri = format!("{target_base}{path_and_query}")
+        .parse()
+        .map_err(|_| RouteError::Status(StatusCode::BAD_REQUEST, None))?;
+
+    let (parts, body) = req.into_parts();
+
+    let body_bytes = collect_body_limited(body, StatusCode::BAD_REQUEST)
+        .await
+        .map_err(|status| RouteError::Status(status, None))?;
+
+    let mut upstream = Request::builder()
+        .method(parts.method.clone())
+        .uri(&target_url);
+
+    for (name, value) in &parts.headers {
+        let lower = name.as_str().to_ascii_lowercase();
+        if lower == "host"
+            || lower.starts_with("x-forwarded-")
+            || lower == "forwarded"
+            || HOP_BY_HOP.contains(&lower.as_str())
+        {
+            continue;
+        }
+        upstream = upstream.header(name, value);
+    }
+
+    upstream = upstream
+        .header("x-forwarded-for", client_ip.to_string())
+        .header("x-forwarded-host", host)
+        .header("x-forwarded-proto", &state.config.proxy_scheme)
+        .header(HOST, host);
+
+    let upstream_req = upstream
+        .body(Full::new(body_bytes))
+        .map_err(|_| RouteError::Status(StatusCode::INTERNAL_SERVER_ERROR, None))?;
+
+    let upstream_timeout = Duration::from_millis(state.config.proxy_upstream_timeout_ms.max(500));
+    let upstream_resp = tokio::time::timeout(upstream_timeout, client.request(upstream_req))
+        .await
+        .map_err(|_| RouteError::Status(StatusCode::GATEWAY_TIMEOUT, None))?
+        .map_err(|_| RouteError::Status(StatusCode::BAD_GATEWAY, None))?;
+
+    let status = upstream_resp.status();
+    let mut response = Response::builder().status(status);
+
+    for (name, value) in upstream_resp.headers() {
+        let lower = name.as_str().to_ascii_lowercase();
+        if HOP_BY_HOP.contains(&lower.as_str()) {
+            continue;
+        }
+        response = response.header(name, value);
+    }
+
+    let resp_bytes = collect_body_limited(upstream_resp.into_body(), StatusCode::BAD_GATEWAY)
+        .await
+        .map_err(|status| RouteError::Status(status, None))?;
+
+    let resp = response
+        .body(Full::new(resp_bytes))
+        .map_err(|_| RouteError::Status(StatusCode::INTERNAL_SERVER_ERROR, None))?;
+
+    Ok((resp, None, false))
 }
 
 fn extract_host(headers: &HeaderMap) -> Option<String> {

@@ -48,11 +48,13 @@ pub struct Project {
 pub struct Domain {
     pub id: Uuid,
     pub project_id: Option<Uuid>,
+    pub service_id: Option<Uuid>,
     pub domain: String,
     pub is_primary: bool,
     pub ssl_status: String,
     pub ssl_expires_at: Option<DateTime<Utc>>,
     pub ssl_error: Option<String>,
+    pub target_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]

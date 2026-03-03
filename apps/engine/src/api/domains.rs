@@ -47,34 +47,42 @@ pub struct UpdateDomainRequest {
 #[derive(Debug, Deserialize)]
 pub struct AssignDomainRequest {
     pub project_id: Option<Uuid>,
+    pub service_id: Option<Uuid>,
+    pub target_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 pub struct ListDomainsQuery {
     pub project_id: Option<Uuid>,
+    pub service_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct DomainResponse {
     pub id: Uuid,
     pub project_id: Option<Uuid>,
+    pub service_id: Option<Uuid>,
     pub domain: String,
     pub is_primary: bool,
     pub ssl_status: String,
     pub ssl_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub ssl_error: Option<String>,
+    pub target_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct DomainListResponse {
     pub id: Uuid,
     pub project_id: Option<Uuid>,
+    pub service_id: Option<Uuid>,
     pub domain: String,
     pub is_primary: bool,
     pub ssl_status: String,
     pub ssl_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub ssl_error: Option<String>,
+    pub target_url: Option<String>,
     pub project_name: Option<String>,
+    pub service_name: Option<String>,
 }
 
 pub async fn create_domain(
@@ -141,14 +149,36 @@ pub async fn list_domains(
     auth_user: AuthUser,
     axum::extract::Query(query): axum::extract::Query<ListDomainsQuery>,
 ) -> AppResult<Json<Vec<DomainListResponse>>> {
-    let domains = match query.project_id {
-        Some(project_id) => {
-            crate::db::projects::get_project_for_user(&state.pool, project_id, auth_user.user_id)
-                .await?
-                .ok_or_else(|| AppError::NotFound("project not found".into()))?;
-            domains::list_domains_for_project_with_name(&state.pool, project_id).await?
-        }
-        None => domains::list_domains_for_user(&state.pool, auth_user.user_id).await?,
+    let domains = if let Some(project_id) = query.project_id {
+        crate::db::projects::get_project_for_user(&state.pool, project_id, auth_user.user_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("project not found".into()))?;
+        domains::list_domains_for_project_with_name(&state.pool, project_id).await?
+    } else if let Some(service_id) = query.service_id {
+        // Verify user owns the service
+        crate::db::services::get_service_for_user(&state.pool, service_id, auth_user.user_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("service not found".into()))?;
+        let service_domains = domains::list_domains_for_service(&state.pool, service_id).await?;
+        // Convert Domain to DomainWithProject for consistent response
+        service_domains
+            .into_iter()
+            .map(|d| DomainWithProject {
+                id: d.id,
+                project_id: d.project_id,
+                service_id: d.service_id,
+                domain: d.domain,
+                is_primary: d.is_primary,
+                ssl_status: d.ssl_status,
+                ssl_expires_at: d.ssl_expires_at,
+                ssl_error: d.ssl_error,
+                target_url: d.target_url,
+                project_name: None,
+                service_name: None,
+            })
+            .collect()
+    } else {
+        domains::list_domains_for_user(&state.pool, auth_user.user_id).await?
     };
     Ok(Json(
         domains
@@ -252,24 +282,40 @@ pub async fn assign_domain(
     Path(domain_id): Path<Uuid>,
     Json(payload): Json<AssignDomainRequest>,
 ) -> AppResult<Json<DomainResponse>> {
-    let updated = match payload.project_id {
-        Some(project_id) => {
-            // Verify user owns the project
-            crate::db::projects::get_project_for_user(&state.pool, project_id, auth_user.user_id)
-                .await?
-                .ok_or_else(|| AppError::NotFound("project not found".into()))?;
+    let updated = if let Some(service_id) = payload.service_id {
+        // Assign to service with a target_url
+        let target_url = payload.target_url.as_deref().ok_or_else(|| {
+            AppError::BadRequest("target_url is required when assigning to a service".into())
+        })?;
+        // Verify user owns the service
+        crate::db::services::get_service_for_user(&state.pool, service_id, auth_user.user_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("service not found".into()))?;
 
-            domains::assign_domain_to_project(&state.pool, domain_id, project_id, auth_user.user_id)
-                .await?
-        }
-        None => {
-            domains::unassign_domain_from_project(&state.pool, domain_id, auth_user.user_id).await?
-        }
+        domains::assign_domain_to_service(
+            &state.pool,
+            domain_id,
+            service_id,
+            target_url,
+            auth_user.user_id,
+        )
+        .await?
+    } else if let Some(project_id) = payload.project_id {
+        // Verify user owns the project
+        crate::db::projects::get_project_for_user(&state.pool, project_id, auth_user.user_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("project not found".into()))?;
+
+        domains::assign_domain_to_project(&state.pool, domain_id, project_id, auth_user.user_id)
+            .await?
+    } else {
+        // Unassign from project or service
+        domains::unassign_domain_from_project(&state.pool, domain_id, auth_user.user_id).await?
     };
 
     let domain = updated.ok_or_else(|| AppError::NotFound("domain not found".into()))?;
 
-    // Invalidate routing cache — domain's project mapping changed.
+    // Invalidate routing cache — domain's routing changed.
     state.routing_cache.invalidate_host(&domain.domain).await;
     if let Some(project_id) = domain.project_id {
         upsert_distributed_route(&state, domain.domain.clone(), project_id).await;
@@ -285,7 +331,11 @@ pub async fn assign_domain(
             resource_id: Some(domain_id),
             ip_address: Some(addr.ip()),
             user_agent: user_agent(&headers),
-            metadata: json!({ "project_id": payload.project_id }),
+            metadata: json!({
+                "project_id": payload.project_id,
+                "service_id": payload.service_id,
+                "target_url": payload.target_url,
+            }),
         })
         .await?;
 
@@ -406,11 +456,13 @@ impl From<crate::db::models::Domain> for DomainResponse {
         Self {
             id: value.id,
             project_id: value.project_id,
+            service_id: value.service_id,
             domain: value.domain,
             is_primary: value.is_primary,
             ssl_status: value.ssl_status,
             ssl_expires_at: value.ssl_expires_at,
             ssl_error: value.ssl_error,
+            target_url: value.target_url,
         }
     }
 }
@@ -420,12 +472,15 @@ impl From<DomainWithProject> for DomainListResponse {
         Self {
             id: value.id,
             project_id: value.project_id,
+            service_id: value.service_id,
             domain: value.domain,
             is_primary: value.is_primary,
             ssl_status: value.ssl_status,
             ssl_expires_at: value.ssl_expires_at,
             ssl_error: value.ssl_error,
+            target_url: value.target_url,
             project_name: value.project_name,
+            service_name: value.service_name,
         }
     }
 }

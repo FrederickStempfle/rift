@@ -19,12 +19,15 @@ pub struct NewDomain {
 pub struct DomainWithProject {
     pub id: Uuid,
     pub project_id: Option<Uuid>,
+    pub service_id: Option<Uuid>,
     pub domain: String,
     pub is_primary: bool,
     pub ssl_status: String,
     pub ssl_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub ssl_error: Option<String>,
+    pub target_url: Option<String>,
     pub project_name: Option<String>,
+    pub service_name: Option<String>,
 }
 
 pub async fn create_domain(pool: &PgPool, input: NewDomain) -> Result<Domain, AppError> {
@@ -53,11 +56,13 @@ pub async fn create_domain(pool: &PgPool, input: NewDomain) -> Result<Domain, Ap
         RETURNING
             id,
             project_id,
+            service_id,
             domain,
             is_primary,
             ssl_status::text AS ssl_status,
             ssl_expires_at,
-            ssl_error
+            ssl_error,
+            target_url
         "#,
     )
     .bind(input.project_id)
@@ -91,14 +96,18 @@ pub async fn list_domains_for_user(
         SELECT
             d.id,
             d.project_id,
+            d.service_id,
             d.domain,
             d.is_primary,
             d.ssl_status::text AS ssl_status,
             d.ssl_expires_at,
             d.ssl_error,
-            p.name AS project_name
+            d.target_url,
+            p.name AS project_name,
+            s.name AS service_name
         FROM domains d
         LEFT JOIN projects p ON p.id = d.project_id
+        LEFT JOIN services s ON s.id = d.service_id
         WHERE p.user_id = $1
            OR d.created_by = $1
         ORDER BY d.domain ASC
@@ -120,15 +129,18 @@ pub async fn get_domain(
         SELECT
             d.id,
             d.project_id,
+            d.service_id,
             d.domain,
             d.is_primary,
             d.ssl_status::text AS ssl_status,
             d.ssl_expires_at,
-            d.ssl_error
+            d.ssl_error,
+            d.target_url
         FROM domains d
         LEFT JOIN projects p ON p.id = d.project_id
+        LEFT JOIN services s ON s.id = d.service_id
         WHERE d.id = $1
-          AND (p.user_id = $2 OR d.created_by = $2)
+          AND (p.user_id = $2 OR d.created_by = $2 OR s.user_id = $2)
         "#,
     )
     .bind(domain_id)
@@ -150,6 +162,7 @@ pub async fn delete_domain(
           AND (
             created_by = $2
             OR project_id IN (SELECT id FROM projects WHERE user_id = $2)
+            OR service_id IN (SELECT id FROM services WHERE user_id = $2)
           )
         "#,
     )
@@ -171,11 +184,13 @@ pub async fn list_domains_for_project(
         SELECT
             id,
             project_id,
+            service_id,
             domain,
             is_primary,
             ssl_status::text AS ssl_status,
             ssl_expires_at,
-            ssl_error
+            ssl_error,
+            target_url
         FROM domains
         WHERE project_id = $1
         ORDER BY is_primary DESC, domain ASC
@@ -196,14 +211,18 @@ pub async fn list_domains_for_project_with_name(
         SELECT
             d.id,
             d.project_id,
+            d.service_id,
             d.domain,
             d.is_primary,
             d.ssl_status::text AS ssl_status,
             d.ssl_expires_at,
             d.ssl_error,
-            p.name AS project_name
+            d.target_url,
+            p.name AS project_name,
+            s.name AS service_name
         FROM domains d
         LEFT JOIN projects p ON p.id = d.project_id
+        LEFT JOIN services s ON s.id = d.service_id
         WHERE d.project_id = $1
         ORDER BY d.is_primary DESC, d.domain ASC
         "#,
@@ -242,11 +261,13 @@ pub async fn get_primary_domain_for_project(
         SELECT
             id,
             project_id,
+            service_id,
             domain,
             is_primary,
             ssl_status::text AS ssl_status,
             ssl_expires_at,
-            ssl_error
+            ssl_error,
+            target_url
         FROM domains
         WHERE project_id = $1 AND is_primary = true AND ssl_status = 'active'
         LIMIT 1
@@ -267,11 +288,13 @@ pub async fn get_configured_primary_domain_for_project(
         SELECT
             id,
             project_id,
+            service_id,
             domain,
             is_primary,
             ssl_status::text AS ssl_status,
             ssl_expires_at,
-            ssl_error
+            ssl_error,
+            target_url
         FROM domains
         WHERE project_id = $1 AND is_primary = true
         LIMIT 1
@@ -296,11 +319,13 @@ pub async fn list_primary_domains_for_projects(
         SELECT
             id,
             project_id,
+            service_id,
             domain,
             is_primary,
             ssl_status::text AS ssl_status,
             ssl_expires_at,
-            ssl_error
+            ssl_error,
+            target_url
         FROM domains
         WHERE project_id = ANY($1)
           AND is_primary = true
@@ -326,11 +351,13 @@ pub async fn list_configured_primary_domains_for_projects(
         SELECT
             id,
             project_id,
+            service_id,
             domain,
             is_primary,
             ssl_status::text AS ssl_status,
             ssl_expires_at,
-            ssl_error
+            ssl_error,
+            target_url
         FROM domains
         WHERE project_id = ANY($1)
           AND is_primary = true
@@ -386,15 +413,18 @@ pub async fn mark_domain_active(
           AND (
             created_by = $2
             OR project_id IN (SELECT id FROM projects WHERE user_id = $2)
+            OR service_id IN (SELECT id FROM services WHERE user_id = $2)
           )
         RETURNING
             id,
             project_id,
+            service_id,
             domain,
             is_primary,
             ssl_status::text AS ssl_status,
             ssl_expires_at,
-            ssl_error
+            ssl_error,
+            target_url
         "#,
     )
     .bind(domain_id)
@@ -432,16 +462,18 @@ pub async fn assign_domain_to_project(
     let updated = sqlx::query_as::<_, Domain>(
         r#"
         UPDATE domains
-        SET project_id = $1, is_primary = $2
+        SET project_id = $1, is_primary = $2, service_id = NULL, target_url = NULL
         WHERE id = $3
         RETURNING
             id,
             project_id,
+            service_id,
             domain,
             is_primary,
             ssl_status::text AS ssl_status,
             ssl_expires_at,
-            ssl_error
+            ssl_error,
+            target_url
         "#,
     )
     .bind(project_id)
@@ -464,20 +496,23 @@ pub async fn unassign_domain_from_project(
     sqlx::query_as::<_, Domain>(
         r#"
         UPDATE domains
-        SET project_id = NULL, is_primary = false
+        SET project_id = NULL, service_id = NULL, target_url = NULL, is_primary = false
         WHERE id = $1
           AND (
             created_by = $2
             OR project_id IN (SELECT id FROM projects WHERE user_id = $2)
+            OR service_id IN (SELECT id FROM services WHERE user_id = $2)
           )
         RETURNING
             id,
             project_id,
+            service_id,
             domain,
             is_primary,
             ssl_status::text AS ssl_status,
             ssl_expires_at,
-            ssl_error
+            ssl_error,
+            target_url
         "#,
     )
     .bind(domain_id)
@@ -536,8 +571,8 @@ pub async fn list_domains_needing_renewal(pool: &PgPool) -> Result<Vec<Domain>, 
     sqlx::query_as::<_, Domain>(
         r#"
         SELECT
-            id, project_id, domain, is_primary,
-            ssl_status::text AS ssl_status, ssl_expires_at, ssl_error
+            id, project_id, service_id, domain, is_primary,
+            ssl_status::text AS ssl_status, ssl_expires_at, ssl_error, target_url
         FROM domains
         WHERE ssl_status = 'active'
           AND ssl_expires_at IS NOT NULL
@@ -549,12 +584,132 @@ pub async fn list_domains_needing_renewal(pool: &PgPool) -> Result<Vec<Domain>, 
     .map_err(AppError::Db)
 }
 
+/// Look up a direct target_url for a domain (used by proxy for service-assigned domains).
+pub async fn get_target_url_by_domain(
+    pool: &PgPool,
+    domain: &str,
+) -> Result<Option<String>, AppError> {
+    sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT target_url
+        FROM domains
+        WHERE domain = $1
+          AND ssl_status = 'active'
+          AND target_url IS NOT NULL
+        "#,
+    )
+    .bind(domain)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Db)
+}
+
+/// Assign a domain to a service with a target_url for direct proxy routing.
+pub async fn assign_domain_to_service(
+    pool: &PgPool,
+    domain_id: Uuid,
+    service_id: Uuid,
+    target_url: &str,
+    user_id: Uuid,
+) -> Result<Option<Domain>, AppError> {
+    let domain = get_domain(pool, domain_id, user_id).await?;
+    if domain.is_none() {
+        return Ok(None);
+    }
+
+    sqlx::query_as::<_, Domain>(
+        r#"
+        UPDATE domains
+        SET service_id = $1, target_url = $2, project_id = NULL, is_primary = false
+        WHERE id = $3
+        RETURNING
+            id,
+            project_id,
+            service_id,
+            domain,
+            is_primary,
+            ssl_status::text AS ssl_status,
+            ssl_expires_at,
+            ssl_error,
+            target_url
+        "#,
+    )
+    .bind(service_id)
+    .bind(target_url)
+    .bind(domain_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Db)
+}
+
+/// Unassign a domain from its service.
+pub async fn unassign_domain_from_service(
+    pool: &PgPool,
+    domain_id: Uuid,
+    user_id: Uuid,
+) -> Result<Option<Domain>, AppError> {
+    sqlx::query_as::<_, Domain>(
+        r#"
+        UPDATE domains
+        SET service_id = NULL, target_url = NULL, is_primary = false
+        WHERE id = $1
+          AND (
+            created_by = $2
+            OR service_id IN (SELECT id FROM services WHERE user_id = $2)
+          )
+        RETURNING
+            id,
+            project_id,
+            service_id,
+            domain,
+            is_primary,
+            ssl_status::text AS ssl_status,
+            ssl_expires_at,
+            ssl_error,
+            target_url
+        "#,
+    )
+    .bind(domain_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Db)
+}
+
+/// List all domains assigned to a specific service.
+pub async fn list_domains_for_service(
+    pool: &PgPool,
+    service_id: Uuid,
+) -> Result<Vec<Domain>, AppError> {
+    sqlx::query_as::<_, Domain>(
+        r#"
+        SELECT
+            id,
+            project_id,
+            service_id,
+            domain,
+            is_primary,
+            ssl_status::text AS ssl_status,
+            ssl_expires_at,
+            ssl_error,
+            target_url
+        FROM domains
+        WHERE service_id = $1
+        ORDER BY domain ASC
+        "#,
+    )
+    .bind(service_id)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Db)
+}
+
 pub async fn list_active_ssl_domains(pool: &PgPool) -> Result<Vec<Domain>, AppError> {
     sqlx::query_as::<_, Domain>(
         r#"
         SELECT
-            id, project_id, domain, is_primary,
-            ssl_status::text AS ssl_status, ssl_expires_at, ssl_error
+            id, project_id, service_id, domain, is_primary,
+            ssl_status::text AS ssl_status, ssl_expires_at, ssl_error, target_url
         FROM domains
         WHERE ssl_status = 'active'
           AND ssl_expires_at IS NOT NULL

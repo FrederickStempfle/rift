@@ -20,9 +20,18 @@ const NEGATIVE_TTL: Duration = Duration::from_secs(5);
 /// How often the background evictor runs.
 const EVICT_INTERVAL: Duration = Duration::from_secs(30);
 
+/// What a domain routes to — either a project or a direct URL (for services).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoutingTarget {
+    /// Route through the runtime backend for this project.
+    Project(Uuid),
+    /// Forward directly to this URL (e.g. `http://localhost:8000` for a service).
+    Direct(String),
+}
+
 #[derive(Debug, Clone)]
 struct PositiveEntry {
-    project_id: Uuid,
+    target: RoutingTarget,
     expires_at: Instant,
 }
 
@@ -36,6 +45,8 @@ struct NegativeEntry {
 pub enum CacheLookup {
     /// Host maps to this project.
     Hit(Uuid),
+    /// Host maps to a direct target URL (service domain).
+    DirectHit(String),
     /// Host was recently looked up and found to not exist.
     NegativeHit,
     /// No cache entry — caller must query the database.
@@ -73,7 +84,10 @@ impl RoutingCache {
                     crate::metrics::ROUTING_CACHE_RESULT
                         .with_label_values(&["hit"])
                         .inc();
-                    return CacheLookup::Hit(entry.project_id);
+                    return match &entry.target {
+                        RoutingTarget::Project(id) => CacheLookup::Hit(*id),
+                        RoutingTarget::Direct(url) => CacheLookup::DirectHit(url.clone()),
+                    };
                 }
                 // Expired — fall through to miss (evictor will clean up).
             }
@@ -100,6 +114,17 @@ impl RoutingCache {
 
     /// Insert a positive host → project_id mapping.
     pub async fn insert(&self, host: String, project_id: Uuid) {
+        self.insert_target(host, RoutingTarget::Project(project_id))
+            .await;
+    }
+
+    /// Insert a positive host → direct target_url mapping (for service domains).
+    pub async fn insert_direct(&self, host: String, target_url: String) {
+        self.insert_target(host, RoutingTarget::Direct(target_url))
+            .await;
+    }
+
+    async fn insert_target(&self, host: String, target: RoutingTarget) {
         // Remove from negative cache if present.
         {
             let mut neg = self.inner.negative.write().await;
@@ -110,7 +135,7 @@ impl RoutingCache {
         pos.insert(
             host,
             PositiveEntry {
-                project_id,
+                target,
                 expires_at: Instant::now() + POSITIVE_TTL,
             },
         );
@@ -143,7 +168,9 @@ impl RoutingCache {
     pub async fn invalidate_project(&self, project_id: Uuid) {
         {
             let mut pos = self.inner.positive.write().await;
-            pos.retain(|_, entry| entry.project_id != project_id);
+            pos.retain(|_, entry| {
+                !matches!(&entry.target, RoutingTarget::Project(id) if *id == project_id)
+            });
         }
         // Negative entries don't carry a project_id, so nothing to do there.
     }
@@ -255,7 +282,7 @@ mod tests {
             pos.insert(
                 "expired.rift.dev".into(),
                 PositiveEntry {
-                    project_id: id,
+                    target: RoutingTarget::Project(id),
                     expires_at: Instant::now() - Duration::from_secs(1),
                 },
             );
