@@ -426,14 +426,23 @@ impl WorkerPool {
         );
 
         let deployment_id = suspended.deployment_id;
-        let (url, _) = self
+        let result = self
             .deploy(RuntimeLaunchSpec {
                 project_id,
                 deployment_id,
-                kind: suspended.kind,
-                env_vars: suspended.env_vars,
+                kind: suspended.kind.clone(),
+                env_vars: suspended.env_vars.clone(),
             })
-            .await?;
+            .await;
+
+        let (url, _) = match result {
+            Ok(v) => v,
+            Err(e) => {
+                // Re-insert so the next request can retry
+                self.suspended.lock().await.insert(project_id, suspended);
+                return Err(e);
+            }
+        };
 
         // Persist wake to DB
         if let Some(ref db) = self.db_pool {
