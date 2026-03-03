@@ -166,7 +166,7 @@ STUDIO_DEFAULT_PROJECT=Default
             .await?;
 
         let healthy = self
-            .wait_for_health(service_id, &format!("http://localhost:{}", self.kong_port))
+            .wait_for_health(service_id, &format!("http://host.docker.internal:{}", self.kong_port))
             .await;
 
         if healthy {

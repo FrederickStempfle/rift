@@ -94,6 +94,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # Mount cgroup v2 filesystem for worker pool resource limits
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     cgroup: host
     # Kernel sysctl hardening at container level
     sysctls:
