@@ -847,19 +847,21 @@ def wait_for(host, port, name, timeout=300):
 
 wait_for("posthog-clickhouse", 9000, "ClickHouse")
 wait_for("posthog-db", 5432, "PostgreSQL")
+wait_for("posthog-redis", 6379, "Redis")
+wait_for("posthog-kafka", 9092, "Kafka")
 "#;
 
         // compose/start — entrypoint that waits, migrates, then starts server
+        // Uses PostHog's built-in ./bin/migrate and ./bin/docker-server-unit scripts.
+        // The image supports Granian (ASGI) when USE_GRANIAN=true (set in compose env).
         let start_script = r#"#!/bin/bash
 set -e
 echo "Waiting for dependencies..."
 python3 /compose/wait
-echo "Running migrations..."
-python manage.py migrate --noinput 2>&1 || true
-python manage.py migrate_clickhouse 2>&1 || true
-python manage.py run_async_migrations --complete-noop-migrations 2>&1 || true
+echo "Running database migrations..."
+./bin/migrate
 echo "Starting PostHog web server..."
-exec gunicorn posthog.wsgi --config gunicorn.config.py --bind 0.0.0.0:8000 --log-level info
+exec ./bin/docker-server-unit
 "#;
 
         tokio::fs::write(compose_dir.join("wait"), wait_script)
@@ -1225,6 +1227,7 @@ services:
 fn generate_posthog_compose() -> String {
     r#"# PostHog Docker Compose (managed by Rift)
 # Based on official PostHog hobby deployment
+# Ref: https://github.com/PostHog/posthog/blob/master/docker-compose.hobby.yml
 services:
   posthog-db:
     image: postgres:15.12-alpine
@@ -1245,6 +1248,7 @@ services:
   posthog-redis:
     image: redis:7.2-alpine
     restart: unless-stopped
+    command: redis-server --maxmemory-policy allkeys-lru --maxmemory 200mb
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
@@ -1253,30 +1257,52 @@ services:
     volumes:
       - redis-data:/data
 
+  # ZooKeeper is required by ClickHouse for distributed DDL coordination.
+  # config.xml references <zookeeper><node><host>zookeeper</host></node></zookeeper>
+  posthog-zookeeper:
+    image: zookeeper:3.7.0
+    restart: unless-stopped
+    networks:
+      default:
+        aliases:
+          - zookeeper
+    volumes:
+      - zookeeper-data:/data
+      - zookeeper-datalog:/datalog
+      - zookeeper-logs:/logs
+
   posthog-kafka:
     image: docker.redpanda.com/redpandadata/redpanda:v25.1.9
     restart: unless-stopped
+    networks:
+      default:
+        aliases:
+          - kafka
     command:
       - redpanda
       - start
       - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
-      - --advertise-kafka-addr internal://posthog-kafka:9092,external://localhost:19092
+      - --advertise-kafka-addr internal://kafka:9092,external://localhost:19092
       - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
-      - --advertise-pandaproxy-addr internal://posthog-kafka:8082,external://localhost:18082
+      - --advertise-pandaproxy-addr internal://kafka:8082,external://localhost:18082
       - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
-      - --rpc-addr posthog-kafka:33145
-      - --advertise-rpc-addr posthog-kafka:33145
+      - --rpc-addr kafka:33145
+      - --advertise-rpc-addr kafka:33145
       - --mode dev-container
       - --smp 1
       - --memory 1G
       - --reserve-memory 200M
       - --overprovisioned
+      - --set redpanda.empty_seed_starts_cluster=false
+      - --seeds kafka:33145
       - --set redpanda.auto_create_topics_enabled=true
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:9644/v1/status/ready || exit 1"]
       interval: 3s
       timeout: 10s
       retries: 10
+    depends_on:
+      - posthog-zookeeper
     environment:
       KAFKA_LOG_RETENTION_MS: "3600000"
       KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: "300000"
@@ -1284,9 +1310,18 @@ services:
     volumes:
       - redpanda-data:/var/lib/redpanda/data
 
+  # ClickHouse config notes:
+  # - config.xml references hosts "zookeeper" and "clickhouse" — network aliases handle this
+  # - config.d/default.xml uses from_env="KAFKA_HOSTS" for named collections — set below
+  # - ONLY default.xml is mounted into config.d/ (coordinator.xml/data_node.xml are for multi-node)
+  # - SSL (https_port 8443) in config.xml will warn about missing certs but HTTP 8123 still works
   posthog-clickhouse:
     image: clickhouse/clickhouse-server:25.12.5.44
-    restart: unless-stopped
+    restart: on-failure
+    networks:
+      default:
+        aliases:
+          - clickhouse
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
       interval: 3s
@@ -1295,31 +1330,29 @@ services:
     depends_on:
       posthog-kafka:
         condition: service_healthy
+      posthog-zookeeper:
+        condition: service_started
     environment:
-      CLICKHOUSE_DB: posthog
-      CLICKHOUSE_USER: posthog
-      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+      KAFKA_HOSTS: "kafka:9092"
     volumes:
+      - ./posthog/posthog/idl:/idl:ro
       - ./posthog/docker/clickhouse/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
       - ./posthog/docker/clickhouse/config.xml:/etc/clickhouse-server/config.xml:ro
-      - ./posthog/docker/clickhouse/config.d:/etc/clickhouse-server/config.d:ro
+      - ./posthog/docker/clickhouse/config.d/default.xml:/etc/clickhouse-server/config.d/default.xml:ro
       - ./posthog/docker/clickhouse/users.xml:/etc/clickhouse-server/users.xml:ro
       - ./posthog/docker/clickhouse/user_defined_function.xml:/etc/clickhouse-server/user_defined_function.xml:ro
+      - ./posthog/posthog/user_scripts:/var/lib/clickhouse/user_scripts:ro
       - clickhouse-data:/var/lib/clickhouse
-      - clickhouse-logs:/var/log/clickhouse-server
 
   posthog-objectstorage:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     restart: unless-stopped
-    command: server /data --console-address ":9001"
+    entrypoint: sh
+    command: -c 'mkdir -p /data/posthog && minio server --address ":19000" --console-address ":19001" /data'
     environment:
       MINIO_ROOT_USER: object_storage_root_user
       MINIO_ROOT_PASSWORD: object_storage_root_password
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
     volumes:
       - objectstorage:/data
 
@@ -1336,6 +1369,8 @@ services:
         condition: service_healthy
       posthog-kafka:
         condition: service_healthy
+      posthog-objectstorage:
+        condition: service_started
     ports:
       - "${POSTHOG_WEB_PORT}:8000"
     environment:
@@ -1347,12 +1382,16 @@ services:
       CLICKHOUSE_DATABASE: posthog
       CLICKHOUSE_SECURE: "false"
       CLICKHOUSE_VERIFY: "false"
+      CLICKHOUSE_API_USER: api
+      CLICKHOUSE_API_PASSWORD: apipass
+      CLICKHOUSE_APP_USER: app
+      CLICKHOUSE_APP_PASSWORD: apppass
       KAFKA_HOSTS: posthog-kafka:9092
       SITE_URL: ${SITE_URL}
       DISABLE_SECURE_SSL_REDIRECT: "true"
       IS_BEHIND_PROXY: "true"
       OBJECT_STORAGE_ENABLED: "true"
-      OBJECT_STORAGE_ENDPOINT: http://posthog-objectstorage:9000
+      OBJECT_STORAGE_ENDPOINT: http://posthog-objectstorage:19000
       OBJECT_STORAGE_ACCESS_KEY_ID: object_storage_root_user
       OBJECT_STORAGE_SECRET_ACCESS_KEY: object_storage_root_password
       PGHOST: posthog-db
@@ -1360,6 +1399,11 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD}
       DEPLOYMENT: hobby
       OPT_OUT_CAPTURE: "true"
+      OTEL_SDK_DISABLED: "true"
+      USE_GRANIAN: "true"
+      GRANIAN_WORKERS: "2"
+      CDP_API_URL: http://posthog-plugins:6738
+      FLAGS_REDIS_ENABLED: "false"
     volumes:
       - ./compose:/compose:ro
 
@@ -1376,6 +1420,8 @@ services:
         condition: service_healthy
       posthog-kafka:
         condition: service_healthy
+      posthog-web:
+        condition: service_started
     environment:
       SECRET_KEY: ${POSTHOG_SECRET}
       ENCRYPTION_SALT_KEYS: ${ENCRYPTION_SALT_KEYS}
@@ -1385,12 +1431,16 @@ services:
       CLICKHOUSE_DATABASE: posthog
       CLICKHOUSE_SECURE: "false"
       CLICKHOUSE_VERIFY: "false"
+      CLICKHOUSE_API_USER: api
+      CLICKHOUSE_API_PASSWORD: apipass
+      CLICKHOUSE_APP_USER: app
+      CLICKHOUSE_APP_PASSWORD: apppass
       KAFKA_HOSTS: posthog-kafka:9092
       SITE_URL: ${SITE_URL}
       DISABLE_SECURE_SSL_REDIRECT: "true"
       IS_BEHIND_PROXY: "true"
       OBJECT_STORAGE_ENABLED: "true"
-      OBJECT_STORAGE_ENDPOINT: http://posthog-objectstorage:9000
+      OBJECT_STORAGE_ENDPOINT: http://posthog-objectstorage:19000
       OBJECT_STORAGE_ACCESS_KEY_ID: object_storage_root_user
       OBJECT_STORAGE_SECRET_ACCESS_KEY: object_storage_root_password
       PGHOST: posthog-db
@@ -1398,6 +1448,9 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD}
       DEPLOYMENT: hobby
       POSTHOG_SKIP_MIGRATION_CHECKS: "1"
+      OTEL_SDK_DISABLED: "true"
+      CDP_API_URL: http://posthog-plugins:6738
+      FLAGS_REDIS_ENABLED: "false"
 
   posthog-plugins:
     image: posthog/posthog:latest
@@ -1431,9 +1484,11 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  zookeeper-data:
+  zookeeper-datalog:
+  zookeeper-logs:
   redpanda-data:
   clickhouse-data:
-  clickhouse-logs:
   objectstorage:
 "#
     .to_string()
