@@ -436,7 +436,7 @@ ALTER ROLE supabase_admin WITH PASSWORD '{pw}';
 "#,
             pw = postgres_password.replace('\'', "''")
         );
-        tokio::fs::write(volumes_dir.join("db/init/99-roles.sql"), init_sql)
+        tokio::fs::write(volumes_dir.join("db/init/zzz-roles.sql"), init_sql)
             .await
             .map_err(|e| AppError::Internal(format!("failed to write db init script: {e}")))?;
 
@@ -695,7 +695,7 @@ services:
       JWT_EXP: ${JWT_EXPIRY}
     volumes:
       - ./volumes/db/data:/var/lib/postgresql/data:Z
-      - ./volumes/db/init/99-roles.sql:/docker-entrypoint-initdb.d/99-roles.sql:ro
+      - ./volumes/db/init/zzz-roles.sql:/docker-entrypoint-initdb.d/zzz-roles.sql:ro
 "#
     .to_string()
 }
