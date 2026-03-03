@@ -1453,9 +1453,9 @@ services:
       FLAGS_REDIS_ENABLED: "false"
 
   posthog-plugins:
-    image: posthog/posthog:latest
+    image: ghcr.io/posthog/posthog-node:latest
     restart: unless-stopped
-    command: ./bin/plugin-server --no-restart-loop
+    command: node nodejs/dist/index.js
     depends_on:
       posthog-db:
         condition: service_healthy
