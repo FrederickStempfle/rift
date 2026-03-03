@@ -13,6 +13,7 @@ pub mod firewall;
 pub mod models;
 pub mod projects;
 pub mod refresh_tokens;
+pub mod services;
 pub mod users;
 pub mod waf;
 

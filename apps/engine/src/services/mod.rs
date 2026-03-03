@@ -1,6 +1,7 @@
 pub mod abuse;
 pub mod audit;
 pub mod auth;
+pub mod docker_compose;
 pub mod github;
 pub mod password;
 pub mod rate_limit;

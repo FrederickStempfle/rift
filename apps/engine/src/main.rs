@@ -25,7 +25,7 @@ use rift_engine::{
     },
     ssl::SslManager,
     state,
-    ws::{traffic::TrafficBroadcaster, LogBroadcaster},
+    ws::{traffic::TrafficBroadcaster, LogBroadcaster, ServiceLogBroadcaster},
 };
 use tokio::sync::Semaphore;
 
@@ -159,6 +159,7 @@ async fn main() -> anyhow::Result<()> {
         config.waf_event_retention_days,
     );
     let log_broadcaster = LogBroadcaster::new();
+    let service_log_broadcaster = ServiceLogBroadcaster::new();
     let traffic_broadcaster = TrafficBroadcaster::new();
     let geoip = GeoIpResolver::new();
 
@@ -276,6 +277,15 @@ async fn main() -> anyhow::Result<()> {
         waf_cache: WafCache::new(pool.clone()),
         analytics_collector,
         log_broadcaster,
+        service_log_broadcaster: service_log_broadcaster.clone(),
+        docker_compose_manager: rift_engine::services::docker_compose::DockerComposeManager::new(
+            pool.clone(),
+            service_log_broadcaster,
+            config.services_data_dir.clone().into(),
+            config.supabase_kong_port,
+            config.supabase_studio_port,
+            config.supabase_db_port,
+        ),
         traffic_broadcaster,
         geoip,
         ssl_manager: ssl_manager.clone(),

@@ -1,5 +1,7 @@
 pub mod broadcast;
 pub mod handler;
+pub mod service_broadcast;
+pub mod service_handler;
 pub mod traffic;
 
 use std::collections::HashMap;
@@ -9,6 +11,7 @@ use tokio::sync::{broadcast as tokio_broadcast, Mutex};
 use uuid::Uuid;
 
 use self::broadcast::DeployLogMessage;
+use self::service_broadcast::ServiceLogMessage;
 
 const CHANNEL_CAPACITY: usize = 256;
 
@@ -61,6 +64,56 @@ impl LogBroadcaster {
         if let Some(tx) = channels.get(&deployment_id) {
             if tx.receiver_count() == 0 {
                 channels.remove(&deployment_id);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ServiceLogBroadcaster {
+    channels: Arc<Mutex<HashMap<Uuid, tokio_broadcast::Sender<ServiceLogMessage>>>>,
+}
+
+impl Default for ServiceLogBroadcaster {
+    fn default() -> Self {
+        Self {
+            channels: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl ServiceLogBroadcaster {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn send(&self, service_id: Uuid, msg: ServiceLogMessage) {
+        let mut channels = self.channels.lock().await;
+        if let Some(tx) = channels.get(&service_id) {
+            if tx.receiver_count() == 0 {
+                channels.remove(&service_id);
+                return;
+            }
+            let _ = tx.send(msg);
+        }
+    }
+
+    pub async fn subscribe(
+        &self,
+        service_id: Uuid,
+    ) -> tokio_broadcast::Receiver<ServiceLogMessage> {
+        let mut channels = self.channels.lock().await;
+        let tx = channels
+            .entry(service_id)
+            .or_insert_with(|| tokio_broadcast::channel(CHANNEL_CAPACITY).0);
+        tx.subscribe()
+    }
+
+    pub async fn cleanup(&self, service_id: Uuid) {
+        let mut channels = self.channels.lock().await;
+        if let Some(tx) = channels.get(&service_id) {
+            if tx.receiver_count() == 0 {
+                channels.remove(&service_id);
             }
         }
     }

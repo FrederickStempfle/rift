@@ -30,12 +30,13 @@ use crate::{
     runtime::backend::RuntimeBackend,
     scheduler::Scheduler,
     services::{
-        abuse::AbuseGuard, audit::AuditLogger, auth::TokenService, password::PasswordService,
+        abuse::AbuseGuard, audit::AuditLogger, auth::TokenService,
+        docker_compose::DockerComposeManager, password::PasswordService,
         rate_limit::AuthRateLimiters,
     },
     ssl::SslManager,
     state::StateStore,
-    ws::{traffic::TrafficBroadcaster, LogBroadcaster},
+    ws::{traffic::TrafficBroadcaster, LogBroadcaster, ServiceLogBroadcaster},
 };
 
 pub mod access_logs;
@@ -53,6 +54,7 @@ pub mod regions;
 pub mod releases;
 pub mod routing;
 pub mod runtime;
+pub mod services;
 pub mod users;
 pub mod waf;
 pub mod webhooks;
@@ -76,6 +78,8 @@ pub struct AppState {
     pub waf_cache: WafCache,
     pub analytics_collector: AnalyticsCollector,
     pub log_broadcaster: LogBroadcaster,
+    pub service_log_broadcaster: ServiceLogBroadcaster,
+    pub docker_compose_manager: DockerComposeManager,
     pub traffic_broadcaster: TrafficBroadcaster,
     pub geoip: GeoIpResolver,
     pub ssl_manager: SslManager,
@@ -173,8 +177,36 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/{project_id}/wake",
             post(runtime::wake_project),
         )
+        .route(
+            "/api/services",
+            get(services::list_services).post(services::create_service),
+        )
+        .route(
+            "/api/services/{service_id}",
+            get(services::get_service).delete(services::delete_service),
+        )
+        .route(
+            "/api/services/{service_id}/stop",
+            post(services::stop_service),
+        )
+        .route(
+            "/api/services/{service_id}/start",
+            post(services::start_service),
+        )
+        .route(
+            "/api/services/{service_id}/restart",
+            post(services::restart_service),
+        )
+        .route(
+            "/api/services/{service_id}/logs",
+            get(services::list_service_logs),
+        )
         .route("/api/logs", get(logs::list_logs))
         .route("/api/ws/logs", get(crate::ws::handler::ws_logs_handler))
+        .route(
+            "/api/ws/service-logs",
+            get(crate::ws::service_handler::ws_service_logs_handler),
+        )
         .route("/api/ws/traffic", get(traffic_ws::ws_traffic_handler))
         .layer(DefaultBodyLimit::max(1_048_576))
         .layer(

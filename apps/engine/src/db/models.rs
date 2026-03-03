@@ -177,3 +177,29 @@ pub struct AccessLog {
     pub status: i32,
     pub duration_ms: i64,
 }
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct Service {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub service_type: String,
+    pub name: String,
+    pub status: String,
+    pub config: serde_json::Value,
+    pub connection_info: Option<serde_json::Value>,
+    pub error_message: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub stopped_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct ServiceLog {
+    pub id: i64,
+    pub service_id: Uuid,
+    pub timestamp: DateTime<Utc>,
+    pub level: String,
+    pub message: String,
+    pub source: String,
+}

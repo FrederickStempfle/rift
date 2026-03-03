@@ -387,6 +387,23 @@ pub struct Config {
     )]
     pub access_log_cleanup_interval_secs: u64,
 
+    // --- Services Configuration ---
+    /// Data directory for managed services (Supabase, etc.).
+    #[arg(long, env = "RIFT_SERVICES_DATA_DIR", default_value = "/opt/rift/services")]
+    pub services_data_dir: String,
+
+    /// External port for Supabase Kong API gateway.
+    #[arg(long, env = "RIFT_SUPABASE_KONG_PORT", default_value_t = 8000)]
+    pub supabase_kong_port: u16,
+
+    /// External port for Supabase Studio dashboard.
+    #[arg(long, env = "RIFT_SUPABASE_STUDIO_PORT", default_value_t = 3400)]
+    pub supabase_studio_port: u16,
+
+    /// External port for Supabase PostgreSQL.
+    #[arg(long, env = "RIFT_SUPABASE_DB_PORT", default_value_t = 5433)]
+    pub supabase_db_port: u16,
+
     /// Global WAF kill switch. Set to false to bypass all WAF evaluation.
     #[arg(long, env = "RIFT_WAF_ENABLED", default_value_t = true)]
     pub waf_enabled: bool,
