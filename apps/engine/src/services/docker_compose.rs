@@ -695,7 +695,7 @@ services:
       JWT_EXP: ${JWT_EXPIRY}
     volumes:
       - ./volumes/db/data:/var/lib/postgresql/data:Z
-      - ./volumes/db/init:/docker-entrypoint-initdb.d:ro
+      - ./volumes/db/init/99-roles.sql:/docker-entrypoint-initdb.d/99-roles.sql:ro
 "#
     .to_string()
 }
