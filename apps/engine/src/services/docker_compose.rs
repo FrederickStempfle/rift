@@ -1390,6 +1390,7 @@ services:
       SITE_URL: ${SITE_URL}
       DISABLE_SECURE_SSL_REDIRECT: "true"
       IS_BEHIND_PROXY: "true"
+      TRUST_ALL_PROXIES: "true"
       OBJECT_STORAGE_ENABLED: "true"
       OBJECT_STORAGE_ENDPOINT: http://posthog-objectstorage:19000
       OBJECT_STORAGE_ACCESS_KEY_ID: object_storage_root_user
@@ -1404,6 +1405,7 @@ services:
       GRANIAN_WORKERS: "2"
       CDP_API_URL: http://posthog-plugins:6738
       FLAGS_REDIS_ENABLED: "false"
+      SKIP_ASYNC_MIGRATIONS_SETUP: "0"
     volumes:
       - ./compose:/compose:ro
 
@@ -1451,6 +1453,13 @@ services:
       OTEL_SDK_DISABLED: "true"
       CDP_API_URL: http://posthog-plugins:6738
       FLAGS_REDIS_ENABLED: "false"
+      CDP_REDIS_HOST: posthog-redis
+      CDP_REDIS_PORT: "6379"
+      LOGS_REDIS_HOST: posthog-redis
+      LOGS_REDIS_PORT: "6379"
+      LOGS_REDIS_TLS: "false"
+      SESSION_RECORDING_API_REDIS_HOST: posthog-redis
+      SESSION_RECORDING_API_REDIS_PORT: "6379"
 
   posthog-plugins:
     image: ghcr.io/posthog/posthog-node:latest
@@ -1480,6 +1489,13 @@ services:
       PGUSER: posthog
       PGPASSWORD: ${POSTGRES_PASSWORD}
       DEPLOYMENT: hobby
+      CDP_REDIS_HOST: posthog-redis
+      CDP_REDIS_PORT: "6379"
+      LOGS_REDIS_HOST: posthog-redis
+      LOGS_REDIS_PORT: "6379"
+      LOGS_REDIS_TLS: "false"
+      SESSION_RECORDING_API_REDIS_HOST: posthog-redis
+      SESSION_RECORDING_API_REDIS_PORT: "6379"
 
 volumes:
   postgres-data:
