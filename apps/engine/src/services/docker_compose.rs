@@ -656,6 +656,8 @@ services:
       LOGFLARE_URL: http://localhost
       NEXT_PUBLIC_ENABLE_LOGS: "false"
       NEXT_ANALYTICS_BACKEND_PROVIDER: postgres
+      DASHBOARD_USERNAME: ${DASHBOARD_USERNAME}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
     ports:
       - "${STUDIO_PORT}:3000"
 
