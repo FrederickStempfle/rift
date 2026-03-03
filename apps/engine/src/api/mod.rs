@@ -21,6 +21,7 @@ use crate::{
     build::BuildManager,
     config::Config,
     db::DbPool,
+    geoip::GeoIpResolver,
     proxy::{
         acme::AcmeChallengeStore, analytics_collector::AnalyticsCollector,
         firewall_cache::FirewallCache, routing_cache::RoutingCache, tls::CertResolver,
@@ -34,12 +35,13 @@ use crate::{
     },
     ssl::SslManager,
     state::StateStore,
-    ws::LogBroadcaster,
+    ws::{traffic::TrafficBroadcaster, LogBroadcaster},
 };
 
 pub mod access_logs;
 pub mod analytics;
 pub mod auth;
+pub mod traffic_ws;
 pub mod deployments;
 pub mod domains;
 pub mod edge_nodes;
@@ -74,6 +76,8 @@ pub struct AppState {
     pub waf_cache: WafCache,
     pub analytics_collector: AnalyticsCollector,
     pub log_broadcaster: LogBroadcaster,
+    pub traffic_broadcaster: TrafficBroadcaster,
+    pub geoip: GeoIpResolver,
     pub ssl_manager: SslManager,
     pub challenge_store: AcmeChallengeStore,
     pub cert_resolver: CertResolver,
@@ -171,6 +175,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/logs", get(logs::list_logs))
         .route("/api/ws/logs", get(crate::ws::handler::ws_logs_handler))
+        .route("/api/ws/traffic", get(traffic_ws::ws_traffic_handler))
         .layer(DefaultBodyLimit::max(1_048_576))
         .layer(
             ServiceBuilder::new()

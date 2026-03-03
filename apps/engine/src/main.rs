@@ -6,6 +6,7 @@ use rift_engine::{
     build::BuildManager,
     config::Config,
     db,
+    geoip::GeoIpResolver,
     proxy::{
         self, acme::AcmeChallengeStore, analytics_collector::AnalyticsCollector,
         firewall_cache::FirewallCache, routing_cache::RoutingCache, tls::CertResolver,
@@ -24,7 +25,7 @@ use rift_engine::{
     },
     ssl::SslManager,
     state,
-    ws::LogBroadcaster,
+    ws::{traffic::TrafficBroadcaster, LogBroadcaster},
 };
 use tokio::sync::Semaphore;
 
@@ -158,6 +159,8 @@ async fn main() -> anyhow::Result<()> {
         config.waf_event_retention_days,
     );
     let log_broadcaster = LogBroadcaster::new();
+    let traffic_broadcaster = TrafficBroadcaster::new();
+    let geoip = GeoIpResolver::new();
 
     let public_ip = config.resolve_public_ip().await;
     match &public_ip {
@@ -273,6 +276,8 @@ async fn main() -> anyhow::Result<()> {
         waf_cache: WafCache::new(pool.clone()),
         analytics_collector,
         log_broadcaster,
+        traffic_broadcaster,
+        geoip,
         ssl_manager: ssl_manager.clone(),
         challenge_store,
         cert_resolver,

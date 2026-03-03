@@ -64,6 +64,8 @@ services:
       RIFT_HONEYPOT_MODE: ${RIFT_HONEYPOT_MODE:-ban}
       RIFT_HONEYPOT_PATHS: ${RIFT_HONEYPOT_PATHS:-/.env,/.git/config,/backup.sql,/db.sql,/credentials.txt}
       RIFT_HONEYPOT_BAN_WINDOW_SECS: ${RIFT_HONEYPOT_BAN_WINDOW_SECS:-3600}
+      RIFT_SERVER_LAT: ${RIFT_SERVER_LAT:-52.5200}
+      RIFT_SERVER_LNG: ${RIFT_SERVER_LNG:-13.4050}
     ports:
       - "3001:3001"
       - "80:8080"

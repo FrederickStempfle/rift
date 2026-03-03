@@ -367,6 +367,14 @@ pub struct Config {
     #[arg(long, env = "RIFT_BUILD_TIMEOUT_SECS", default_value_t = 600)]
     pub build_timeout_secs: u64,
 
+    /// Server latitude for live traffic globe (WGS84). Defaults to Berlin.
+    #[arg(long, env = "RIFT_SERVER_LAT", default_value_t = 52.5200)]
+    pub server_lat: f64,
+
+    /// Server longitude for live traffic globe (WGS84). Defaults to Berlin.
+    #[arg(long, env = "RIFT_SERVER_LNG", default_value_t = 13.4050)]
+    pub server_lng: f64,
+
     /// Access log retention period in days. Set to 0 to disable cleanup.
     #[arg(long, env = "RIFT_ACCESS_LOG_RETENTION_DAYS", default_value_t = 30)]
     pub access_log_retention_days: u16,

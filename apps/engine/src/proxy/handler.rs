@@ -28,6 +28,7 @@ use crate::{
     },
     services::abuse::{AbuseDecision, AbuseLimit},
     state::RoutingEntry,
+    ws::traffic::TrafficEvent,
 };
 
 type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Full<Bytes>>;
@@ -109,18 +110,44 @@ pub async fn handle_request(
             .observe(client_ip, &analytics_path, status_code);
     }
 
+    let event_timestamp = Utc::now();
+    let event_duration_ms = start.elapsed().as_millis() as u64;
     state.analytics_collector.record(RequestEvent {
         project_id,
-        timestamp: Utc::now(),
+        timestamp: event_timestamp,
         client_ip,
-        host: analytics_host,
-        method: analytics_method,
+        host: analytics_host.clone(),
+        method: analytics_method.clone(),
         status: status_code,
-        duration_ms: start.elapsed().as_millis() as u64,
+        duration_ms: event_duration_ms,
         cold_start,
         path: analytics_path,
         referer: analytics_referer,
     });
+
+    // Fire-and-forget: geolocate client IP and broadcast live traffic event.
+    {
+        let geoip = state.geoip.clone();
+        let broadcaster = state.traffic_broadcaster.clone();
+        let dst_lat = state.config.server_lat;
+        let dst_lng = state.config.server_lng;
+        tokio::spawn(async move {
+            if let Some((src_lat, src_lng, country)) = geoip.lookup(client_ip).await {
+                broadcaster.broadcast(TrafficEvent {
+                    timestamp: event_timestamp,
+                    src_lat,
+                    src_lng,
+                    dst_lat,
+                    dst_lng,
+                    method: analytics_method,
+                    status: status_code,
+                    host: analytics_host,
+                    country,
+                    duration_ms: event_duration_ms,
+                });
+            }
+        });
+    }
 
     match result {
         Ok((resp, _, _)) => Ok(resp),
