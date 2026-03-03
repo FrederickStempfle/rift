@@ -539,7 +539,7 @@ services:
     image: supabase/studio:2026.03.02-sha-5644bee
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/platform/profile').then(r=>{if(r.status!==200)throw Error()})"]
+      test: ["CMD", "node", "-e", "const os=require('os');fetch('http://'+os.hostname()+':3000/api/platform/profile').then(r=>{if(r.status<200||r.status>=400)throw Error()})"]
       timeout: 5s
       interval: 5s
       retries: 3
@@ -547,6 +547,7 @@ services:
       meta:
         condition: service_healthy
     environment:
+      HOSTNAME: studio
       STUDIO_PG_META_URL: http://meta:8080
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       DEFAULT_ORGANIZATION_NAME: ${STUDIO_DEFAULT_ORGANIZATION}
@@ -661,6 +662,7 @@ services:
       APP_NAME: realtime
       SEED_SELF_HOST: "true"
       SU_PASSWORD: ${POSTGRES_PASSWORD}
+      METRICS_JWT_SECRET: ${JWT_SECRET}
 
   storage:
     image: supabase/storage-api:v1.41.0
