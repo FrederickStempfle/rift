@@ -381,13 +381,6 @@ SITE_URL=http://localhost:{web_port}
         // Create compose/start and compose/wait scripts (mimics PostHog deploy-hobby)
         self.write_posthog_scripts(&service_dir).await?;
 
-        // Create data directories
-        for dir in &["postgres-data", "clickhouse-data", "clickhouse-logs", "redpanda-data", "objectstorage"] {
-            tokio::fs::create_dir_all(service_dir.join(dir))
-                .await
-                .map_err(|e| AppError::Internal(format!("failed to create {dir} dir: {e}")))?;
-        }
-
         self.log(service_id, "info", "Pulling PostHog Docker images...", "docker")
             .await?;
 
@@ -1247,7 +1240,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: posthog
     volumes:
-      - ./postgres-data:/var/lib/postgresql/data:Z
+      - postgres-data:/var/lib/postgresql/data
 
   posthog-redis:
     image: redis:7.2-alpine
@@ -1257,6 +1250,8 @@ services:
       interval: 3s
       timeout: 10s
       retries: 10
+    volumes:
+      - redis-data:/data
 
   posthog-kafka:
     image: docker.redpanda.com/redpandadata/redpanda:v25.1.9
@@ -1287,7 +1282,7 @@ services:
       KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: "300000"
       KAFKA_LOG_RETENTION_HOURS: "1"
     volumes:
-      - ./redpanda-data:/var/lib/redpanda/data:Z
+      - redpanda-data:/var/lib/redpanda/data
 
   posthog-clickhouse:
     image: clickhouse/clickhouse-server:24.8-alpine
@@ -1305,11 +1300,11 @@ services:
       CLICKHOUSE_USER: posthog
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
     volumes:
-      - ./posthog/docker/clickhouse/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
+      - ./posthog/docker/clickhouse/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
       - ./posthog/docker/clickhouse/config.xml:/etc/clickhouse-server/config.xml:ro
       - ./posthog/docker/clickhouse/users.xml:/etc/clickhouse-server/users.xml:ro
-      - ./clickhouse-data:/var/lib/clickhouse:Z
-      - ./clickhouse-logs:/var/log/clickhouse-server:Z
+      - clickhouse-data:/var/lib/clickhouse
+      - clickhouse-logs:/var/log/clickhouse-server
 
   posthog-objectstorage:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
@@ -1324,7 +1319,7 @@ services:
       timeout: 5s
       retries: 10
     volumes:
-      - ./objectstorage:/data:Z
+      - objectstorage:/data
 
   posthog-web:
     image: posthog/posthog:latest
@@ -1364,7 +1359,7 @@ services:
       DEPLOYMENT: hobby
       OPT_OUT_CAPTURE: "true"
     volumes:
-      - ./compose:/compose:Z
+      - ./compose:/compose:ro
 
   posthog-worker:
     image: posthog/posthog:latest
@@ -1430,6 +1425,14 @@ services:
       PGUSER: posthog
       PGPASSWORD: ${POSTGRES_PASSWORD}
       DEPLOYMENT: hobby
+
+volumes:
+  postgres-data:
+  redis-data:
+  redpanda-data:
+  clickhouse-data:
+  clickhouse-logs:
+  objectstorage:
 "#
     .to_string()
 }
