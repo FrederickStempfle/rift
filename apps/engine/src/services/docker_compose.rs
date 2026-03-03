@@ -659,10 +659,15 @@ services:
       LOGFLARE_URL: http://localhost
       NEXT_PUBLIC_ENABLE_LOGS: "false"
       NEXT_ANALYTICS_BACKEND_PROVIDER: postgres
+      SNIPPETS_MANAGEMENT_FOLDER: /app/snippets
+      EDGE_FUNCTIONS_MANAGEMENT_FOLDER: /app/edge-functions
       DASHBOARD_USERNAME: ${DASHBOARD_USERNAME}
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
     ports:
       - "${STUDIO_PORT}:3000"
+    volumes:
+      - ./volumes/snippets:/app/snippets:Z
+      - ./volumes/functions:/app/edge-functions:Z
 
   kong:
     image: kong:2.8.1
