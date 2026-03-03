@@ -89,7 +89,7 @@ services:
     volumes:
       - deployments:/var/rift/deployments
       - ssl:/var/rift/ssl
-      - services_data:/opt/rift/services
+      - /opt/rift/services:/opt/rift/services
       # Docker socket for managing Supabase containers
       - /var/run/docker.sock:/var/run/docker.sock
       # Mount cgroup v2 filesystem for worker pool resource limits
@@ -130,4 +130,3 @@ volumes:
   redis_data:
   deployments:
   ssl:
-  services_data:
