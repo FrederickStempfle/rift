@@ -39,6 +39,7 @@ services:
     env_file:
       - ../.env
     environment:
+      DOCKER_API_VERSION: "1.41"
       DATABASE_URL: postgres://rift:rift@db:5432/rift
       RIFT_STATE_STORE: ${RIFT_STATE_STORE:-redis}
       RIFT_REDIS_URL: ${RIFT_REDIS_URL:-redis://redis:6379}

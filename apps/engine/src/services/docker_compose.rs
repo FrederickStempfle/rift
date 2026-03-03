@@ -489,8 +489,6 @@ fn generate_supabase_jwt(jwt_secret: &str, role: &str) -> String {
 
 fn generate_supabase_compose() -> String {
     r#"# Supabase Docker Compose (managed by Rift)
-version: "3.8"
-
 services:
   studio:
     image: supabase/studio:20240422-5cf8f30
