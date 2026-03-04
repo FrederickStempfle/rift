@@ -408,6 +408,10 @@ pub struct Config {
     #[arg(long, env = "RIFT_POSTHOG_WEB_PORT", default_value_t = 8100)]
     pub posthog_web_port: u16,
 
+    /// External port for n8n workflow editor.
+    #[arg(long, env = "RIFT_N8N_PORT", default_value_t = 5678)]
+    pub n8n_port: u16,
+
     /// Global WAF kill switch. Set to false to bypass all WAF evaluation.
     #[arg(long, env = "RIFT_WAF_ENABLED", default_value_t = true)]
     pub waf_enabled: bool,

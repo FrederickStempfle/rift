@@ -59,7 +59,7 @@ pub async fn create_service(
     auth_user: AuthUser,
     Json(payload): Json<CreateServiceRequest>,
 ) -> AppResult<(StatusCode, Json<ServiceResponse>)> {
-    if !["supabase", "posthog"].contains(&payload.service_type.as_str()) {
+    if !["supabase", "posthog", "n8n"].contains(&payload.service_type.as_str()) {
         return Err(AppError::BadRequest(format!(
             "unsupported service type: {}",
             payload.service_type
@@ -97,6 +97,7 @@ pub async fn create_service(
         let result = match service_type.as_str() {
             "supabase" => docker_manager.deploy_supabase(service_id).await,
             "posthog" => docker_manager.deploy_posthog(service_id).await,
+            "n8n" => docker_manager.deploy_n8n(service_id).await,
             _ => unreachable!(),
         };
         if let Err(e) = result {
@@ -141,7 +142,8 @@ pub async fn stop_service(
         let result = match service_type.as_str() {
             "supabase" => docker_manager.stop_supabase(service_id).await,
             "posthog" => docker_manager.stop_posthog(service_id).await,
-            _ => unreachable!(),
+            "n8n" => docker_manager.stop_n8n(service_id).await,
+            _ => Ok(()),
         };
         if let Err(e) = result {
             tracing::error!(service_id = %service_id, error = %e, "failed to stop service");
@@ -170,7 +172,8 @@ pub async fn start_service(
         let result = match service_type.as_str() {
             "supabase" => docker_manager.start_supabase(service_id).await,
             "posthog" => docker_manager.start_posthog(service_id).await,
-            _ => unreachable!(),
+            "n8n" => docker_manager.start_n8n(service_id).await,
+            _ => Ok(()),
         };
         if let Err(e) = result {
             tracing::error!(service_id = %service_id, error = %e, "failed to start service");
@@ -199,7 +202,8 @@ pub async fn restart_service(
         let result = match service_type.as_str() {
             "supabase" => docker_manager.restart_supabase(service_id).await,
             "posthog" => docker_manager.restart_posthog(service_id).await,
-            _ => unreachable!(),
+            "n8n" => docker_manager.restart_n8n(service_id).await,
+            _ => Ok(()),
         };
         if let Err(e) = result {
             tracing::error!(service_id = %service_id, error = %e, "failed to restart service");
@@ -218,16 +222,17 @@ pub async fn delete_service(
         .await?
         .ok_or_else(|| AppError::NotFound("service not found".into()))?;
 
+    let service_type = service.service_type.clone();
     let docker_manager = state.docker_compose_manager.clone();
     let pool = state.pool.clone();
     let sid = service.id;
-    let service_type = service.service_type.clone();
 
     tokio::spawn(async move {
         let result = match service_type.as_str() {
             "supabase" => docker_manager.remove_supabase(sid).await,
             "posthog" => docker_manager.remove_posthog(sid).await,
-            _ => unreachable!(),
+            "n8n" => docker_manager.remove_n8n(sid).await,
+            _ => Ok(()),
         };
         if let Err(e) = result {
             tracing::error!(service_id = %sid, error = %e, "failed to remove service containers");
