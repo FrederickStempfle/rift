@@ -1684,6 +1684,9 @@ volumes:
   redpanda-data:
   clickhouse-data:
   objectstorage:
+"#
+    .to_string()
+}
 
 fn generate_n8n_compose() -> String {
     r#"# n8n Docker Compose (managed by Rift)
