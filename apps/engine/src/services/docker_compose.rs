@@ -1911,7 +1911,7 @@ fn generate_affine_compose() -> String {
     r#"# AFFiNE Docker Compose (managed by Rift)
 services:
   affine:
-    image: ghcr.io/toeverything/affine-self-hosted:latest
+    image: ghcr.io/toeverything/affine:stable
     restart: unless-stopped
     depends_on:
       affine-db:
@@ -1925,8 +1925,6 @@ services:
       retries: 5
       start_period: 90s
     environment:
-      NODE_OPTIONS: "--import=./scripts/register.js"
-      AFFINE_CONFIG_PATH: /root/.affine/config
       AFFINE_SERVER_HOST: "0.0.0.0"
       AFFINE_SERVER_PORT: "3010"
       DATABASE_URL: ${DATABASE_URL}
