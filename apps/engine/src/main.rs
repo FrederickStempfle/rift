@@ -288,6 +288,7 @@ async fn main() -> anyhow::Result<()> {
             config.supabase_db_port,
             config.posthog_web_port,
             config.n8n_port,
+            config.affine_port,
         ),
         traffic_broadcaster,
         geoip,

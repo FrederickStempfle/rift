@@ -59,7 +59,7 @@ pub async fn create_service(
     auth_user: AuthUser,
     Json(payload): Json<CreateServiceRequest>,
 ) -> AppResult<(StatusCode, Json<ServiceResponse>)> {
-    if !["supabase", "posthog", "n8n"].contains(&payload.service_type.as_str()) {
+    if !["supabase", "posthog", "n8n", "affine"].contains(&payload.service_type.as_str()) {
         return Err(AppError::BadRequest(format!(
             "unsupported service type: {}",
             payload.service_type
@@ -98,6 +98,7 @@ pub async fn create_service(
             "supabase" => docker_manager.deploy_supabase(service_id).await,
             "posthog" => docker_manager.deploy_posthog(service_id).await,
             "n8n" => docker_manager.deploy_n8n(service_id).await,
+            "affine" => docker_manager.deploy_affine(service_id).await,
             _ => unreachable!(),
         };
         if let Err(e) = result {
@@ -143,6 +144,7 @@ pub async fn stop_service(
             "supabase" => docker_manager.stop_supabase(service_id).await,
             "posthog" => docker_manager.stop_posthog(service_id).await,
             "n8n" => docker_manager.stop_n8n(service_id).await,
+            "affine" => docker_manager.stop_affine(service_id).await,
             _ => Ok(()),
         };
         if let Err(e) = result {
@@ -173,6 +175,7 @@ pub async fn start_service(
             "supabase" => docker_manager.start_supabase(service_id).await,
             "posthog" => docker_manager.start_posthog(service_id).await,
             "n8n" => docker_manager.start_n8n(service_id).await,
+            "affine" => docker_manager.start_affine(service_id).await,
             _ => Ok(()),
         };
         if let Err(e) = result {
@@ -203,6 +206,7 @@ pub async fn restart_service(
             "supabase" => docker_manager.restart_supabase(service_id).await,
             "posthog" => docker_manager.restart_posthog(service_id).await,
             "n8n" => docker_manager.restart_n8n(service_id).await,
+            "affine" => docker_manager.restart_affine(service_id).await,
             _ => Ok(()),
         };
         if let Err(e) = result {
@@ -232,6 +236,7 @@ pub async fn delete_service(
             "supabase" => docker_manager.remove_supabase(sid).await,
             "posthog" => docker_manager.remove_posthog(sid).await,
             "n8n" => docker_manager.remove_n8n(sid).await,
+            "affine" => docker_manager.remove_affine(sid).await,
             _ => Ok(()),
         };
         if let Err(e) = result {

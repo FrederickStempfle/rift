@@ -412,6 +412,10 @@ pub struct Config {
     #[arg(long, env = "RIFT_N8N_PORT", default_value_t = 5678)]
     pub n8n_port: u16,
 
+    /// External port for AFFiNE knowledge base.
+    #[arg(long, env = "RIFT_AFFINE_PORT", default_value_t = 3010)]
+    pub affine_port: u16,
+
     /// Global WAF kill switch. Set to false to bypass all WAF evaluation.
     #[arg(long, env = "RIFT_WAF_ENABLED", default_value_t = true)]
     pub waf_enabled: bool,
