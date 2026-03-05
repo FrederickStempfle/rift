@@ -1919,7 +1919,7 @@ services:
       affine-redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3010/"]
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3010/').then(r=>{process.exit(r.ok?0:1)}).catch(()=>process.exit(1))\""]
       timeout: 5s
       interval: 10s
       retries: 5
