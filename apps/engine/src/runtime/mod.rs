@@ -48,10 +48,21 @@ pub struct RuntimeManager {
     db_pool: Option<PgPool>,
 }
 
-#[derive(Debug)]
 struct RuntimeState {
     active: HashMap<Uuid, ActiveRuntime>,
     suspended: HashMap<Uuid, SuspendedRuntime>,
+    /// Projects currently being woken — waiters subscribe to the Notify.
+    waking: HashMap<Uuid, Arc<tokio::sync::Notify>>,
+}
+
+impl std::fmt::Debug for RuntimeState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeState")
+            .field("active", &self.active)
+            .field("suspended", &self.suspended)
+            .field("waking_count", &self.waking.len())
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -107,6 +118,7 @@ impl RuntimeManager {
             inner: Arc::new(Mutex::new(RuntimeState {
                 active: HashMap::new(),
                 suspended: HashMap::new(),
+                waking: HashMap::new(),
             })),
             function_registry: None,
             seccomp: None,
@@ -377,7 +389,13 @@ impl RuntimeManager {
                 },
             );
             drop(state);
-            let _ = runtime.child.lock().await.kill().await;
+
+            // Graceful drain: let in-flight requests finish before killing.
+            let child = runtime.child;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let _ = child.lock().await.kill().await;
+            });
 
             // Persist to DB
             if let Some(ref db) = self.db_pool {
@@ -415,12 +433,31 @@ impl RuntimeManager {
 
     /// Wake a suspended project: re-spawn the Deno process and return the URL.
     /// Returns `None` if the project isn't suspended.
+    ///
+    /// Concurrent callers are deduplicated: only the first spawns the process,
+    /// subsequent callers wait and receive the same URL.
     pub async fn wake(&self, project_id: Uuid) -> Result<Option<String>, AppError> {
-        let suspended = { self.inner.lock().await.suspended.remove(&project_id) };
+        let suspended = {
+            let mut state = self.inner.lock().await;
 
-        let suspended = match suspended {
-            Some(s) => s,
-            None => return Ok(None),
+            // Another request is already waking this project — wait for it.
+            if let Some(notify) = state.waking.get(&project_id) {
+                let notify = Arc::clone(notify);
+                drop(state);
+                notify.notified().await;
+                return Ok(self.active_url(project_id).await);
+            }
+
+            match state.suspended.remove(&project_id) {
+                Some(s) => {
+                    // Mark as waking so concurrent callers wait.
+                    state
+                        .waking
+                        .insert(project_id, Arc::new(tokio::sync::Notify::new()));
+                    s
+                }
+                None => return Ok(None),
+            }
         };
 
         tracing::info!(
@@ -437,6 +474,14 @@ impl RuntimeManager {
                 env_vars: suspended.env_vars.clone(),
             })
             .await;
+
+        // Remove from waking and notify all waiters regardless of success/failure.
+        let notify = {
+            self.inner.lock().await.waking.remove(&project_id)
+        };
+        if let Some(notify) = notify {
+            notify.notify_waiters();
+        }
 
         let (url, _port) = match result {
             Ok(v) => v,
@@ -493,8 +538,12 @@ impl RuntimeManager {
                 );
                 drop(state);
 
-                // Kill the process
-                let _ = runtime.child.lock().await.kill().await;
+                // Graceful drain: let in-flight requests finish before killing.
+                let child = runtime.child.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    let _ = child.lock().await.kill().await;
+                });
 
                 // Persist to DB
                 if let Some(ref db) = self.db_pool {
@@ -550,8 +599,9 @@ impl RuntimeManager {
                 tracing::warn!(
                     deployment_id = %deployment.id,
                     project_id = %deployment.project_id,
-                    "workspace directory missing, skipping restore"
+                    "workspace directory missing, marking deployment as failed"
                 );
+                let _ = deployments::mark_failed(pool, deployment.id, None).await;
                 continue;
             }
 
@@ -561,8 +611,9 @@ impl RuntimeManager {
             } else {
                 tracing::warn!(
                     deployment_id = %deployment.id,
-                    "cannot detect runtime kind, skipping restore"
+                    "cannot detect runtime kind, marking deployment as failed"
                 );
+                let _ = deployments::mark_failed(pool, deployment.id, None).await;
                 continue;
             };
 
@@ -619,8 +670,9 @@ impl RuntimeManager {
                                 deployment_id = %deployment.id,
                                 project_id = %deployment.project_id,
                                 error = %e,
-                                "failed to restore function deployment"
+                                "failed to restore function deployment, marking as failed"
                             );
+                            let _ = deployments::mark_failed(pool, deployment.id, None).await;
                         }
                     }
                     continue;
@@ -651,8 +703,9 @@ impl RuntimeManager {
                         deployment_id = %deployment.id,
                         project_id = %deployment.project_id,
                         error = %e,
-                        "failed to restore deployment"
+                        "failed to restore deployment, marking as failed"
                     );
+                    let _ = deployments::mark_failed(pool, deployment.id, None).await;
                 }
             }
         }
@@ -676,12 +729,14 @@ impl RuntimeManager {
         for deployment in suspended_list {
             let workspace_dir = PathBuf::from(&config.deploy_root).join(deployment.id.to_string());
             if !workspace_dir.exists() {
+                let _ = deployments::mark_failed(pool, deployment.id, None).await;
                 continue;
             }
 
             let kind = if let Some(kind) = detect_runtime_kind(&workspace_dir) {
                 kind
             } else {
+                let _ = deployments::mark_failed(pool, deployment.id, None).await;
                 continue;
             };
 
@@ -709,6 +764,87 @@ impl RuntimeManager {
         }
 
         restored
+    }
+
+    /// Spawn a background health monitor that detects crashed child processes
+    /// and moves them to suspended state for automatic re-wake on next request.
+    pub fn spawn_health_monitor(&self) {
+        let manager = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            tracing::info!("process health monitor started (15s interval)");
+
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+
+                // Phase 1: Collect project IDs and check liveness
+                let project_ids: Vec<Uuid> = {
+                    manager.inner.lock().await.active.keys().copied().collect()
+                };
+
+                let mut crashed = Vec::new();
+                for project_id in project_ids {
+                    let child_arc = {
+                        let state = manager.inner.lock().await;
+                        match state.active.get(&project_id) {
+                            Some(runtime) => Arc::clone(&runtime.child),
+                            None => continue,
+                        }
+                    };
+
+                    let mut child = child_arc.lock().await;
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            crashed.push((project_id, status));
+                        }
+                        Ok(None) => {} // still running
+                        Err(e) => {
+                            tracing::warn!(
+                                %project_id,
+                                error = %e,
+                                "failed to check process status"
+                            );
+                        }
+                    }
+                }
+
+                // Phase 2: Move crashed deployments to suspended
+                for (project_id, status) in crashed {
+                    let mut state = manager.inner.lock().await;
+                    if let Some(runtime) = state.active.remove(&project_id) {
+                        let deployment_id = runtime.deployment_id;
+                        tracing::error!(
+                            %project_id,
+                            %deployment_id,
+                            exit_status = ?status,
+                            "active process crashed, moving to suspended for re-wake"
+                        );
+
+                        state.suspended.insert(
+                            project_id,
+                            SuspendedRuntime {
+                                deployment_id,
+                                kind: runtime.kind.clone(),
+                                env_vars: runtime.env_vars.clone(),
+                            },
+                        );
+                        drop(state);
+
+                        if let Some(ref db) = manager.db_pool {
+                            if let Err(e) =
+                                deployments::mark_suspended(db, deployment_id).await
+                            {
+                                tracing::warn!(
+                                    %deployment_id,
+                                    error = %e,
+                                    "failed to persist crash-suspend to DB"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        });
     }
 }
 

@@ -69,6 +69,8 @@ pub struct WorkerPool {
     active: Mutex<HashMap<Uuid, ActiveAssignment>>,
     /// Deployments that were active but whose workers were reclaimed.
     suspended: Mutex<HashMap<Uuid, SuspendedInfo>>,
+    /// Projects currently being woken — waiters subscribe to the Notify.
+    waking: Mutex<HashMap<Uuid, Arc<tokio::sync::Notify>>>,
     /// Seccomp enforcement state.
     seccomp: SeccompEnforcer,
     /// Database pool for persisting suspend/wake state transitions.
@@ -105,6 +107,7 @@ impl WorkerPool {
             warm: Mutex::new(Vec::new()),
             active: Mutex::new(HashMap::new()),
             suspended: Mutex::new(HashMap::new()),
+            waking: Mutex::new(HashMap::new()),
             seccomp,
             db_pool,
             enforcement_mode,
@@ -411,12 +414,29 @@ impl WorkerPool {
     }
 
     /// Wake a suspended project by re-specializing a warm worker.
+    ///
+    /// Concurrent callers are deduplicated: only the first spawns the worker,
+    /// subsequent callers wait and receive the same URL.
     pub async fn wake(self: &Arc<Self>, project_id: Uuid) -> Result<Option<String>, AppError> {
-        let suspended = { self.suspended.lock().await.remove(&project_id) };
+        let suspended = {
+            let mut waking = self.waking.lock().await;
 
-        let suspended = match suspended {
-            Some(s) => s,
-            None => return Ok(None),
+            // Another request is already waking this project — wait for it.
+            if let Some(notify) = waking.get(&project_id) {
+                let notify = Arc::clone(notify);
+                drop(waking);
+                notify.notified().await;
+                return Ok(self.active_url(project_id).await);
+            }
+
+            let mut suspended_map = self.suspended.lock().await;
+            match suspended_map.remove(&project_id) {
+                Some(s) => {
+                    waking.insert(project_id, Arc::new(tokio::sync::Notify::new()));
+                    s
+                }
+                None => return Ok(None),
+            }
         };
 
         tracing::info!(
@@ -434,6 +454,12 @@ impl WorkerPool {
                 env_vars: suspended.env_vars.clone(),
             })
             .await;
+
+        // Remove from waking and notify all waiters regardless of success/failure.
+        let notify = { self.waking.lock().await.remove(&project_id) };
+        if let Some(notify) = notify {
+            notify.notify_waiters();
+        }
 
         let (url, _) = match result {
             Ok(v) => v,
@@ -545,8 +571,9 @@ impl WorkerPool {
                 tracing::warn!(
                     deployment_id = %deployment.id,
                     project_id = %deployment.project_id,
-                    "workspace directory missing, skipping restore"
+                    "workspace directory missing, marking deployment as failed"
                 );
+                let _ = deployments::mark_failed(pool, deployment.id, None).await;
                 continue;
             }
 
@@ -556,8 +583,9 @@ impl WorkerPool {
                 None => {
                     tracing::warn!(
                         deployment_id = %deployment.id,
-                        "cannot detect runtime kind, skipping restore"
+                        "cannot detect runtime kind, marking deployment as failed"
                     );
+                    let _ = deployments::mark_failed(pool, deployment.id, None).await;
                     continue;
                 }
             };
@@ -605,12 +633,16 @@ impl WorkerPool {
         for deployment in suspended_list {
             let workspace_dir = PathBuf::from(&config.deploy_root).join(deployment.id.to_string());
             if !workspace_dir.exists() {
+                let _ = deployments::mark_failed(pool, deployment.id, None).await;
                 continue;
             }
 
             let kind = match detect_runtime_kind(&workspace_dir) {
                 Some(k) => k,
-                None => continue,
+                None => {
+                    let _ = deployments::mark_failed(pool, deployment.id, None).await;
+                    continue;
+                }
             };
 
             let user_env_vars =

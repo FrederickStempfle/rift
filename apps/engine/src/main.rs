@@ -125,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
             }
             _ => {
                 tracing::info!("runtime mode: process (legacy subprocesses)");
+                runtime_manager.spawn_health_monitor();
                 Arc::new(ProcessBackend::new(runtime_manager.clone()))
             }
         };
