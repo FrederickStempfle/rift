@@ -16,6 +16,8 @@ pub struct DockerComposeManager {
     pool: sqlx::PgPool,
     service_log_broadcaster: ServiceLogBroadcaster,
     data_dir: PathBuf,
+    public_host: String,
+    proxy_scheme: String,
     kong_port: u16,
     studio_port: u16,
     db_port: u16,
@@ -29,6 +31,8 @@ impl DockerComposeManager {
         pool: sqlx::PgPool,
         service_log_broadcaster: ServiceLogBroadcaster,
         data_dir: PathBuf,
+        public_host: String,
+        proxy_scheme: String,
         kong_port: u16,
         studio_port: u16,
         db_port: u16,
@@ -40,6 +44,8 @@ impl DockerComposeManager {
             pool,
             service_log_broadcaster,
             data_dir,
+            public_host,
+            proxy_scheme,
             kong_port,
             studio_port,
             db_port,
@@ -91,8 +97,8 @@ KONG_HTTP_PORT={kong_port}
 STUDIO_PORT={studio_port}
 POSTGRES_EXTERNAL_PORT={db_port}
 
-API_EXTERNAL_URL=http://localhost:{kong_port}
-SUPABASE_PUBLIC_URL=http://localhost:{kong_port}
+API_EXTERNAL_URL={scheme}://{public_host}:{kong_port}
+SUPABASE_PUBLIC_URL={scheme}://{public_host}:{kong_port}
 
 SITE_URL=http://localhost:3000
 ADDITIONAL_REDIRECT_URLS=
@@ -112,6 +118,8 @@ STUDIO_DEFAULT_PROJECT=Default
             service_role_key = service_role_key,
             dashboard_password = dashboard_password,
             secret_key_base = secret_key_base,
+            scheme = self.proxy_scheme,
+            public_host = self.public_host,
             kong_port = self.kong_port,
             studio_port = self.studio_port,
             db_port = self.db_port,
@@ -191,13 +199,13 @@ STUDIO_DEFAULT_PROJECT=Default
             // internally. `api_url`/`studio_url` use localhost published ports for
             // direct user access from the VPS host.
             let connection_info = serde_json::json!({
-                "api_url": format!("http://localhost:{}", self.kong_port),
-                "studio_url": format!("http://localhost:{}", self.studio_port),
+                "api_url": format!("{}://{}:{}", self.proxy_scheme, self.public_host, self.kong_port),
+                "studio_url": format!("{}://{}:{}", self.proxy_scheme, self.public_host, self.studio_port),
                 "internal_api_url": format!("http://{}-kong-1:8000", service_id),
                 "internal_studio_url": format!("http://{}-studio-1:3000", service_id),
                 "db_connection_string": format!(
-                    "postgresql://postgres:{}@localhost:{}/postgres",
-                    postgres_password, self.db_port
+                    "postgresql://postgres:{}@{}:{}/postgres",
+                    postgres_password, self.public_host, self.db_port
                 ),
                 "anon_key": anon_key,
                 "service_role_key": service_role_key,
@@ -366,11 +374,13 @@ POSTHOG_SECRET={secret_key}
 ENCRYPTION_SALT_KEYS={encryption_salt}
 POSTGRES_PASSWORD={postgres_password}
 POSTHOG_WEB_PORT={web_port}
-SITE_URL=http://localhost:{web_port}
+SITE_URL={scheme}://{public_host}:{web_port}
 "#,
             secret_key = secret_key,
             encryption_salt = encryption_salt,
             postgres_password = postgres_password,
+            scheme = self.proxy_scheme,
+            public_host = self.public_host,
             web_port = self.posthog_web_port,
         );
 
@@ -426,7 +436,7 @@ SITE_URL=http://localhost:{web_port}
 
         if healthy {
             let connection_info = serde_json::json!({
-                "app_url": format!("http://localhost:{}", self.posthog_web_port),
+                "app_url": format!("{}://{}:{}", self.proxy_scheme, self.public_host, self.posthog_web_port),
                 "internal_app_url": format!("http://{}-posthog-web-1:8000", service_id),
             });
 
@@ -625,10 +635,12 @@ N8N_HOST=0.0.0.0
 N8N_PROTOCOL=http
 N8N_ENCRYPTION_KEY={encryption_key}
 N8N_USER_MANAGEMENT_JWT_SECRET={jwt_secret}
-WEBHOOK_URL=http://localhost:{n8n_port}
+WEBHOOK_URL={scheme}://{public_host}:{n8n_port}
 GENERIC_TIMEZONE=UTC
 N8N_EXTERNAL_PORT={n8n_port}
-"#
+"#,
+            scheme = self.proxy_scheme,
+            public_host = self.public_host,
         );
 
         tokio::fs::write(service_dir.join(".env"), &env_content)
@@ -688,9 +700,9 @@ N8N_EXTERNAL_PORT={n8n_port}
 
         if healthy {
             let connection_info = serde_json::json!({
-                "editor_url": format!("http://localhost:{}", self.n8n_port),
+                "editor_url": format!("{}://{}:{}", self.proxy_scheme, self.public_host, self.n8n_port),
                 "internal_editor_url": format!("http://{}-n8n-1:5678", service_id),
-                "webhook_url": format!("http://localhost:{}/webhook", self.n8n_port),
+                "webhook_url": format!("{}://{}:{}/webhook", self.proxy_scheme, self.public_host, self.n8n_port),
                 "encryption_key": encryption_key,
             });
 
@@ -879,7 +891,7 @@ AFFINE_EXTERNAL_PORT={affine_port}
 
         if healthy {
             let connection_info = serde_json::json!({
-                "app_url": format!("http://localhost:{}", self.affine_port),
+                "app_url": format!("{}://{}:{}", self.proxy_scheme, self.public_host, self.affine_port),
                 "internal_app_url": format!("http://{}-affine-1:3010", service_id),
             });
 

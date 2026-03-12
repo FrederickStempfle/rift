@@ -283,6 +283,8 @@ async fn main() -> anyhow::Result<()> {
             pool.clone(),
             service_log_broadcaster,
             config.services_data_dir.clone().into(),
+            config.base_domain.clone(),
+            config.proxy_scheme.clone(),
             config.supabase_kong_port,
             config.supabase_studio_port,
             config.supabase_db_port,
