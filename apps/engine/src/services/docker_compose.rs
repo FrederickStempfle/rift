@@ -201,6 +201,8 @@ STUDIO_DEFAULT_PROJECT=Default
                 ),
                 "anon_key": anon_key,
                 "service_role_key": service_role_key,
+                "dashboard_username": "supabase",
+                "dashboard_password": dashboard_password,
             });
 
             db_services::update_connection_info(&self.pool, service_id, &connection_info).await?;
