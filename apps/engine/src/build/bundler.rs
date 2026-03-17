@@ -40,6 +40,45 @@ Deno.serve({ port, hostname: "0.0.0.0" }, async (req) => {
 });
 "#;
 
+/// Static file handler as an importable module (no `Deno.serve()`).
+///
+/// Used by the combined dispatcher when a static site has serverless functions
+/// alongside it. The combined entry imports this handler for non-function routes
+/// instead of `_entry.ts` (which starts its own server and would conflict).
+const DENO_STATIC_HANDLER: &str = r#"import { serveDir } from "jsr:@std/http/file-server";
+
+export default async function handler(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  let resp = await serveDir(req, { fsRoot: ".", quiet: true });
+
+  // Handle Vite base path: if /base/assets/foo.css 404s, try /assets/foo.css
+  if (resp.status === 404) {
+    const segments = url.pathname.split("/").filter(Boolean);
+    if (segments.length > 1) {
+      const stripped = "/" + segments.slice(1).join("/");
+      const strippedReq = new Request(new URL(stripped, req.url), req);
+      const strippedResp = await serveDir(strippedReq, { fsRoot: ".", quiet: true });
+      if (strippedResp.status !== 404) {
+        return strippedResp;
+      }
+    }
+  }
+
+  // SPA fallback: serve index.html for non-file routes
+  if (resp.status === 404) {
+    const lastSegment = url.pathname.split("/").pop() ?? "";
+    if (!lastSegment.includes(".")) {
+      return serveDir(new Request(new URL("/index.html", req.url)), {
+        fsRoot: ".",
+        quiet: true,
+      });
+    }
+  }
+
+  return resp;
+}
+"#;
+
 /// Write a Deno static file server entry point (`_entry.ts`) into `output_dir`.
 pub async fn generate_deno_entry(output_dir: &Path) -> Result<(), AppError> {
     let entry_path = output_dir.join("_entry.ts");
@@ -51,6 +90,23 @@ pub async fn generate_deno_entry(output_dir: &Path) -> Result<(), AppError> {
                 entry_path.display()
             ))
         })
+}
+
+/// Write an importable static handler (`_static_handler.ts`) into `output_dir`.
+///
+/// Unlike `_entry.ts`, this module exports a default handler function and does
+/// NOT call `Deno.serve()`, making it safe to import from the combined entry.
+pub async fn generate_static_handler(output_dir: &Path) -> Result<std::path::PathBuf, AppError> {
+    let handler_path = output_dir.join("_static_handler.ts");
+    fs::write(&handler_path, DENO_STATIC_HANDLER)
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!(
+                "failed to write _static_handler.ts to {}: {e}",
+                handler_path.display()
+            ))
+        })?;
+    Ok(handler_path)
 }
 
 /// Generate a pool-compatible entry wrapper for SSR frameworks.

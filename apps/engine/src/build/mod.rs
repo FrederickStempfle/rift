@@ -1028,9 +1028,20 @@ impl BuildManager {
             .await
             {
                 Ok(routes) if !routes.is_empty() => {
-                    // Determine the framework's entry point for the combined dispatcher
+                    // Determine the framework's entry point for the combined dispatcher.
+                    // Static sites need a special handler module that exports a function
+                    // instead of calling Deno.serve() (which would conflict with the
+                    // combined dispatcher's own Deno.serve()).
                     let framework_entry = match &runtime_kind {
-                        RuntimeKind::StaticDeno { dir } => Some(dir.join("_entry.ts")),
+                        RuntimeKind::StaticDeno { dir } => {
+                            match bundler::generate_static_handler(dir).await {
+                                Ok(path) => Some(path),
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "failed to generate static handler for combined entry");
+                                    None
+                                }
+                            }
+                        }
                         RuntimeKind::Functions { dir } => Some(dir.join("_entry.ts")),
                         RuntimeKind::Combined { entry, .. } => Some(entry.clone()),
                         RuntimeKind::NextDeno { .. } | RuntimeKind::NodeServer { .. } => {
