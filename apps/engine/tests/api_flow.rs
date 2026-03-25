@@ -156,11 +156,13 @@ impl TestServer {
 
         let runtime_backend: Arc<dyn rift_engine::runtime::backend::RuntimeBackend> =
             Arc::new(ProcessBackend::new(runtime_manager.clone()));
+        let state_store: Arc<dyn rift_engine::state::StateStore> = Arc::new(LocalStateStore::new());
 
         let build_manager = BuildManager::new(
             pool.clone(),
             Arc::clone(&config),
             runtime_backend.clone(),
+            state_store.clone(),
             config.build_root.clone().into(),
             config.deploy_root.clone().into(),
             log_broadcaster.clone(),
@@ -177,7 +179,6 @@ impl TestServer {
             challenge_store.clone(),
         );
 
-        let state_store: Arc<dyn rift_engine::state::StateStore> = Arc::new(LocalStateStore::new());
         let scheduler = Arc::new(Scheduler::new(
             state_store.clone(),
             "test-worker".to_string(),
