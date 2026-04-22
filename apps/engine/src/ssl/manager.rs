@@ -46,6 +46,31 @@ impl SslManager {
         Ok(())
     }
 
+    /// Forget a previously-provisioned certificate for `domain`: evict it from
+    /// the in-memory resolver and remove its on-disk `cert.pem`/`key.pem`.
+    /// Called when a domain is detached from a project or a project is deleted,
+    /// so subsequent TLS handshakes for the host fall back to the self-signed
+    /// default instead of terminating with a cert tied to a dead route.
+    pub async fn remove_cert(&self, domain: &str) {
+        let domain_lower = domain.to_lowercase();
+        self.cert_resolver.remove_cert(&domain_lower).await;
+
+        let domain_dir = PathBuf::from(&self.config.ssl_dir).join(&domain_lower);
+        match std::fs::remove_dir_all(&domain_dir) {
+            Ok(()) => {
+                tracing::info!(domain = %domain_lower, "removed TLS certificate from disk");
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(
+                    domain = %domain_lower,
+                    error = %e,
+                    "failed to remove TLS certificate directory"
+                );
+            }
+        }
+    }
+
     pub async fn provision_cert(&self, domain: &str) -> anyhow::Result<()> {
         let email = self.config.acme_email.as_deref().unwrap_or_default();
         if email.is_empty() {

@@ -308,6 +308,7 @@ pub async fn update_project(
             if let Some(host) = old_host {
                 state.routing_cache.invalidate_host(&host).await;
                 remove_distributed_route(&state, &host).await;
+                state.ssl_manager.remove_cert(&host).await;
             }
             if let Some(host) = new_host {
                 state.routing_cache.invalidate_host(&host).await;
@@ -343,6 +344,14 @@ pub async fn delete_project(
         }
     }
 
+    // Snapshot attached domains before delete; CASCADE will drop the rows, but
+    // we still need the hostnames to clean up the state store (redis routing
+    // entries) and on-disk TLS certs the project left behind. Without this,
+    // requests to those hosts keep terminating TLS with the stale cert and
+    // routing to the dead project id — returning an opaque 500 to users.
+    let attached_domains =
+        domains::list_domains_for_project(&state.pool, project_id).await?;
+
     let deleted =
         projects::delete_project_for_user(&state.pool, project_id, auth_user.user_id).await?;
     if !deleted {
@@ -357,6 +366,11 @@ pub async fn delete_project(
             state.routing_cache.invalidate_host(&host).await;
             remove_distributed_route(&state, &host).await;
         }
+    }
+    for d in attached_domains {
+        state.routing_cache.invalidate_host(&d.domain).await;
+        remove_distributed_route(&state, &d.domain).await;
+        state.ssl_manager.remove_cert(&d.domain).await;
     }
 
     state
