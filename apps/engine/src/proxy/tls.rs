@@ -90,6 +90,14 @@ impl CertResolver {
         self.certs.read().await.contains_key(&domain.to_lowercase())
     }
 
+    pub async fn remove_cert(&self, domain: &str) -> bool {
+        self.certs
+            .write()
+            .await
+            .remove(&domain.to_lowercase())
+            .is_some()
+    }
+
     pub async fn has_any_certs(&self) -> bool {
         !self.certs.read().await.is_empty()
     }

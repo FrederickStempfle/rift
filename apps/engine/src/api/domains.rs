@@ -223,6 +223,7 @@ pub async fn delete_domain(
         .invalidate_host(&domain_record.domain)
         .await;
     remove_distributed_route(&state, &domain_record.domain).await;
+    state.ssl_manager.remove_cert(&domain_record.domain).await;
 
     state
         .audit_logger
